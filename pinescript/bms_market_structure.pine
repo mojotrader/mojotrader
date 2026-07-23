@@ -122,17 +122,12 @@ if showLTF
                 armL := high
 
 // ================================================================ HIGHER-TIMEFRAME ENGINE
-// Pull the 15m (htfTf) OHLC+time onto this chart. lookahead_off keeps history honest;
-// we only ever ACT on a fully-closed HTF bar (values taken as [1] the moment a new HTF bar opens),
-// so the drawings never repaint.
-[htfHigh, htfLow, htfClose, htfTime] = request.security(syminfo.tickerid, htfTf, [high, low, close, time], lookahead = barmerge.lookahead_off)
-htfNewBar = ta.change(htfTime) != 0
-
-// completed prior HTF bar (confirmed)
-cH = htfHigh[1]
-cL = htfLow[1]
-cC = htfClose[1]
-cT = htfTime[1]
+// Pull the last FULLY-CLOSED HTF bar onto this chart using the canonical non-repaint
+// idiom: request the series offset by one bar ([1]) with lookahead_on. This returns the
+// same confirmed values on history and in realtime, so nothing repaints and no future
+// data leaks. cT changes exactly once per closed HTF bar -> that's when we process it.
+[cH, cL, cC, cT] = request.security(syminfo.tickerid, htfTf, [high[1], low[1], close[1], time[1]], lookahead = barmerge.lookahead_on)
+htfNewBar = ta.change(cT) != 0
 
 if showHTF and htfNewBar and not na(cT)
     if not htfInit
