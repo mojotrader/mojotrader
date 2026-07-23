@@ -1,100 +1,166 @@
 //@version=6
 indicator("BMS Market Structure — ZigZag", overlay=true, max_lines_count=500, max_labels_count=500)
 
-// ---------------------------------------------------------------- Inputs
+// ================================================================ INPUTS
+// ---- Swing rule (shared by both timeframes)
 confClose = input.bool(true, "Confirm swings on candle CLOSE (else on wick break)",
      tooltip="On (your rule): a swing LOW needs a candle to CLOSE above the low-candle's high; a swing HIGH needs a candle to CLOSE below the high-candle's low. Off: confirms the instant a wick breaks the level.")
-lineWidth = input.int(2, "ZigZag width", 1, 5)
-upCol     = input.color(color.new(#26a69a, 0), "Up leg (into a high)")
-dnCol     = input.color(color.new(#ef5350, 0), "Down leg (into a low)")
-showLbls  = input.bool(true, "Show HH / HL / LH / LL labels")
 
-// Close-level markers -------------------------------------------- (new)
-// Marks the CLOSE of the candle that CONFIRMED the swing
-// (the candle that closed above the low-candle's high, or below the high-candle's low).
-showClose  = input.bool(true, "Mark confirming candle's CLOSE with a small horizontal line", group = "Close-level markers")
-markBars   = input.int(3,     "Marker length (bars)", 1, 50, group = "Close-level markers")
-markWidth  = input.int(2,     "Marker width", 1, 5, group = "Close-level markers")
-markLowCol = input.color(color.new(#26a69a, 0), "Swing LOW confirm marker",  group = "Close-level markers")
-markHighCol= input.color(color.new(#ef5350, 0), "Swing HIGH confirm marker", group = "Close-level markers")
+// ---- Chart-timeframe (native) structure
+grpL      = "Chart-timeframe structure"
+showLTF   = input.bool(true,  "Show chart-timeframe structure", group = grpL)
+lineWidth = input.int(2, "ZigZag width", 1, 5, group = grpL)
+upCol     = input.color(color.new(#26a69a, 0), "Up leg (into a high)", group = grpL)
+dnCol     = input.color(color.new(#ef5350, 0), "Down leg (into a low)", group = grpL)
+showLbls  = input.bool(true, "Show HH / HL / LH / LL labels", group = grpL)
+showClose = input.bool(true, "Mark confirming candle's CLOSE", group = grpL)
+markBars  = input.int(3,  "Close-marker length (bars)", 1, 50, group = grpL)
+markWidth = input.int(2,  "Close-marker width", 1, 5, group = grpL)
+markLowCol  = input.color(color.new(#26a69a, 0), "Swing LOW confirm marker",  group = grpL)
+markHighCol = input.color(color.new(#ef5350, 0), "Swing HIGH confirm marker", group = grpL)
 
-// ---------------------------------------------------------------- Confirmed pivots (x stored as TIME)
-var array<int>   pTime = array.new<int>()      // bar time of the pivot
+// ---- Higher-timeframe structure (drawn on THIS chart)
+grpH        = "Higher-timeframe structure"
+showHTF     = input.bool(true,  "Show higher-timeframe structure", group = grpH)
+htfTf       = input.timeframe("15", "Higher timeframe", group = grpH)
+htfLineW    = input.int(3, "HTF ZigZag width", 1, 5, group = grpH)
+htfUp       = input.color(color.new(#2962FF, 0), "HTF up leg (into a high)", group = grpH)
+htfDn       = input.color(color.new(#FF6D00, 0), "HTF down leg (into a low)", group = grpH)
+htfShowLbls = input.bool(true, "Show HTF HH / HL / LH / LL labels", group = grpH)
+htfShowClose= input.bool(true, "Mark HTF confirming candle's CLOSE", group = grpH)
+htfMarkW    = input.int(2, "HTF close-marker width", 1, 6, group = grpH)
+htfMarkLow  = input.color(color.new(#2962FF, 0), "HTF swing LOW confirm marker",  group = grpH)
+htfMarkHigh = input.color(color.new(#FF6D00, 0), "HTF swing HIGH confirm marker", group = grpH)
+
+// bar durations in ms — used to give the close markers a fixed length in time
+barMs = timeframe.in_seconds() * 1000
+htfMs = timeframe.in_seconds(htfTf) * 1000
+
+// ================================================================ STATE (per timeframe)
+// Chart-timeframe pivots + leg state
+var array<int>   pTime = array.new<int>()
 var array<float> pPrc  = array.new<float>()
 var array<int>   pTyp  = array.new<int>()      // 1 = high, -1 = low
-var array<line>  pLine = array.new<line>()
-var array<label> pLbl  = array.new<label>()
+var int   dir  = -1
+var float extP = na
+var int   extT = na
+var float armL = na
 
-// ---------------------------------------------------------------- Current leg state
-var int   dir  = -1    // -1 = down-leg (hunting a swing LOW), 1 = up-leg (hunting a swing HIGH)
-var float extP = na    // running extreme price (candidate pivot)
-var int   extT = na    // bar TIME of that extreme
-var float armL = na    // level a later candle must break/close beyond to confirm
+// Higher-timeframe pivots + leg state
+var array<int>   hTime = array.new<int>()
+var array<float> hPrc  = array.new<float>()
+var array<int>   hTyp  = array.new<int>()
+var int   dirH   = -1
+var float extPH  = na
+var int   extTH  = na
+var float armLH  = na
+var bool  htfInit = false
 
-// bar duration in ms — used to give the close markers a fixed length in time
-barMs = timeframe.in_seconds() * 1000
-
-// ---------------------------------------------------------------- Draw a confirmed pivot
-// tx/prc  = the swing point itself (extreme candle) -> used for the ZigZag + label
-// mtx/mc  = the CONFIRMING candle's time/close      -> used for the close-level marker
-addPivot(int typ, int tx, float prc, int mtx, float mc) =>
+// ================================================================ DRAWING (shared)
+// aTime/aPrc/aTyp = that timeframe's pivot history (for HH/HL/LH/LL naming)
+// tx/prc          = the swing point itself (extreme candle) -> ZigZag + label
+// mtx/mc          = the CONFIRMING candle's time/close      -> close-level marker
+// barLenMs/mLen   = marker length = barLenMs * mLen (in that timeframe's bars)
+drawPivot(array<int> aTime, array<float> aPrc, array<int> aTyp, int typ, int tx, float prc, int mtx, float mc, color legUp, color legDn, int legW, bool lbls, bool markOn, color mLow, color mHigh, int mW, float barLenMs, int mLen) =>
     float prevSame = na
-    if array.size(pTyp) > 0
-        for i = array.size(pTyp) - 1 to 0
-            if array.get(pTyp, i) == typ
-                prevSame := array.get(pPrc, i)
+    if array.size(aTyp) > 0
+        for i = array.size(aTyp) - 1 to 0
+            if array.get(aTyp, i) == typ
+                prevSame := array.get(aPrc, i)
                 break
     string txt = typ == 1 ? (na(prevSame) or prc > prevSame ? "HH" : "LH") : (na(prevSame) or prc < prevSame ? "LL" : "HL")
-    color  c   = typ == 1 ? upCol : dnCol
-    if array.size(pTime) > 0
-        array.push(pLine, line.new(array.get(pTime, array.size(pTime) - 1), array.get(pPrc, array.size(pTime) - 1), tx, prc, xloc = xloc.bar_time, color = c, width = lineWidth))
-    else
-        array.push(pLine, na)
-    if showLbls
-        array.push(pLbl, label.new(tx, prc, txt, xloc = xloc.bar_time, style = typ == 1 ? label.style_label_down : label.style_label_up, color = color.new(c, 80), textcolor = c, size = size.small))
-    else
-        array.push(pLbl, na)
-    // small horizontal line at the CONFIRMING candle's CLOSE level
-    if showClose
-        line.new(mtx, mc, mtx + barMs * markBars, mc, xloc = xloc.bar_time, color = typ == -1 ? markLowCol : markHighCol, width = markWidth)
-    array.push(pTime, tx)
-    array.push(pPrc, prc)
-    array.push(pTyp, typ)
+    color  c   = typ == 1 ? legUp : legDn
+    if array.size(aTime) > 0
+        line.new(array.get(aTime, array.size(aTime) - 1), array.get(aPrc, array.size(aTime) - 1), tx, prc, xloc = xloc.bar_time, color = c, width = legW)
+    if lbls
+        label.new(tx, prc, txt, xloc = xloc.bar_time, style = typ == 1 ? label.style_label_down : label.style_label_up, color = color.new(c, 80), textcolor = c, size = size.small)
+    if markOn
+        line.new(mtx, mc, mtx + int(barLenMs * mLen), mc, xloc = xloc.bar_time, color = typ == -1 ? mLow : mHigh, width = mW)
+    array.push(aTime, tx)
+    array.push(aPrc, prc)
+    array.push(aTyp, typ)
 
-// ---------------------------------------------------------------- Confirmation triggers
+// Thin wrappers so the engines read cleanly
+addPivotLTF(int typ, int tx, float prc, int mtx, float mc) =>
+    drawPivot(pTime, pPrc, pTyp, typ, tx, prc, mtx, mc, upCol, dnCol, lineWidth, showLbls, showClose, markLowCol, markHighCol, markWidth, barMs, markBars)
+
+addPivotHTF(int typ, int tx, float prc, int mtx, float mc) =>
+    drawPivot(hTime, hPrc, hTyp, typ, tx, prc, mtx, mc, htfUp, htfDn, htfLineW, htfShowLbls, htfShowClose, htfMarkLow, htfMarkHigh, htfMarkW, htfMs, markBars)
+
+// ================================================================ CHART-TIMEFRAME ENGINE
 confirmLow  = confClose ? close > armL : high > armL   // break above the low-candle's high  -> swing LOW
 confirmHigh = confClose ? close < armL : low  < armL   // break below the high-candle's low  -> swing HIGH
 
-// ---------------------------------------------------------------- Engine
-if barstate.isfirst
-    dir  := -1
-    extP := low
-    extT := time
-    armL := high
-else
-    if dir == -1
-        // hunting a swing LOW: keep tracking the lowest low; confirm on a CLOSE above that low-candle's HIGH
-        if low < extP
-            extP := low
-            extT := time
-            armL := high
-        else if confirmLow
-            // current bar is the CONFIRMING candle -> mark its close (time, close)
-            addPivot(-1, extT, extP, time, close)
-            dir  := 1
-            extP := high
-            extT := time
-            armL := low
+if showLTF
+    if barstate.isfirst
+        dir  := -1
+        extP := low
+        extT := time
+        armL := high
     else
-        // hunting a swing HIGH: keep tracking the highest high; confirm on a CLOSE below that high-candle's LOW
-        if high > extP
-            extP := high
-            extT := time
-            armL := low
-        else if confirmHigh
-            // current bar is the CONFIRMING candle -> mark its close (time, close)
-            addPivot(1, extT, extP, time, close)
-            dir  := -1
-            extP := low
-            extT := time
-            armL := high
+        if dir == -1
+            if low < extP
+                extP := low
+                extT := time
+                armL := high
+            else if confirmLow
+                addPivotLTF(-1, extT, extP, time, close)   // current bar = confirming candle
+                dir  := 1
+                extP := high
+                extT := time
+                armL := low
+        else
+            if high > extP
+                extP := high
+                extT := time
+                armL := low
+            else if confirmHigh
+                addPivotLTF(1, extT, extP, time, close)
+                dir  := -1
+                extP := low
+                extT := time
+                armL := high
+
+// ================================================================ HIGHER-TIMEFRAME ENGINE
+// Pull the 15m (htfTf) OHLC+time onto this chart. lookahead_off keeps history honest;
+// we only ever ACT on a fully-closed HTF bar (values taken as [1] the moment a new HTF bar opens),
+// so the drawings never repaint.
+[htfHigh, htfLow, htfClose, htfTime] = request.security(syminfo.tickerid, htfTf, [high, low, close, time], lookahead = barmerge.lookahead_off)
+htfNewBar = ta.change(htfTime) != 0
+
+// completed prior HTF bar (confirmed)
+cH = htfHigh[1]
+cL = htfLow[1]
+cC = htfClose[1]
+cT = htfTime[1]
+
+if showHTF and htfNewBar and not na(cT)
+    if not htfInit
+        dirH   := -1
+        extPH  := cL
+        extTH  := cT
+        armLH  := cH
+        htfInit := true
+    else
+        if dirH == -1
+            if cL < extPH
+                extPH := cL
+                extTH := cT
+                armLH := cH
+            else if (confClose ? cC > armLH : cH > armLH)
+                addPivotHTF(-1, extTH, extPH, cT, cC)   // completed HTF bar = confirming candle
+                dirH  := 1
+                extPH := cH
+                extTH := cT
+                armLH := cL
+        else
+            if cH > extPH
+                extPH := cH
+                extTH := cT
+                armLH := cL
+            else if (confClose ? cC < armLH : cL < armLH)
+                addPivotHTF(1, extTH, extPH, cT, cC)
+                dirH  := -1
+                extPH := cL
+                extTH := cT
+                armLH := cH
