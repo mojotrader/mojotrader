@@ -1,0 +1,100 @@
+//@version=6
+indicator("BMS Market Structure — ZigZag", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// ---------------------------------------------------------------- Inputs
+confClose = input.bool(true, "Confirm swings on candle CLOSE (else on wick break)",
+     tooltip="On (your rule): a swing LOW needs a candle to CLOSE above the low-candle's high; a swing HIGH needs a candle to CLOSE below the high-candle's low. Off: confirms the instant a wick breaks the level.")
+lineWidth = input.int(2, "ZigZag width", 1, 5)
+upCol     = input.color(color.new(#26a69a, 0), "Up leg (into a high)")
+dnCol     = input.color(color.new(#ef5350, 0), "Down leg (into a low)")
+showLbls  = input.bool(true, "Show HH / HL / LH / LL labels")
+
+// Close-level swing markers -------------------------------------- (new)
+showClose = input.bool(true,  "Mark swing candle CLOSE with a small horizontal line", group = "Close-level markers")
+markBars  = input.int(3,      "Marker length (bars)", 1, 50, group = "Close-level markers")
+markWidth = input.int(2,      "Marker width", 1, 5, group = "Close-level markers")
+markUpCol = input.color(color.new(#26a69a, 0), "Swing HIGH close marker", group = "Close-level markers")
+markDnCol = input.color(color.new(#ef5350, 0), "Swing LOW  close marker", group = "Close-level markers")
+
+// ---------------------------------------------------------------- Confirmed pivots (x stored as TIME)
+var array<int>   pTime = array.new<int>()      // bar time of the pivot
+var array<float> pPrc  = array.new<float>()
+var array<int>   pTyp  = array.new<int>()      // 1 = high, -1 = low
+var array<line>  pLine = array.new<line>()
+var array<label> pLbl  = array.new<label>()
+
+// ---------------------------------------------------------------- Current leg state
+var int   dir  = -1    // -1 = down-leg (hunting a swing LOW), 1 = up-leg (hunting a swing HIGH)
+var float extP = na    // running extreme price (candidate pivot)
+var int   extT = na    // bar TIME of that extreme
+var float extC = na    // CLOSE of the extreme (candidate pivot) candle
+var float armL = na    // level a later candle must break/close beyond to confirm
+
+// bar duration in ms — used to give the close markers a fixed length in time
+barMs = timeframe.in_seconds() * 1000
+
+// ---------------------------------------------------------------- Draw a confirmed pivot
+addPivot(int typ, int tx, float prc, float clevel) =>
+    float prevSame = na
+    if array.size(pTyp) > 0
+        for i = array.size(pTyp) - 1 to 0
+            if array.get(pTyp, i) == typ
+                prevSame := array.get(pPrc, i)
+                break
+    string txt = typ == 1 ? (na(prevSame) or prc > prevSame ? "HH" : "LH") : (na(prevSame) or prc < prevSame ? "LL" : "HL")
+    color  c   = typ == 1 ? upCol : dnCol
+    if array.size(pTime) > 0
+        array.push(pLine, line.new(array.get(pTime, array.size(pTime) - 1), array.get(pPrc, array.size(pTime) - 1), tx, prc, xloc = xloc.bar_time, color = c, width = lineWidth))
+    else
+        array.push(pLine, na)
+    if showLbls
+        array.push(pLbl, label.new(tx, prc, txt, xloc = xloc.bar_time, style = typ == 1 ? label.style_label_down : label.style_label_up, color = color.new(c, 80), textcolor = c, size = size.small))
+    else
+        array.push(pLbl, na)
+    // small horizontal line at the swing candle's CLOSE level (drawn the moment the swing is confirmed)
+    if showClose
+        line.new(tx, clevel, tx + barMs * markBars, clevel, xloc = xloc.bar_time, color = typ == 1 ? markUpCol : markDnCol, width = markWidth)
+    array.push(pTime, tx)
+    array.push(pPrc, prc)
+    array.push(pTyp, typ)
+
+// ---------------------------------------------------------------- Confirmation triggers
+confirmLow  = confClose ? close > armL : high > armL   // break above the low-candle's high  -> swing LOW
+confirmHigh = confClose ? close < armL : low  < armL   // break below the high-candle's low  -> swing HIGH
+
+// ---------------------------------------------------------------- Engine
+if barstate.isfirst
+    dir  := -1
+    extP := low
+    extT := time
+    extC := close
+    armL := high
+else
+    if dir == -1
+        // hunting a swing LOW: keep tracking the lowest low; confirm on a CLOSE above that low-candle's HIGH
+        if low < extP
+            extP := low
+            extT := time
+            extC := close
+            armL := high
+        else if confirmLow
+            addPivot(-1, extT, extP, extC)
+            dir  := 1
+            extP := high
+            extT := time
+            extC := close
+            armL := low
+    else
+        // hunting a swing HIGH: keep tracking the highest high; confirm on a CLOSE below that high-candle's LOW
+        if high > extP
+            extP := high
+            extT := time
+            extC := close
+            armL := low
+        else if confirmHigh
+            addPivot(1, extT, extP, extC)
+            dir  := -1
+            extP := low
+            extT := time
+            extC := close
+            armL := high
