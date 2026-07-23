@@ -8,7 +8,7 @@ confClose = input.bool(true, "Confirm swings on candle CLOSE (else on wick break
 
 // ---- Chart-timeframe (native) structure
 grpL      = "Chart-timeframe structure"
-showLTF   = input.bool(true,  "Show chart-timeframe structure", group = grpL)
+showLTF   = input.bool(false, "Show chart-timeframe structure", group = grpL)
 lineWidth = input.int(2, "ZigZag width", 1, 5, group = grpL)
 upCol     = input.color(color.new(#26a69a, 0), "Up leg (into a high)", group = grpL)
 dnCol     = input.color(color.new(#ef5350, 0), "Down leg (into a low)", group = grpL)
