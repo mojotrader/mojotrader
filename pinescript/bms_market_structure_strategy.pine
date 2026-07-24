@@ -393,6 +393,10 @@ cLow      = useLTFsrc ? confLowLTF  : confLowHTF
 cHigh     = useLTFsrc ? confHighLTF : confHighHTF
 entryPx   = close
 
+// live count + newest swing point of the selected source (for BE "last swing touched")
+selSize      = useLTFsrc ? array.size(pTyp) : array.size(hTyp)
+selLastSwing = useLTFsrc ? (array.size(pPrc) > 0 ? array.get(pPrc, array.size(pPrc) - 1) : na) : (array.size(hPrc) > 0 ? array.get(hPrc, array.size(hPrc) - 1) : na)
+
 // ---- STOP price for a potential entry this bar (per chosen method)
 float longStopCalc = na
 if slMethod == "Points"
@@ -445,7 +449,7 @@ var float curStop  = na
 var float curTP    = na
 var float curEntry = na
 var float curRisk  = na
-var float curTgt   = na   // target swing for BE "last swing touched"
+var int   entPivCnt = 0   // swing count at entry -> BE waits for a NEW swing after entry
 var bool  beDone   = false
 
 canEnterLong  = longSignal  and longOK  and inEntryWindow and not flatten and not na(longStopCalc)  and passRRlong
@@ -458,7 +462,7 @@ if canEnterLong
     curTP    := longTPCalc
     curEntry := entryPx
     curRisk  := longRisk
-    curTgt   := lastHigh
+    entPivCnt := selSize
     beDone   := false
 if canEnterShort
     strategy.entry("S", strategy.short, qty = qty)
@@ -466,7 +470,7 @@ if canEnterShort
     curTP    := shortTPCalc
     curEntry := entryPx
     curRisk  := shortRisk
-    curTgt   := lastLow
+    entPivCnt := selSize
     beDone   := false
 
 // ---- BREAKEVEN: raise stop to entry(+lock) at R-multiple or when target swing is touched
@@ -476,8 +480,9 @@ if useBE and not beDone and (posLong or posShort) and not na(curEntry)
     bool trig = false
     if beMode == "R multiple" and not na(curRisk)
         trig := posLong ? high >= curEntry + beTrigR * curRisk : low <= curEntry - beTrigR * curRisk
-    else if beMode == "Last swing touched" and not na(curTgt)
-        trig := posLong ? high >= curTgt : low <= curTgt
+    else if beMode == "Last swing touched"
+        // a NEW swing must have formed after entry, and price must touch it
+        trig := selSize > entPivCnt and not na(selLastSwing) and high >= selLastSwing and low <= selLastSwing
     if trig
         float bePrice = posLong ? curEntry + beLockPts : curEntry - beLockPts
         curStop := posLong ? math.max(curStop, bePrice) : math.min(curStop, bePrice)
