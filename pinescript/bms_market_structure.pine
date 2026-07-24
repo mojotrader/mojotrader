@@ -5,6 +5,8 @@ indicator("BMS Market Structure — ZigZag", overlay=true, max_lines_count=500, 
 // ---- Swing rule (shared by both timeframes)
 confClose = input.bool(true, "Confirm swings on candle CLOSE (else on wick break)",
      tooltip="On (your rule): a swing LOW needs a candle to CLOSE above the low-candle's high; a swing HIGH needs a candle to CLOSE below the high-candle's low. Off: confirms the instant a wick breaks the level.")
+useEngulf = input.bool(true, "Instant swing on a full engulfing candle",
+     tooltip="If a candle takes the PREVIOUS candle's high and CLOSES below its low, that candle's high is an immediate swing HIGH. Mirror: takes the previous low and closes above its high -> immediate swing LOW. No waiting for the normal confirmation.")
 
 // ---- Chart-timeframe (native) structure
 grpL      = "Chart-timeframe structure"
@@ -55,6 +57,8 @@ var float extPH  = na
 var int   extTH  = na
 var float armLH  = na
 var bool  htfInit = false
+var float prevHtfH = na    // previous CLOSED HTF bar high/low, for HTF engulf detection
+var float prevHtfL = na
 
 // ================================================================ DRAWING (shared)
 // aTime/aPrc/aTyp = that timeframe's pivot history (for HH/HL/LH/LL naming)
@@ -91,6 +95,10 @@ addPivotHTF(int typ, int tx, float prc, int mtx, float mc) =>
 confirmLow  = confClose ? close > armL : high > armL   // break above the low-candle's high  -> swing LOW
 confirmHigh = confClose ? close < armL : low  < armL   // break below the high-candle's low  -> swing HIGH
 
+// Full-engulf instant swings: a candle that TAKES the prior candle's extreme and CLOSES beyond its opposite side
+bearEngulf = high > high[1] and close < low[1]   // took prior HIGH, closed below prior LOW  -> instant swing HIGH
+bullEngulf = low  < low[1]  and close > high[1]  // took prior LOW,  closed above prior HIGH -> instant swing LOW
+
 if showLTF
     if barstate.isfirst
         dir  := -1
@@ -99,7 +107,18 @@ if showLTF
         armL := high
     else
         if dir == -1
-            if low < extP
+            // hunting a swing LOW
+            if useEngulf and bullEngulf
+                // took prior low AND closed above prior high -> instant swing LOW
+                if low < extP
+                    extP := low
+                    extT := time
+                addPivotLTF(-1, extT, extP, time, close)
+                dir  := 1
+                extP := high
+                extT := time
+                armL := low
+            else if low < extP
                 extP := low
                 extT := time
                 armL := high
@@ -110,7 +129,18 @@ if showLTF
                 extT := time
                 armL := low
         else
-            if high > extP
+            // hunting a swing HIGH
+            if useEngulf and bearEngulf
+                // took prior high AND closed below prior low -> instant swing HIGH
+                if high > extP
+                    extP := high
+                    extT := time
+                addPivotLTF(1, extT, extP, time, close)
+                dir  := -1
+                extP := low
+                extT := time
+                armL := high
+            else if high > extP
                 extP := high
                 extT := time
                 armL := low
@@ -130,6 +160,9 @@ if showLTF
 htfNewBar = ta.change(cT) != 0
 
 if showHTF and htfNewBar and not na(cT)
+    // engulf detection against the PREVIOUS closed HTF bar
+    bullEngulfH = useEngulf and not na(prevHtfL) and cL < prevHtfL and cC > prevHtfH
+    bearEngulfH = useEngulf and not na(prevHtfH) and cH > prevHtfH and cC < prevHtfL
     if not htfInit
         dirH   := -1
         extPH  := cL
@@ -138,7 +171,17 @@ if showHTF and htfNewBar and not na(cT)
         htfInit := true
     else
         if dirH == -1
-            if cL < extPH
+            // hunting a swing LOW
+            if bullEngulfH
+                if cL < extPH
+                    extPH := cL
+                    extTH := cT
+                addPivotHTF(-1, extTH, extPH, cT, cC)
+                dirH  := 1
+                extPH := cH
+                extTH := cT
+                armLH := cL
+            else if cL < extPH
                 extPH := cL
                 extTH := cT
                 armLH := cH
@@ -149,7 +192,17 @@ if showHTF and htfNewBar and not na(cT)
                 extTH := cT
                 armLH := cL
         else
-            if cH > extPH
+            // hunting a swing HIGH
+            if bearEngulfH
+                if cH > extPH
+                    extPH := cH
+                    extTH := cT
+                addPivotHTF(1, extTH, extPH, cT, cC)
+                dirH  := -1
+                extPH := cL
+                extTH := cT
+                armLH := cH
+            else if cH > extPH
                 extPH := cH
                 extTH := cT
                 armLH := cL
@@ -159,6 +212,8 @@ if showHTF and htfNewBar and not na(cT)
                 extPH := cL
                 extTH := cT
                 armLH := cH
+    prevHtfH := cH
+    prevHtfL := cL
 
 // ================================================================ ANCHORED VWAPs (session opens)
 grpV      = "Anchored VWAPs"
