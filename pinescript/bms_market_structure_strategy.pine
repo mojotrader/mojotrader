@@ -1,0 +1,333 @@
+//@version=6
+strategy("BMS Market Structure — Strategy", overlay = true, max_lines_count = 500, max_labels_count = 500, pyramiding = 0, default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = true, calc_on_every_tick = false)
+
+// ================================================================ INPUTS
+// ---- Swing rule (shared by both timeframes)
+confClose = input.bool(true, "Confirm swings on candle CLOSE (else on wick break)",
+     tooltip="On (your rule): a swing LOW needs a candle to CLOSE above the low-candle's high; a swing HIGH needs a candle to CLOSE below the high-candle's low. Off: confirms the instant a wick breaks the level.")
+useEngulf = input.bool(true, "Instant swing on a full engulfing candle",
+     tooltip="If a candle takes the PREVIOUS candle's high and CLOSES below its low, that candle's high is an immediate swing HIGH. Mirror: takes the previous low and closes above its high -> immediate swing LOW.")
+
+// ---- Chart-timeframe (native) structure
+grpL      = "Chart-timeframe structure"
+showLTF   = input.bool(true,  "Show chart-timeframe structure", group = grpL)
+lineWidth = input.int(2, "ZigZag width", 1, 5, group = grpL)
+upCol     = input.color(color.new(#26a69a, 0), "Up leg (into a high)", group = grpL)
+dnCol     = input.color(color.new(#ef5350, 0), "Down leg (into a low)", group = grpL)
+showLbls  = input.bool(true, "Show HH / HL / LH / LL labels", group = grpL)
+showClose = input.bool(true, "Mark confirming candle's CLOSE", group = grpL)
+markBars  = input.int(3,  "Close-marker length (bars)", 1, 50, group = grpL)
+markWidth = input.int(2,  "Close-marker width", 1, 5, group = grpL)
+markLowCol  = input.color(color.new(#26a69a, 0), "Swing LOW confirm marker",  group = grpL)
+markHighCol = input.color(color.new(#ef5350, 0), "Swing HIGH confirm marker", group = grpL)
+
+// ---- Higher-timeframe structure (drawn on THIS chart)
+grpH        = "Higher-timeframe structure"
+showHTF     = input.bool(true,  "Show higher-timeframe structure", group = grpH)
+htfTf       = input.timeframe("15", "Higher timeframe", group = grpH)
+htfLineW    = input.int(3, "HTF ZigZag width", 1, 5, group = grpH)
+htfUp       = input.color(color.new(#2962FF, 0), "HTF up leg (into a high)", group = grpH)
+htfDn       = input.color(color.new(#FF6D00, 0), "HTF down leg (into a low)", group = grpH)
+htfShowLbls = input.bool(true, "Show HTF HH / HL / LH / LL labels", group = grpH)
+htfShowClose= input.bool(true, "Mark HTF confirming candle's CLOSE", group = grpH)
+htfMarkW    = input.int(2, "HTF close-marker width", 1, 6, group = grpH)
+htfMarkLow  = input.color(color.new(#2962FF, 0), "HTF swing LOW confirm marker",  group = grpH)
+htfMarkHigh = input.color(color.new(#FF6D00, 0), "HTF swing HIGH confirm marker", group = grpH)
+
+// bar durations in ms — used to give the close markers a fixed length in time
+barMs = timeframe.in_seconds() * 1000
+htfMs = timeframe.in_seconds(htfTf) * 1000
+
+// ================================================================ STATE (per timeframe)
+var array<int>   pTime = array.new<int>()
+var array<float> pPrc  = array.new<float>()
+var array<int>   pTyp  = array.new<int>()      // 1 = high, -1 = low
+var int   dir  = -1
+var float extP = na
+var int   extT = na
+var float armL = na
+
+var array<int>   hTime = array.new<int>()
+var array<float> hPrc  = array.new<float>()
+var array<int>   hTyp  = array.new<int>()
+var int   dirH   = -1
+var float extPH  = na
+var int   extTH  = na
+var float armLH  = na
+var bool  htfInit = false
+var float prevHtfH = na
+var float prevHtfL = na
+
+// Per-bar swing signals (which structure event, if any, fired on this bar)
+bool sigLongLTF  = false   // chart-TF swing LOW confirmed  -> bullish
+bool sigShortLTF = false   // chart-TF swing HIGH confirmed -> bearish
+bool sigLongHTF  = false
+bool sigShortHTF = false
+
+// ================================================================ DRAWING (shared)
+// drawOn gates the visuals; the arrays are ALWAYS pushed so HH/HL/LH/LL naming stays correct
+drawPivot(array<int> aTime, array<float> aPrc, array<int> aTyp, int typ, int tx, float prc, int mtx, float mc, bool drawOn, color legUp, color legDn, int legW, bool lbls, bool markOn, color mLow, color mHigh, int mW, float barLenMs, int mLen) =>
+    float prevSame = na
+    if array.size(aTyp) > 0
+        for i = array.size(aTyp) - 1 to 0
+            if array.get(aTyp, i) == typ
+                prevSame := array.get(aPrc, i)
+                break
+    string txt = typ == 1 ? (na(prevSame) or prc > prevSame ? "HH" : "LH") : (na(prevSame) or prc < prevSame ? "LL" : "HL")
+    color  c   = typ == 1 ? legUp : legDn
+    if drawOn and array.size(aTime) > 0
+        line.new(array.get(aTime, array.size(aTime) - 1), array.get(aPrc, array.size(aTime) - 1), tx, prc, xloc = xloc.bar_time, color = c, width = legW)
+    if drawOn and lbls
+        label.new(tx, prc, txt, xloc = xloc.bar_time, style = typ == 1 ? label.style_label_down : label.style_label_up, color = color.new(c, 80), textcolor = c, size = size.small)
+    if drawOn and markOn
+        line.new(mtx, mc, mtx + int(barLenMs * mLen), mc, xloc = xloc.bar_time, color = typ == -1 ? mLow : mHigh, width = mW)
+    array.push(aTime, tx)
+    array.push(aPrc, prc)
+    array.push(aTyp, typ)
+
+addPivotLTF(int typ, int tx, float prc, int mtx, float mc) =>
+    drawPivot(pTime, pPrc, pTyp, typ, tx, prc, mtx, mc, showLTF, upCol, dnCol, lineWidth, showLbls, showClose, markLowCol, markHighCol, markWidth, barMs, markBars)
+
+addPivotHTF(int typ, int tx, float prc, int mtx, float mc) =>
+    drawPivot(hTime, hPrc, hTyp, typ, tx, prc, mtx, mc, showHTF, htfUp, htfDn, htfLineW, htfShowLbls, htfShowClose, htfMarkLow, htfMarkHigh, htfMarkW, htfMs, markBars)
+
+// ================================================================ CHART-TIMEFRAME ENGINE (always runs -> drives signals)
+confirmLow  = confClose ? close > armL : high > armL
+confirmHigh = confClose ? close < armL : low  < armL
+bearEngulf  = high > high[1] and close < low[1]   // took prior HIGH, closed below prior LOW  -> instant swing HIGH
+bullEngulf  = low  < low[1]  and close > high[1]  // took prior LOW,  closed above prior HIGH -> instant swing LOW
+
+if barstate.isfirst
+    dir  := -1
+    extP := low
+    extT := time
+    armL := high
+else
+    if dir == -1
+        if useEngulf and bullEngulf
+            if low < extP
+                extP := low
+                extT := time
+            addPivotLTF(-1, extT, extP, time, close)
+            sigLongLTF := true
+            dir  := 1
+            extP := high
+            extT := time
+            armL := low
+        else if low < extP
+            extP := low
+            extT := time
+            armL := high
+        else if confirmLow
+            addPivotLTF(-1, extT, extP, time, close)
+            sigLongLTF := true
+            dir  := 1
+            extP := high
+            extT := time
+            armL := low
+    else
+        if useEngulf and bearEngulf
+            if high > extP
+                extP := high
+                extT := time
+            addPivotLTF(1, extT, extP, time, close)
+            sigShortLTF := true
+            dir  := -1
+            extP := low
+            extT := time
+            armL := high
+        else if high > extP
+            extP := high
+            extT := time
+            armL := low
+        else if confirmHigh
+            addPivotLTF(1, extT, extP, time, close)
+            sigShortLTF := true
+            dir  := -1
+            extP := low
+            extT := time
+            armL := high
+
+// ================================================================ HIGHER-TIMEFRAME ENGINE (non-repainting)
+[cH, cL, cC, cT] = request.security(syminfo.tickerid, htfTf, [high[1], low[1], close[1], time[1]], lookahead = barmerge.lookahead_on)
+htfNewBar = ta.change(cT) != 0
+
+if htfNewBar and not na(cT)
+    bullEngulfH = useEngulf and not na(prevHtfL) and cL < prevHtfL and cC > prevHtfH
+    bearEngulfH = useEngulf and not na(prevHtfH) and cH > prevHtfH and cC < prevHtfL
+    if not htfInit
+        dirH   := -1
+        extPH  := cL
+        extTH  := cT
+        armLH  := cH
+        htfInit := true
+    else
+        if dirH == -1
+            if bullEngulfH
+                if cL < extPH
+                    extPH := cL
+                    extTH := cT
+                addPivotHTF(-1, extTH, extPH, cT, cC)
+                sigLongHTF := true
+                dirH  := 1
+                extPH := cH
+                extTH := cT
+                armLH := cL
+            else if cL < extPH
+                extPH := cL
+                extTH := cT
+                armLH := cH
+            else if (confClose ? cC > armLH : cH > armLH)
+                addPivotHTF(-1, extTH, extPH, cT, cC)
+                sigLongHTF := true
+                dirH  := 1
+                extPH := cH
+                extTH := cT
+                armLH := cL
+        else
+            if bearEngulfH
+                if cH > extPH
+                    extPH := cH
+                    extTH := cT
+                addPivotHTF(1, extTH, extPH, cT, cC)
+                sigShortHTF := true
+                dirH  := -1
+                extPH := cL
+                extTH := cT
+                armLH := cH
+            else if cH > extPH
+                extPH := cH
+                extTH := cT
+                armLH := cL
+            else if (confClose ? cC < armLH : cL < armLH)
+                addPivotHTF(1, extTH, extPH, cT, cC)
+                sigShortHTF := true
+                dirH  := -1
+                extPH := cL
+                extTH := cT
+                armLH := cH
+    prevHtfH := cH
+    prevHtfL := cL
+
+// ================================================================ ANCHORED VWAPs (session opens)
+grpV      = "Anchored VWAPs"
+vTz       = input.string("America/New_York", "Anchor / session timezone", group = grpV)
+showAsia  = input.bool(true, "Show Asia VWAP (18:00)",     group = grpV)
+showLon   = input.bool(true, "Show London VWAP (02:00)",   group = grpV)
+showNy    = input.bool(true, "Show New York VWAP (09:30)", group = grpV)
+asiaH     = input.int(18, "Asia open hour",     0, 23, group = grpV)
+asiaM     = input.int(0,  "Asia open minute",   0, 59, group = grpV)
+lonH      = input.int(2,  "London open hour",   0, 23, group = grpV)
+lonM      = input.int(0,  "London open minute", 0, 59, group = grpV)
+nyH       = input.int(9,  "New York open hour",   0, 23, group = grpV)
+nyM       = input.int(30, "New York open minute", 0, 59, group = grpV)
+asiaCol   = input.color(color.new(#ab47bc, 0), "Asia VWAP color",     group = grpV)
+lonCol    = input.color(color.new(#ffa726, 0), "London VWAP color",   group = grpV)
+nyCol     = input.color(color.new(#26c6da, 0), "New York VWAP color", group = grpV)
+vwapWidth = input.int(2, "VWAP line width", 1, 5, group = grpV)
+
+// ---- Trade direction filter (only trade with the selected VWAP trend)
+grpF       = "Trade direction filter (VWAP)"
+useAsiaDir = input.bool(false, "Only trade in direction of Asia VWAP",     group = grpF)
+useLonDir  = input.bool(false, "Only trade in direction of London VWAP",   group = grpF)
+useNyDir   = input.bool(false, "Only trade in direction of New York VWAP", group = grpF)
+showBias   = input.bool(true,  "Show VWAP trade-bias table",               group = grpF)
+
+newAnchor(int hh, int mm) =>
+    a = timestamp(vTz, year(time, vTz), month(time, vTz), dayofmonth(time, vTz), hh, mm)
+    time >= a and time[1] < a
+
+avwap(bool reset) =>
+    var float pv = 0.0
+    var float vv = 0.0
+    if reset
+        pv := 0.0
+        vv := 0.0
+    pv += hlc3 * volume
+    vv += volume
+    vv != 0 ? pv / vv : na
+
+asiaReset = newAnchor(asiaH, asiaM)
+lonReset  = newAnchor(lonH,  lonM)
+nyReset   = newAnchor(nyH,   nyM)
+asiaVwap  = avwap(asiaReset)
+lonVwap   = avwap(lonReset)
+nyVwap    = avwap(nyReset)
+
+plot(showAsia ? (asiaReset ? na : asiaVwap) : na, "Asia VWAP",     color = asiaCol, linewidth = vwapWidth, style = plot.style_linebr)
+plot(showLon  ? (lonReset  ? na : lonVwap)  : na, "London VWAP",   color = lonCol,  linewidth = vwapWidth, style = plot.style_linebr)
+plot(showNy   ? (nyReset   ? na : nyVwap)   : na, "New York VWAP", color = nyCol,   linewidth = vwapWidth, style = plot.style_linebr)
+
+vdir(float v) => na(v) ? 0 : close > v ? 1 : close < v ? -1 : 0
+dirAsia = vdir(asiaVwap)
+dirLon  = vdir(lonVwap)
+dirNy   = vdir(nyVwap)
+
+longOK  = (not useAsiaDir or dirAsia == 1)  and (not useLonDir or dirLon == 1)  and (not useNyDir or dirNy == 1)
+shortOK = (not useAsiaDir or dirAsia == -1) and (not useLonDir or dirLon == -1) and (not useNyDir or dirNy == -1)
+noFilter = not useAsiaDir and not useLonDir and not useNyDir
+tradeBias = longOK and not shortOK ? 1 : shortOK and not longOK ? -1 : 0
+
+dtxt(int d) => d == 1 ? "▲ up" : d == -1 ? "▼ down" : "—"
+dcol(int d) => d == 1 ? color.teal : d == -1 ? color.red : color.gray
+var table biasT = table.new(position.top_right, 2, 5, border_width = 1)
+if showBias and barstate.islast
+    table.cell(biasT, 0, 0, "VWAP",  text_color = color.white, bgcolor = color.new(color.gray, 20))
+    table.cell(biasT, 1, 0, "trend", text_color = color.white, bgcolor = color.new(color.gray, 20))
+    table.cell(biasT, 0, 1, "Asia",     text_color = color.white)
+    table.cell(biasT, 1, 1, dtxt(dirAsia), text_color = dcol(dirAsia))
+    table.cell(biasT, 0, 2, "London",   text_color = color.white)
+    table.cell(biasT, 1, 2, dtxt(dirLon),  text_color = dcol(dirLon))
+    table.cell(biasT, 0, 3, "New York", text_color = color.white)
+    table.cell(biasT, 1, 3, dtxt(dirNy),   text_color = dcol(dirNy))
+    string btxt = noFilter ? "no filter" : tradeBias == 1 ? "LONG only" : tradeBias == -1 ? "SHORT only" : "no trade"
+    table.cell(biasT, 0, 4, "Allowed", text_color = color.white, bgcolor = color.new(color.gray, 40))
+    table.cell(biasT, 1, 4, btxt, text_color = color.yellow, bgcolor = color.new(color.gray, 40))
+
+// ================================================================ STRATEGY — ENTRIES / EXITS
+grpT     = "Strategy — trading"
+entrySrc = input.string("Chart timeframe", "Entry signal source", options = ["Chart timeframe", "Higher timeframe"], group = grpT)
+qty      = input.float(1, "Contracts", minval = 1, group = grpT)
+oppExit  = input.bool(true,  "Exit on opposite-direction signal", group = grpT)
+useStop  = input.bool(true,  "Use stop loss", group = grpT)
+stopPts  = input.float(20, "Stop loss (points)",   minval = 0, group = grpT)
+useTP    = input.bool(true,  "Use take profit", group = grpT)
+tpPts    = input.float(40, "Take profit (points)", minval = 0, group = grpT)
+
+grpTime   = "Strategy — session times (in Anchor timezone)"
+entStartH = input.int(9,  "Entry window START hour",   0, 23, group = grpTime)
+entStartM = input.int(30, "Entry window START minute", 0, 59, group = grpTime)
+cutH      = input.int(15, "Entry CUTOFF hour",   0, 23, group = grpTime)
+cutM      = input.int(0,  "Entry CUTOFF minute", 0, 59, group = grpTime)
+useFlat   = input.bool(true, "Force flat at session end", group = grpTime)
+flatH     = input.int(15, "Flatten hour",   0, 23, group = grpTime)
+flatM     = input.int(55, "Flatten minute", 0, 59, group = grpTime)
+
+tod           = hour(time, vTz) * 60 + minute(time, vTz)
+inEntryWindow = tod >= (entStartH * 60 + entStartM) and tod <= (cutH * 60 + cutM)
+flatten       = useFlat and tod >= (flatH * 60 + flatM)
+
+longSignal  = entrySrc == "Higher timeframe" ? sigLongHTF  : sigLongLTF
+shortSignal = entrySrc == "Higher timeframe" ? sigShortHTF : sigShortLTF
+
+// ---- ENTRIES — gated by the cutoff window AND the VWAP direction filter
+if longSignal and longOK and inEntryWindow and not flatten
+    strategy.entry("L", strategy.long, qty = qty)
+if shortSignal and shortOK and inEntryWindow and not flatten
+    strategy.entry("S", strategy.short, qty = qty)
+
+// ---- EXITS — NEVER gated by the cutoff time
+// 1) opposite-direction signal closes an open trade (this is the bug you hit)
+if oppExit and shortSignal
+    strategy.close("L", comment = "opp")
+if oppExit and longSignal
+    strategy.close("S", comment = "opp")
+
+// 2) protective stop / target stay active for as long as the position is open
+if useStop or useTP
+    strategy.exit("L-x", from_entry = "L", stop = useStop ? strategy.position_avg_price - stopPts : na, limit = useTP ? strategy.position_avg_price + tpPts : na)
+    strategy.exit("S-x", from_entry = "S", stop = useStop ? strategy.position_avg_price + stopPts : na, limit = useTP ? strategy.position_avg_price - tpPts : na)
+
+// 3) forced flat at session end
+if flatten
+    strategy.close_all(comment = "EOD flat")
