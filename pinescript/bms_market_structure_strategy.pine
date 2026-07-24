@@ -58,14 +58,17 @@ var bool  htfInit = false
 var float prevHtfH = na
 var float prevHtfL = na
 
-// Per-bar swing signals (which structure event, if any, fired on this bar)
-bool sigLongLTF  = false   // chart-TF swing LOW confirmed  -> bullish
-bool sigShortLTF = false   // chart-TF swing HIGH confirmed -> bearish
+// Per-bar swing signals + the confirming candle's extremes for each source
+bool sigLongLTF  = false
+bool sigShortLTF = false
 bool sigLongHTF  = false
 bool sigShortHTF = false
+var float confLowLTF  = na
+var float confHighLTF = na
+var float confLowHTF  = na
+var float confHighHTF = na
 
 // ================================================================ DRAWING (shared)
-// drawOn gates the visuals; the arrays are ALWAYS pushed so HH/HL/LH/LL naming stays correct
 drawPivot(array<int> aTime, array<float> aPrc, array<int> aTyp, int typ, int tx, float prc, int mtx, float mc, bool drawOn, color legUp, color legDn, int legW, bool lbls, bool markOn, color mLow, color mHigh, int mW, float barLenMs, int mLen) =>
     float prevSame = na
     if array.size(aTyp) > 0
@@ -91,11 +94,21 @@ addPivotLTF(int typ, int tx, float prc, int mtx, float mc) =>
 addPivotHTF(int typ, int tx, float prc, int mtx, float mc) =>
     drawPivot(hTime, hPrc, hTyp, typ, tx, prc, mtx, mc, showHTF, htfUp, htfDn, htfLineW, htfShowLbls, htfShowClose, htfMarkLow, htfMarkHigh, htfMarkW, htfMs, markBars)
 
+// helper: most recent pivot price of a given type (1 = high, -1 = low)
+lastPivotPrice(array<int> aTyp, array<float> aPrc, int want) =>
+    float r = na
+    if array.size(aTyp) > 0
+        for i = array.size(aTyp) - 1 to 0
+            if array.get(aTyp, i) == want
+                r := array.get(aPrc, i)
+                break
+    r
+
 // ================================================================ CHART-TIMEFRAME ENGINE (always runs -> drives signals)
 confirmLow  = confClose ? close > armL : high > armL
 confirmHigh = confClose ? close < armL : low  < armL
-bearEngulf  = high > high[1] and close < low[1]   // took prior HIGH, closed below prior LOW  -> instant swing HIGH
-bullEngulf  = low  < low[1]  and close > high[1]  // took prior LOW,  closed above prior HIGH -> instant swing LOW
+bearEngulf  = high > high[1] and close < low[1]
+bullEngulf  = low  < low[1]  and close > high[1]
 
 if barstate.isfirst
     dir  := -1
@@ -147,6 +160,10 @@ else
             extP := low
             extT := time
             armL := high
+
+if sigLongLTF or sigShortLTF
+    confLowLTF  := low
+    confHighLTF := high
 
 // ================================================================ HIGHER-TIMEFRAME ENGINE (non-repainting)
 [cH, cL, cC, cT] = request.security(syminfo.tickerid, htfTf, [high[1], low[1], close[1], time[1]], lookahead = barmerge.lookahead_on)
@@ -209,6 +226,10 @@ if htfNewBar and not na(cT)
     prevHtfH := cH
     prevHtfL := cL
 
+if sigLongHTF or sigShortHTF
+    confLowHTF  := cL
+    confHighHTF := cH
+
 // ================================================================ ANCHORED VWAPs (session opens)
 grpV      = "Anchored VWAPs"
 vTz       = input.string("America/New_York", "Anchor / session timezone", group = grpV)
@@ -247,6 +268,19 @@ avwap(bool reset) =>
     vv += volume
     vv != 0 ? pv / vv : na
 
+// mitigation tracker: a VWAP is "mitigated" once price moves > buf away from it and later trades back to touch it
+mitTrack(float v, bool reset, float buf) =>
+    var bool away = false
+    var bool mit  = false
+    if reset
+        away := false
+        mit  := false
+    if not na(v) and math.abs(close - v) > buf
+        away := true
+    if away and not na(v) and high >= v and low <= v
+        mit := true
+    mit
+
 asiaReset = newAnchor(asiaH, asiaM)
 lonReset  = newAnchor(lonH,  lonM)
 nyReset   = newAnchor(nyH,   nyM)
@@ -284,16 +318,56 @@ if showBias and barstate.islast
     table.cell(biasT, 0, 4, "Allowed", text_color = color.white, bgcolor = color.new(color.gray, 40))
     table.cell(biasT, 1, 4, btxt, text_color = color.yellow, bgcolor = color.new(color.gray, 40))
 
-// ================================================================ STRATEGY — ENTRIES / EXITS
+// ================================================================ DAILY HIGH / LOW + VWAP MITIGATION
+grpSL  = "Risk — stop loss"
+grpTP  = "Risk — take profit"
+grpBE  = "Risk — breakeven"
+grpRR  = "Risk — min R:R filter"
+
+mitBufPts = input.float(2, "VWAP 'mitigated' buffer (points)", minval = 0, group = grpSL,
+     tooltip="A VWAP counts as mitigated once price moves this many points away from it and later returns to touch it.")
+
+mitAsia = mitTrack(asiaVwap, asiaReset, mitBufPts)
+mitLon  = mitTrack(lonVwap,  lonReset,  mitBufPts)
+mitNY   = mitTrack(nyVwap,   nyReset,   mitBufPts)
+
+newDay = ta.change(time("D")) != 0
+var float dHigh = na
+var float dLow  = na
+if newDay or na(dHigh)
+    dHigh := high
+    dLow  := low
+else
+    dHigh := math.max(dHigh, high)
+    dLow  := math.min(dLow, low)
+
+// ================================================================ STRATEGY — INPUTS
 grpT     = "Strategy — trading"
 entrySrc = input.string("Chart timeframe", "Entry signal source", options = ["Chart timeframe", "Higher timeframe"], group = grpT)
 qty      = input.float(1, "Contracts", minval = 1, group = grpT)
 oppExit  = input.bool(true,  "Exit on opposite-direction signal", group = grpT)
-useStop  = input.bool(true,  "Use stop loss", group = grpT)
-stopPts  = input.float(20, "Stop loss (points)",   minval = 0, group = grpT)
-useTP    = input.bool(true,  "Use take profit", group = grpT)
-tpPts    = input.float(40, "Take profit (points)", minval = 0, group = grpT)
 
+// Stop loss
+slMethod  = input.string("Previous swing", "Stop loss method", options = ["Points", "Previous swing", "Confirming candle", "Unmitigated VWAP"], group = grpSL,
+     tooltip="Previous swing = the pivot the signal formed on. Confirming candle = the candle that broke & confirmed the swing. Unmitigated VWAP = first VWAP (NY->London->Asia) on the protective side that price has not mitigated.")
+stopPts   = input.float(20, "Stop loss (points, 'Points' method)", minval = 0, group = grpSL)
+slBufferPts = input.float(1, "Stop buffer beyond level (points)", minval = 0, group = grpSL)
+
+// Take profit
+tpMethod = input.string("Last swing point", "Take profit method", options = ["Points", "Last swing point", "Today HOD/LOD"], group = grpTP)
+tpPts    = input.float(40, "Take profit (points, 'Points' method)", minval = 0, group = grpTP)
+
+// Breakeven
+useBE    = input.bool(true, "Move stop to breakeven", group = grpBE)
+beMode   = input.string("R multiple", "Breakeven trigger", options = ["R multiple", "Last swing touched"], group = grpBE)
+beTrigR  = input.float(1.0, "Breakeven trigger (R multiple)", minval = 0.1, step = 0.1, group = grpBE)
+beLockPts= input.float(0, "Lock profit at breakeven (points)", minval = 0, group = grpBE)
+
+// Min R:R filter
+useRRFilter = input.bool(true, "Require min room to next swing", group = grpRR)
+minRR       = input.float(1.0, "Min reward:risk to next swing (R)", minval = 0.1, step = 0.1, group = grpRR)
+
+// Session times
 grpTime   = "Strategy — session times (in Anchor timezone)"
 entStartH = input.int(9,  "Entry window START hour",   0, 23, group = grpTime)
 entStartM = input.int(30, "Entry window START minute", 0, 59, group = grpTime)
@@ -303,6 +377,7 @@ useFlat   = input.bool(true, "Force flat at session end", group = grpTime)
 flatH     = input.int(15, "Flatten hour",   0, 23, group = grpTime)
 flatM     = input.int(55, "Flatten minute", 0, 59, group = grpTime)
 
+// ================================================================ STRATEGY — ENGINE
 tod           = hour(time, vTz) * 60 + minute(time, vTz)
 inEntryWindow = tod >= (entStartH * 60 + entStartM) and tod <= (cutH * 60 + cutM)
 flatten       = useFlat and tod >= (flatH * 60 + flatM)
@@ -310,23 +385,115 @@ flatten       = useFlat and tod >= (flatH * 60 + flatM)
 longSignal  = entrySrc == "Higher timeframe" ? sigLongHTF  : sigLongLTF
 shortSignal = entrySrc == "Higher timeframe" ? sigShortHTF : sigShortLTF
 
-// ---- ENTRIES — gated by the cutoff window AND the VWAP direction filter
-if longSignal and longOK and inEntryWindow and not flatten
+// pivots / confirming candle from the selected source
+useLTFsrc = entrySrc != "Higher timeframe"
+lastHigh  = useLTFsrc ? lastPivotPrice(pTyp, pPrc, 1)  : lastPivotPrice(hTyp, hPrc, 1)
+lastLow   = useLTFsrc ? lastPivotPrice(pTyp, pPrc, -1) : lastPivotPrice(hTyp, hPrc, -1)
+cLow      = useLTFsrc ? confLowLTF  : confLowHTF
+cHigh     = useLTFsrc ? confHighLTF : confHighHTF
+entryPx   = close
+
+// ---- STOP price for a potential entry this bar (per chosen method)
+float longStopCalc = na
+if slMethod == "Points"
+    longStopCalc := entryPx - stopPts
+else if slMethod == "Previous swing"
+    longStopCalc := na(lastLow) ? na : lastLow - slBufferPts
+else if slMethod == "Confirming candle"
+    longStopCalc := na(cLow) ? na : cLow - slBufferPts
+else
+    longStopCalc := (not mitNY and nyVwap < entryPx) ? nyVwap - slBufferPts : (not mitLon and lonVwap < entryPx) ? lonVwap - slBufferPts : (not mitAsia and asiaVwap < entryPx) ? asiaVwap - slBufferPts : na
+
+float shortStopCalc = na
+if slMethod == "Points"
+    shortStopCalc := entryPx + stopPts
+else if slMethod == "Previous swing"
+    shortStopCalc := na(lastHigh) ? na : lastHigh + slBufferPts
+else if slMethod == "Confirming candle"
+    shortStopCalc := na(cHigh) ? na : cHigh + slBufferPts
+else
+    shortStopCalc := (not mitNY and nyVwap > entryPx) ? nyVwap + slBufferPts : (not mitLon and lonVwap > entryPx) ? lonVwap + slBufferPts : (not mitAsia and asiaVwap > entryPx) ? asiaVwap + slBufferPts : na
+
+// ---- TARGET price (per chosen method)
+float longTPCalc = na
+if tpMethod == "Points"
+    longTPCalc := entryPx + tpPts
+else if tpMethod == "Last swing point"
+    longTPCalc := lastHigh
+else
+    longTPCalc := dHigh
+
+float shortTPCalc = na
+if tpMethod == "Points"
+    shortTPCalc := entryPx - tpPts
+else if tpMethod == "Last swing point"
+    shortTPCalc := lastLow
+else
+    shortTPCalc := dLow
+
+// ---- risk + room-to-next-swing (for the min R:R filter)
+longRisk   = na(longStopCalc)  ? na : math.abs(entryPx - longStopCalc)
+shortRisk  = na(shortStopCalc) ? na : math.abs(entryPx - shortStopCalc)
+longRoom   = na(lastHigh) ? na : lastHigh - entryPx     // distance up to next swing high
+shortRoom  = na(lastLow)  ? na : entryPx - lastLow      // distance down to next swing low
+
+passRRlong  = not useRRFilter or (not na(longRoom)  and not na(longRisk)  and longRisk  > 0 and longRoom  >= minRR * longRisk)
+passRRshort = not useRRFilter or (not na(shortRoom) and not na(shortRisk) and shortRisk > 0 and shortRoom >= minRR * shortRisk)
+
+// ---- position-level stored risk levels
+var float curStop  = na
+var float curTP    = na
+var float curEntry = na
+var float curRisk  = na
+var float curTgt   = na   // target swing for BE "last swing touched"
+var bool  beDone   = false
+
+canEnterLong  = longSignal  and longOK  and inEntryWindow and not flatten and not na(longStopCalc)  and passRRlong
+canEnterShort = shortSignal and shortOK and inEntryWindow and not flatten and not na(shortStopCalc) and passRRshort
+
+// ---- ENTRIES (gated by cutoff window + VWAP filter + min R:R)
+if canEnterLong
     strategy.entry("L", strategy.long, qty = qty)
-if shortSignal and shortOK and inEntryWindow and not flatten
+    curStop  := longStopCalc
+    curTP    := longTPCalc
+    curEntry := entryPx
+    curRisk  := longRisk
+    curTgt   := lastHigh
+    beDone   := false
+if canEnterShort
     strategy.entry("S", strategy.short, qty = qty)
+    curStop  := shortStopCalc
+    curTP    := shortTPCalc
+    curEntry := entryPx
+    curRisk  := shortRisk
+    curTgt   := lastLow
+    beDone   := false
+
+// ---- BREAKEVEN: raise stop to entry(+lock) at R-multiple or when target swing is touched
+posLong  = strategy.position_size > 0
+posShort = strategy.position_size < 0
+if useBE and not beDone and (posLong or posShort) and not na(curEntry)
+    bool trig = false
+    if beMode == "R multiple" and not na(curRisk)
+        trig := posLong ? high >= curEntry + beTrigR * curRisk : low <= curEntry - beTrigR * curRisk
+    else if beMode == "Last swing touched" and not na(curTgt)
+        trig := posLong ? high >= curTgt : low <= curTgt
+    if trig
+        float bePrice = posLong ? curEntry + beLockPts : curEntry - beLockPts
+        curStop := posLong ? math.max(curStop, bePrice) : math.min(curStop, bePrice)
+        beDone  := true
 
 // ---- EXITS — NEVER gated by the cutoff time
-// 1) opposite-direction signal closes an open trade (this is the bug you hit)
+// 1) opposite-direction signal
 if oppExit and shortSignal
     strategy.close("L", comment = "opp")
 if oppExit and longSignal
     strategy.close("S", comment = "opp")
 
-// 2) protective stop / target stay active for as long as the position is open
-if useStop or useTP
-    strategy.exit("L-x", from_entry = "L", stop = useStop ? strategy.position_avg_price - stopPts : na, limit = useTP ? strategy.position_avg_price + tpPts : na)
-    strategy.exit("S-x", from_entry = "S", stop = useStop ? strategy.position_avg_price + stopPts : na, limit = useTP ? strategy.position_avg_price - tpPts : na)
+// 2) protective stop / target (stored levels; breakeven-adjusted) stay active while in a position
+if not na(curStop) or not na(curTP)
+    strategy.exit("L-x", from_entry = "L", stop = curStop, limit = curTP)
+    strategy.exit("S-x", from_entry = "S", stop = curStop, limit = curTP)
 
 // 3) forced flat at session end
 if flatten
