@@ -58,6 +58,11 @@ var bool  htfInit = false
 var float prevHtfH = na
 var float prevHtfL = na
 
+// HTF trend bias from HH/HL (bullish) vs LH/LL (bearish)
+var float htfPrevHigh = na
+var float htfPrevLow  = na
+var int   htfBias     = 0
+
 // Per-bar swing signals + the confirming candle's extremes for each source
 bool sigLongLTF  = false
 bool sigShortLTF = false
@@ -230,6 +235,18 @@ if sigLongHTF or sigShortHTF
     confLowHTF  := cL
     confHighHTF := cH
 
+// HTF trend bias: HH -> +1, LH -> -1 (from swing highs); HL -> +1, LL -> -1 (from swing lows)
+if sigShortHTF
+    nh = lastPivotPrice(hTyp, hPrc, 1)
+    if not na(htfPrevHigh)
+        htfBias := nh > htfPrevHigh ? 1 : nh < htfPrevHigh ? -1 : htfBias
+    htfPrevHigh := nh
+if sigLongHTF
+    nl = lastPivotPrice(hTyp, hPrc, -1)
+    if not na(htfPrevLow)
+        htfBias := nl < htfPrevLow ? -1 : nl > htfPrevLow ? 1 : htfBias
+    htfPrevLow := nl
+
 // ================================================================ ANCHORED VWAPs (session opens)
 grpV      = "Anchored VWAPs"
 vTz       = input.string("America/New_York", "Anchor / session timezone", group = grpV)
@@ -367,6 +384,32 @@ beLockPts= input.float(0, "Lock profit at breakeven (points)", minval = 0, group
 useRRFilter = input.bool(true, "Require min room to next swing", group = grpRR)
 minRR       = input.float(1.0, "Min reward:risk to next swing (R)", minval = 0.1, step = 0.1, group = grpRR)
 
+// HTF trend alignment
+grpAlign    = "Filters — HTF trend alignment"
+useHTFalign = input.bool(true, "Only trade WITH the higher-timeframe trend", group = grpAlign,
+     tooltip="Longs only when the 15m structure is bullish (HH/HL); shorts only when bearish (LH/LL). Usually the biggest win-rate boost — removes counter-trend trades.")
+
+// Partial profit + structure trail
+grpScale   = "Risk — partial profit & trail"
+usePartial = input.bool(true,  "Take partial profit (needs qty >= 2)", group = grpScale)
+partialR   = input.float(1.0,  "Partial at (R multiple)", minval = 0.1, step = 0.1, group = grpScale)
+partialPct = input.float(50,   "Partial size (% of position)", minval = 1, maxval = 99, group = grpScale)
+partialBE  = input.bool(true,  "Move stop to breakeven after partial", group = grpScale)
+useTrail   = input.bool(true,  "Trail stop on structure after partial", group = grpScale)
+
+// Chop / volatility filters
+grpChop      = "Filters — chop / volatility"
+useMidday    = input.bool(false, "Skip midday session", group = grpChop)
+midStartH    = input.int(12, "Midday start hour",   0, 23, group = grpChop)
+midStartM    = input.int(0,  "Midday start minute", 0, 59, group = grpChop)
+midEndH      = input.int(13, "Midday end hour",   0, 23, group = grpChop)
+midEndM      = input.int(30, "Midday end minute", 0, 59, group = grpChop)
+useVwapDist  = input.bool(false, "Require min distance from NY VWAP", group = grpChop)
+vwapDistPts  = input.float(5, "Min distance from NY VWAP (points)", minval = 0, group = grpChop)
+useAtrFilter = input.bool(false, "Require minimum ATR", group = grpChop)
+atrLen       = input.int(14, "ATR length", 1, group = grpChop)
+minAtrPts    = input.float(5, "Minimum ATR (points)", minval = 0, group = grpChop)
+
 // Session times
 grpTime   = "Strategy — session times (in Anchor timezone)"
 entStartH = input.int(9,  "Entry window START hour",   0, 23, group = grpTime)
@@ -381,6 +424,16 @@ flatM     = input.int(55, "Flatten minute", 0, 59, group = grpTime)
 tod           = hour(time, vTz) * 60 + minute(time, vTz)
 inEntryWindow = tod >= (entStartH * 60 + entStartM) and tod <= (cutH * 60 + cutM)
 flatten       = useFlat and tod >= (flatH * 60 + flatM)
+
+// ---- HTF trend alignment + chop/volatility filters
+htfLongOK  = not useHTFalign or htfBias == 1
+htfShortOK = not useHTFalign or htfBias == -1
+
+atrVal   = ta.atr(atrLen)
+inMidday = useMidday and tod >= (midStartH * 60 + midStartM) and tod < (midEndH * 60 + midEndM)
+farVwap  = not useVwapDist or na(nyVwap) or math.abs(close - nyVwap) >= vwapDistPts
+okAtr    = not useAtrFilter or (not na(atrVal) and atrVal >= minAtrPts)
+chopOK   = not inMidday and farVwap and okAtr
 
 longSignal  = entrySrc == "Higher timeframe" ? sigLongHTF  : sigLongLTF
 shortSignal = entrySrc == "Higher timeframe" ? sigShortHTF : sigShortLTF
@@ -451,9 +504,10 @@ var float curEntry = na
 var float curRisk  = na
 var int   entPivCnt = 0   // swing count at entry -> BE waits for a NEW swing after entry
 var bool  beDone   = false
+var bool  partialDone = false
 
-canEnterLong  = longSignal  and longOK  and inEntryWindow and not flatten and not na(longStopCalc)  and passRRlong
-canEnterShort = shortSignal and shortOK and inEntryWindow and not flatten and not na(shortStopCalc) and passRRshort
+canEnterLong  = longSignal  and longOK  and htfLongOK  and chopOK and inEntryWindow and not flatten and not na(longStopCalc)  and passRRlong
+canEnterShort = shortSignal and shortOK and htfShortOK and chopOK and inEntryWindow and not flatten and not na(shortStopCalc) and passRRshort
 
 // ---- ENTRIES (gated by cutoff window + VWAP filter + min R:R)
 if canEnterLong
@@ -464,6 +518,7 @@ if canEnterLong
     curRisk  := longRisk
     entPivCnt := selSize
     beDone   := false
+    partialDone := false
 if canEnterShort
     strategy.entry("S", strategy.short, qty = qty)
     curStop  := shortStopCalc
@@ -472,6 +527,7 @@ if canEnterShort
     curRisk  := shortRisk
     entPivCnt := selSize
     beDone   := false
+    partialDone := false
 
 // ---- BREAKEVEN: raise stop to entry(+lock) at R-multiple or when target swing is touched
 posLong  = strategy.position_size > 0
@@ -487,6 +543,25 @@ if useBE and not beDone and (posLong or posShort) and not na(curEntry)
         float bePrice = posLong ? curEntry + beLockPts : curEntry - beLockPts
         curStop := posLong ? math.max(curStop, bePrice) : math.min(curStop, bePrice)
         beDone  := true
+
+// ---- PARTIAL PROFIT: close a fraction at partialR, then (optionally) move stop to breakeven
+if usePartial and not partialDone and (posLong or posShort) and not na(curRisk) and not na(curEntry)
+    hitL = posLong  and high >= curEntry + partialR * curRisk
+    hitS = posShort and low  <= curEntry - partialR * curRisk
+    if hitL or hitS
+        int closeQty = int(math.max(1, math.round(qty * partialPct / 100)))
+        if closeQty < math.abs(strategy.position_size)
+            strategy.close(posLong ? "L" : "S", qty = closeQty, comment = "TP1")
+            partialDone := true
+            if partialBE
+                curStop := posLong ? math.max(curStop, curEntry + beLockPts) : math.min(curStop, curEntry - beLockPts)
+
+// ---- STRUCTURE TRAIL: after the partial, trail the runner's stop to the latest swing
+if useTrail and partialDone and (posLong or posShort)
+    if posLong and not na(lastLow)
+        curStop := math.max(curStop, lastLow - slBufferPts)
+    if posShort and not na(lastHigh)
+        curStop := math.min(curStop, lastHigh + slBufferPts)
 
 // ---- EXITS — NEVER gated by the cutoff time
 // 1) opposite-direction signal
