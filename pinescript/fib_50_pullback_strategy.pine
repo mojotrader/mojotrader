@@ -1,0 +1,100 @@
+//@version=6
+// Fib 50% pullback long (0.5 R:R):
+//   After an up-leg (swing low -> swing high) prints its high, place a LIMIT BUY at the 50% retracement.
+//   Stop  = 100% retracement (the swing low). Target = 25% retracement.
+//   entry->TP = 0.25*range, entry->SL = 0.50*range  ->  reward:risk = 0.5  (needs a high hit rate to profit).
+// Market structure = simple ZigZag (your v4 indicator, ported to v6). The Fib updates while the leg extends.
+strategy("Fib 50% Pullback Long — 0.5 R:R", overlay = true, pyramiding = 0,
+     max_lines_count = 500, default_qty_type = strategy.fixed, default_qty_value = 1,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 2.5, slippage = 1)
+
+// ---------------------------------------------------------------- Inputs
+length  = input.int(4, "Zig Zag High/Low length", minval = 1)
+qty     = input.float(1, "Contracts", minval = 1)
+showFib = input.bool(true,  "Draw Fib entry / SL / TP", group = "Visuals")
+showZig = input.bool(true,  "Draw ZigZag", group = "Visuals")
+
+// ---------------------------------------------------------------- ZigZag (centered pivots, confirmed after `length` bars)
+h = ta.highest(high, length * 2 + 1)
+l = ta.lowest(low,  length * 2 + 1)
+isMax = h == high[length]
+isMin = l == low[length]
+
+var bool  dirUp    = false
+var float lastLow  = na
+var float lastHigh = na
+var int   tHigh    = na
+var int   tLow     = na
+if barstate.isfirst
+    lastLow  := high * 100
+    lastHigh := 0.0
+
+bool newSwingHigh = false   // an up-leg just completed (high made) -> arm a setup
+bool newSwingLow  = false   // a down-leg just completed (structure flipped)
+
+if dirUp
+    if isMin and low[length] < lastLow
+        lastLow := low[length]
+        tLow    := bar_index - length
+    if isMax and high[length] > lastLow
+        lastHigh := high[length]
+        tHigh    := bar_index - length
+        dirUp    := false
+        newSwingHigh := true
+else
+    if isMax and high[length] > lastHigh
+        lastHigh := high[length]
+        tHigh    := bar_index - length
+    if isMin and low[length] < lastHigh
+        lastLow := low[length]
+        tLow    := bar_index - length
+        dirUp   := true
+        newSwingLow := true
+
+// ZigZag drawing (persistent leg lines)
+if showZig and newSwingHigh
+    line.new(tLow,  lastLow,  tHigh, lastHigh, xloc = xloc.bar_index, color = color.teal,   width = 2)
+if showZig and newSwingLow
+    line.new(tHigh, lastHigh, tLow,  lastLow,  xloc = xloc.bar_index, color = color.orange, width = 2)
+
+// ---------------------------------------------------------------- Fib levels of the current up-leg (low = 100%, high = 0%)
+rng      = lastHigh - lastLow
+fibEntry = lastHigh - 0.50 * rng   // 50% retracement -> limit BUY
+fibSL    = lastLow                 // 100% retracement -> stop
+fibTP    = lastHigh - 0.25 * rng   // 25% retracement -> target
+
+// ---------------------------------------------------------------- Setup / order management
+var bool  setup  = false
+var float curSL  = na
+var float curTP  = na
+
+if newSwingHigh and rng > 0
+    setup := true          // a fresh up-leg high -> arm the pullback buy
+if newSwingLow
+    setup := false         // structure flipped before fill -> drop the setup
+
+// while armed and flat, keep the limit buy parked at the (live-updating) 50% level
+if setup and strategy.position_size == 0 and rng > 0
+    curSL := fibSL
+    curTP := fibTP
+    strategy.entry("L", strategy.long, qty = qty, limit = fibEntry)
+else if not setup and strategy.position_size == 0
+    strategy.cancel("L")
+
+// once filled, the setup is consumed and SL/TP take over
+if strategy.position_size > 0
+    setup := false
+    strategy.exit("Lx", from_entry = "L", stop = curSL, limit = curTP)
+
+// ---------------------------------------------------------------- Fib drawing (entry / SL / TP of the armed setup)
+var line leEntry = na
+var line leSL    = na
+var line leTP    = na
+if showFib
+    line.delete(leEntry)
+    line.delete(leSL)
+    line.delete(leTP)
+    if (setup or strategy.position_size > 0) and rng > 0
+        leEntry := line.new(tHigh, fibEntry, bar_index + 5, fibEntry, xloc = xloc.bar_index, color = color.orange, width = 1)
+        leSL    := line.new(tHigh, fibSL,    bar_index + 5, fibSL,    xloc = xloc.bar_index, color = color.red,    width = 1, style = line.style_dashed)
+        leTP    := line.new(tHigh, fibTP,    bar_index + 5, fibTP,    xloc = xloc.bar_index, color = color.green,  width = 1)
