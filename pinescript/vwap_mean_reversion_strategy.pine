@@ -21,17 +21,19 @@ atrLen    = input.int(14,  "ATR length (for stop)", 1, group = "Strategy")
 atrMult   = input.float(1.5, "Stop = ATR ×", minval = 0.2, step = 0.1, group = "Strategy")
 qty       = input.float(1, "Contracts", minval = 1, group = "Strategy")
 
-// ================================================================ SESSION-ANCHORED VWAP + BANDS
-// reset accumulation at the anchor time (once per day)
+// ================================================================ NEW YORK OPEN ANCHORED VWAP + DEVIATION BANDS
+// Anchored exactly like the BMS strategy's VWAP: reset at the NY open (default 09:30 ET),
+// then accumulate hlc3*volume from that anchor. The deviation is derived FROM this same
+// anchored VWAP (volume-weighted std-dev of price around it), and the bands are multiples of it.
 newAnchor(int hh, int mm) =>
     a = timestamp(tz, year(time, tz), month(time, tz), dayofmonth(time, tz), hh, mm)
     time >= a and time[1] < a
-reset = newAnchor(anchorH, anchorM)
+nyReset = newAnchor(anchorH, anchorM)
 
-var float sPV  = 0.0   // sum(price*vol)
-var float sV   = 0.0   // sum(vol)
-var float sP2V = 0.0   // sum(price^2*vol)
-if reset
+var float sPV  = 0.0   // sum(price * vol)      since NY open
+var float sV   = 0.0   // sum(vol)              since NY open
+var float sP2V = 0.0   // sum(price^2 * vol)    since NY open
+if nyReset
     sPV  := 0.0
     sV   := 0.0
     sP2V := 0.0
@@ -40,15 +42,16 @@ sPV  += src * volume
 sV   += volume
 sP2V += src * src * volume
 
+// VWAP and its OWN standard deviation, both measured from the NY-open anchor
 vwap  = sV > 0 ? sPV / sV : na
-varc  = sV > 0 ? math.max(sP2V / sV - vwap * vwap, 0) : na    // volume-weighted variance, floored at 0
-dev   = na(varc) ? na : math.sqrt(varc)
-upper = na(dev) ? na : vwap + bandMult * dev
+varc  = sV > 0 ? math.max(sP2V / sV - vwap * vwap, 0) : na    // volume-weighted variance of price around the VWAP
+dev   = na(varc) ? na : math.sqrt(varc)                        // 1 standard deviation of THIS anchored VWAP
+upper = na(dev) ? na : vwap + bandMult * dev                   // deviation multiplier applied to that VWAP's std-dev
 lower = na(dev) ? na : vwap - bandMult * dev
 
-plot(reset ? na : vwap,  "VWAP",  color = color.new(color.orange, 0),  linewidth = 2, style = plot.style_linebr)
-plot(reset ? na : upper, "Upper", color = color.new(color.gray, 0),                     style = plot.style_linebr)
-plot(reset ? na : lower, "Lower", color = color.new(color.gray, 0),                     style = plot.style_linebr)
+plot(nyReset ? na : vwap,  "NY VWAP", color = color.new(color.orange, 0), linewidth = 2, style = plot.style_linebr)
+plot(nyReset ? na : upper, "Upper",   color = color.new(color.gray, 0),                   style = plot.style_linebr)
+plot(nyReset ? na : lower, "Lower",   color = color.new(color.gray, 0),                   style = plot.style_linebr)
 
 // ================================================================ SIGNALS + TIME WINDOW
 tod       = hour(time, tz) * 60 + minute(time, tz)
