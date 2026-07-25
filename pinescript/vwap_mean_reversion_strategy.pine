@@ -1,0 +1,82 @@
+//@version=6
+// VWAP Mean-Reversion — intentionally MINIMAL (few parameters, easy to validate honestly).
+// Idea: during RTH, fade moves that stretch to a standard-deviation band back toward the session VWAP.
+// Costs are modeled by default so every result you see is NET. Test out-of-sample before trusting it.
+strategy("VWAP Mean-Reversion", overlay = true, pyramiding = 0,
+     default_qty_type = strategy.fixed, default_qty_value = 1,
+     process_orders_on_close = true, calc_on_every_tick = false,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 2.5, slippage = 1)
+
+// ================================================================ INPUTS  (keep this list SHORT)
+tz        = input.string("America/New_York", "Session timezone", group = "Session")
+anchorH   = input.int(9,  "VWAP anchor / trade-start hour",   0, 23, group = "Session")
+anchorM   = input.int(30, "VWAP anchor / trade-start minute", 0, 59, group = "Session")
+cutoffH   = input.int(15, "Entry cutoff hour",   0, 23, group = "Session")
+cutoffM   = input.int(30, "Entry cutoff minute", 0, 59, group = "Session")
+flatH     = input.int(15, "Flatten hour",   0, 23, group = "Session")
+flatM     = input.int(55, "Flatten minute", 0, 59, group = "Session")
+
+bandMult  = input.float(2.0, "Entry band (std-dev multiple)", minval = 0.5, step = 0.1, group = "Strategy")
+atrLen    = input.int(14,  "ATR length (for stop)", 1, group = "Strategy")
+atrMult   = input.float(1.5, "Stop = ATR ×", minval = 0.2, step = 0.1, group = "Strategy")
+qty       = input.float(1, "Contracts", minval = 1, group = "Strategy")
+
+// ================================================================ SESSION-ANCHORED VWAP + BANDS
+// reset accumulation at the anchor time (once per day)
+newAnchor(int hh, int mm) =>
+    a = timestamp(tz, year(time, tz), month(time, tz), dayofmonth(time, tz), hh, mm)
+    time >= a and time[1] < a
+reset = newAnchor(anchorH, anchorM)
+
+var float sPV  = 0.0   // sum(price*vol)
+var float sV   = 0.0   // sum(vol)
+var float sP2V = 0.0   // sum(price^2*vol)
+if reset
+    sPV  := 0.0
+    sV   := 0.0
+    sP2V := 0.0
+src = hlc3
+sPV  += src * volume
+sV   += volume
+sP2V += src * src * volume
+
+vwap  = sV > 0 ? sPV / sV : na
+varc  = sV > 0 ? math.max(sP2V / sV - vwap * vwap, 0) : na    // volume-weighted variance, floored at 0
+dev   = na(varc) ? na : math.sqrt(varc)
+upper = na(dev) ? na : vwap + bandMult * dev
+lower = na(dev) ? na : vwap - bandMult * dev
+
+plot(reset ? na : vwap,  "VWAP",  color = color.new(color.orange, 0),  linewidth = 2, style = plot.style_linebr)
+plot(reset ? na : upper, "Upper", color = color.new(color.gray, 0),                     style = plot.style_linebr)
+plot(reset ? na : lower, "Lower", color = color.new(color.gray, 0),                     style = plot.style_linebr)
+
+// ================================================================ SIGNALS + TIME WINDOW
+tod       = hour(time, tz) * 60 + minute(time, tz)
+inWindow  = tod >= (anchorH * 60 + anchorM) and tod <= (cutoffH * 60 + cutoffM)
+flatten   = tod >= (flatH * 60 + flatM)
+
+// reversion confirmation: price stretched beyond a band, then CLOSES back inside it
+longSig  = not na(lower) and ta.crossover(close, lower)     // dipped below lower band, closed back above -> fade up
+shortSig = not na(upper) and ta.crossunder(close, upper)    // spiked above upper band, closed back below -> fade down
+
+atr = ta.atr(atrLen)
+var float eStop = na
+
+// ================================================================ ENTRIES (flat-only, inside window)
+if inWindow and not flatten and strategy.position_size == 0
+    if longSig
+        strategy.entry("L", strategy.long, qty = qty)
+        eStop := close - atrMult * atr
+    if shortSig
+        strategy.entry("S", strategy.short, qty = qty)
+        eStop := close + atrMult * atr
+
+// ================================================================ EXITS
+// target = VWAP (the mean, dynamic); stop = fixed ATR distance captured at entry
+if strategy.position_size != 0 and not na(vwap)
+    strategy.exit("Lx", from_entry = "L", stop = eStop, limit = vwap)
+    strategy.exit("Sx", from_entry = "S", stop = eStop, limit = vwap)
+
+// hard flat at session end
+if flatten
+    strategy.close_all(comment = "EOD flat")
