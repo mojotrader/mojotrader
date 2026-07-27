@@ -19,6 +19,12 @@ cutM      = input.int(0,  "Entry cutoff minute", 0, 59, group = "Session")
 flatH     = input.int(15, "Flatten hour",   0, 23, group = "Session")
 flatM     = input.int(55, "Flatten minute", 0, 59, group = "Session")
 
+entryChoice = input.string("50%", "Entry pullback (retracement)", options = ["50%", "25%"], group = "Strategy",
+     tooltip="50% = deeper pullback to the range midpoint. 25% = shallower pullback (long enters at high-0.25*range, short mirrors at low+0.25*range). Only arms if price is still on the trend side of that level.")
+stopChoice  = input.string("100%", "Stop loss level (of range)", options = ["50%", "75%", "100%"], group = "Strategy",
+     tooltip="Where the stop sits, as a retracement of the range. Long: high - stopRetr*range (100% = the far/low end). Must be deeper than the entry level, e.g. entry 25% needs stop 50%/75%/100%.")
+retr        = entryChoice == "25%" ? 0.25 : 0.50
+stopRetr    = stopChoice == "50%" ? 0.50 : stopChoice == "75%" ? 0.75 : 1.00
 rr        = input.float(2.0, "Target reward:risk", minval = 0.1, step = 0.1, group = "Strategy")
 qty       = input.float(1, "Contracts", minval = 1, group = "Strategy")
 useBE     = input.bool(true, "Move stop to breakeven", group = "Strategy")
@@ -81,23 +87,30 @@ if openEnd
 // ---------------------------------------------------------------- Pre-fill: auto-updating limit entry
 flat = strategy.position_size == 0
 if armed and flat and haveRange and dir != 0 and inRTH
-    // auto-expand the range and recompute the 50% entry, far-end stop, and R:R target
+    // auto-expand the range and recompute the entry / stop / R:R target from the chosen retracements
     rH := math.max(rH, high)
     rL := math.min(rL, low)
-    mid  = (rH + rL) / 2
-    risk = (rH - rL) / 2
-    pendEntry := mid
-    pendStop  := dir == 1 ? rL : rH
-    pendTP    := dir == 1 ? mid + rr * risk : mid - rr * risk
+    rng  = rH - rL
+    risk = (stopRetr - retr) * rng           // = |entry - stop|
+    pendEntry := dir == 1 ? rH - retr * rng     : rL + retr * rng
+    pendStop  := dir == 1 ? rH - stopRetr * rng : rL + stopRetr * rng
+    pendTP    := dir == 1 ? pendEntry + rr * risk : pendEntry - rr * risk
 
-    if pastCutoff or flatten
+    validSetup = stopRetr > retr and rng > 0
+    priceOK    = dir == 1 ? close > pendEntry : close < pendEntry   // still a genuine pullback (not an instant fill)
+
+    if pastCutoff or flatten or not validSetup
         strategy.cancel("L")
         strategy.cancel("S")
-        armed := false                       // no fill by cutoff -> abandon today
-    else if dir == 1
+        if pastCutoff or flatten
+            armed := false                   // no fill by cutoff -> abandon today
+    else if priceOK and dir == 1
         strategy.entry("L", strategy.long,  qty = qty, limit = pendEntry)
-    else
+    else if priceOK and dir == -1
         strategy.entry("S", strategy.short, qty = qty, limit = pendEntry)
+    else
+        strategy.cancel("L")
+        strategy.cancel("S")
 
 // ---------------------------------------------------------------- On fill: lock the levels
 justLong  = strategy.position_size > 0 and strategy.position_size[1] <= 0
