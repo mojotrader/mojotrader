@@ -1,0 +1,149 @@
+//@version=6
+// 15-min Opening-Range "continuation" strategy (built on the auto-updating Fib indicator).
+//   - Range = first 15-min RTH candle. Green closing ABOVE its 50% -> long bias; red BELOW its 50% -> short bias.
+//   - LIMIT entry at the 50% retracement; while unfilled the range auto-expands if the high/low is taken and the
+//     50% (and stop/target) recompute. Stop = far end of the range. Target = R:R.
+//   - Trade cutoff (no new entries after), flatten at session end, and move-to-breakeven at X*R.
+//   - Literal risk model: fixed contracts, so a wider range = larger risk. (Ask if you want fixed-$ sizing instead.)
+strategy("15m Opening-Range Fib — Strategy", overlay = true, pyramiding = 0,
+     max_lines_count = 500, default_qty_type = strategy.fixed, default_qty_value = 1,
+     process_orders_on_close = false, calc_on_every_tick = false,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 2.5, slippage = 1)
+
+// ---------------------------------------------------------------- Inputs
+tz        = input.string("America/New_York", "Timezone", group = "Session")
+openSess  = input.session("0930-0945", "Opening 15-min window", group = "Session")
+rthSess   = input.session("0930-1600", "Trading session", group = "Session")
+cutH      = input.int(15, "Entry cutoff hour",   0, 23, group = "Session")
+cutM      = input.int(0,  "Entry cutoff minute", 0, 59, group = "Session")
+flatH     = input.int(15, "Flatten hour",   0, 23, group = "Session")
+flatM     = input.int(55, "Flatten minute", 0, 59, group = "Session")
+
+rr        = input.float(2.0, "Target reward:risk", minval = 0.1, step = 0.1, group = "Strategy")
+qty       = input.float(1, "Contracts", minval = 1, group = "Strategy")
+useBE     = input.bool(true, "Move stop to breakeven", group = "Strategy")
+beR       = input.float(1.0, "Breakeven trigger (R multiple)", minval = 0.1, step = 0.1, group = "Strategy")
+beLock    = input.float(0, "Lock at breakeven (points)", minval = 0, group = "Strategy")
+
+showSetup = input.bool(true, "Draw entry / stop / target", group = "Visuals")
+rightPad  = input.int(10, "Extend levels right (bars)", 0, 100, group = "Visuals")
+
+// ---------------------------------------------------------------- Session detection
+inOpen    = not na(time(timeframe.period, openSess, tz))
+inRTH     = not na(time(timeframe.period, rthSess, tz))
+openStart = inOpen and not inOpen[1]
+openEnd   = not inOpen and inOpen[1]
+
+tod       = hour(time, tz) * 60 + minute(time, tz)
+pastCutoff= tod > (cutH * 60 + cutM)
+flatten   = tod >= (flatH * 60 + flatM)
+
+// ---------------------------------------------------------------- Range / direction / setup state
+var float rH        = na
+var float rL        = na
+var float o0        = na
+var int   startBar  = na
+var bool  haveRange = false
+var int   dir       = 0     // 1 long, -1 short, 0 none
+var bool  armed     = false // setup live and waiting to fill
+
+// pending (pre-fill) and locked (post-fill) levels
+var float pendEntry = na
+var float pendStop  = na
+var float pendTP    = na
+var float curEntry  = na
+var float curStop   = na
+var float curTP     = na
+var float curRisk   = na
+var bool  beDone    = false
+
+// build the opening 15-min candle
+if openStart
+    rH := high
+    rL := low
+    o0 := open
+    startBar := bar_index
+    haveRange := false
+    dir := 0
+    armed := false
+else if inOpen
+    rH := math.max(rH, high)
+    rL := math.min(rL, low)
+
+if openEnd
+    c0   = close[1]
+    mid0 = (rH + rL) / 2
+    dir := (c0 > o0 and c0 > mid0) ? 1 : (c0 < o0 and c0 < mid0) ? -1 : 0
+    haveRange := true
+    armed := dir != 0
+    beDone := false
+
+// ---------------------------------------------------------------- Pre-fill: auto-updating limit entry
+flat = strategy.position_size == 0
+if armed and flat and haveRange and dir != 0 and inRTH
+    // auto-expand the range and recompute the 50% entry, far-end stop, and R:R target
+    rH := math.max(rH, high)
+    rL := math.min(rL, low)
+    mid  = (rH + rL) / 2
+    risk = (rH - rL) / 2
+    pendEntry := mid
+    pendStop  := dir == 1 ? rL : rH
+    pendTP    := dir == 1 ? mid + rr * risk : mid - rr * risk
+
+    if pastCutoff or flatten
+        strategy.cancel("L")
+        strategy.cancel("S")
+        armed := false                       // no fill by cutoff -> abandon today
+    else if dir == 1
+        strategy.entry("L", strategy.long,  qty = qty, limit = pendEntry)
+    else
+        strategy.entry("S", strategy.short, qty = qty, limit = pendEntry)
+
+// ---------------------------------------------------------------- On fill: lock the levels
+justLong  = strategy.position_size > 0 and strategy.position_size[1] <= 0
+justShort = strategy.position_size < 0 and strategy.position_size[1] >= 0
+if justLong or justShort
+    curEntry := strategy.position_avg_price
+    curStop  := pendStop
+    curTP    := pendTP
+    curRisk  := math.abs(curEntry - curStop)
+    armed    := false
+    beDone   := false
+
+// ---------------------------------------------------------------- Breakeven at X*R
+if useBE and not beDone and strategy.position_size != 0 and not na(curRisk) and curRisk > 0
+    beTrig = strategy.position_size > 0 ? high >= curEntry + beR * curRisk : low <= curEntry - beR * curRisk
+    if beTrig
+        curStop := strategy.position_size > 0 ? math.max(curStop, curEntry + beLock) : math.min(curStop, curEntry - beLock)
+        beDone  := true
+
+// ---------------------------------------------------------------- Exits
+if strategy.position_size != 0 and not na(curStop)
+    strategy.exit("Lx", from_entry = "L", stop = curStop, limit = curTP)
+    strategy.exit("Sx", from_entry = "S", stop = curStop, limit = curTP)
+
+// hard flat at session end (also cancels any resting order)
+if flatten
+    strategy.cancel("L")
+    strategy.cancel("S")
+    strategy.close_all(comment = "EOD flat")
+    armed := false
+
+// ---------------------------------------------------------------- Visuals: entry / stop / target
+var line leEntry = na
+var line leStop  = na
+var line leTP    = na
+if showSetup
+    line.delete(leEntry)
+    line.delete(leStop)
+    line.delete(leTP)
+    inTrade   = strategy.position_size != 0
+    showNow   = (armed and flat) or inTrade
+    dEntry    = inTrade ? curEntry : pendEntry
+    dStop     = inTrade ? curStop  : pendStop
+    dTP       = inTrade ? curTP    : pendTP
+    if showNow and not na(dEntry)
+        x2 = bar_index + rightPad
+        leEntry := line.new(startBar, dEntry, x2, dEntry, xloc = xloc.bar_index, color = color.new(color.orange, 0), width = 2)
+        leStop  := line.new(startBar, dStop,  x2, dStop,  xloc = xloc.bar_index, color = color.new(color.red, 0),    width = 1, style = line.style_dashed)
+        leTP    := line.new(startBar, dTP,    x2, dTP,    xloc = xloc.bar_index, color = color.new(color.green, 0),  width = 1, style = line.style_dashed)
