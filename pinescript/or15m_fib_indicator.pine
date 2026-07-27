@@ -1,0 +1,121 @@
+//@version=6
+// 15-min Opening-Range Fib — AUTO-UPDATING indicator (structure first; strategy comes next).
+// - Range = high/low of the first 15-min RTH candle.
+// - Direction: green candle closing ABOVE its 50% -> long bias; red candle closing BELOW its 50% -> short bias.
+// - Fib 0/0.25/0.5/0.75/1 with entry at 50%, stop at the far end, target at R:R.
+// - AUTO-UPDATE: until an entry, if price takes the range high or low, the range expands and the 50% recomputes.
+indicator("15m Opening-Range Fib (auto-updating)", overlay = true,
+     max_lines_count = 500, max_boxes_count = 100, max_labels_count = 500)
+
+// ---------------------------------------------------------------- Inputs
+tz        = input.string("America/New_York", "Timezone", group = "Session")
+openSess  = input.session("0930-0945", "Opening 15-min window", group = "Session")
+rthSess   = input.session("0930-1600", "Track the range until (session)", group = "Session")
+rr        = input.float(2.0, "Target reward:risk", minval = 0.1, step = 0.1, group = "Strategy")
+rightPad  = input.int(10, "Extend levels right (bars)", 0, 100, group = "Visuals")
+showBoxes = input.bool(true, "Show risk / reward boxes", group = "Visuals")
+showLbls  = input.bool(true, "Show Fib price labels", group = "Visuals")
+
+// ---------------------------------------------------------------- Session detection
+inOpen    = not na(time(timeframe.period, openSess, tz))
+inRTH     = not na(time(timeframe.period, rthSess, tz))
+openStart = inOpen and not inOpen[1]     // first bar of the opening window
+openEnd   = not inOpen and inOpen[1]     // first bar AFTER the opening window
+
+// ---------------------------------------------------------------- Range + direction state
+var float rH        = na    // range high (expands)
+var float rL        = na    // range low  (expands)
+var float o0        = na    // opening-candle open
+var int   startBar  = na
+var bool  haveRange = false
+var int   dir       = 0     // 1 = long bias, -1 = short bias, 0 = none
+
+// drawing objects (one live set at a time)
+var line lz0   = na
+var line lz25  = na
+var line lz50  = na
+var line lz75  = na
+var line lz100 = na
+var line ltgt  = na
+var box  rbox  = na
+var box  gbox  = na
+var label la0   = na
+var label la25  = na
+var label la50  = na
+var label la75  = na
+var label la100 = na
+
+f_clear() =>
+    line.delete(lz0)
+    line.delete(lz25)
+    line.delete(lz50)
+    line.delete(lz75)
+    line.delete(lz100)
+    line.delete(ltgt)
+    box.delete(rbox)
+    box.delete(gbox)
+    label.delete(la0)
+    label.delete(la25)
+    label.delete(la50)
+    label.delete(la75)
+    label.delete(la100)
+
+// build the opening 15-min candle
+if openStart
+    rH := high
+    rL := low
+    o0 := open
+    startBar := bar_index
+    haveRange := false
+    dir := 0
+    f_clear()
+else if inOpen
+    rH := math.max(rH, high)
+    rL := math.min(rL, low)
+
+if openEnd
+    c0   = close[1]                 // close of the last bar in the 15-min window
+    mid0 = (rH + rL) / 2
+    dir := (c0 > o0 and c0 > mid0) ? 1 : (c0 < o0 and c0 < mid0) ? -1 : 0
+    haveRange := true
+
+// AUTO-UPDATE: expand the range as price takes the high/low, and redraw the Fib
+active = haveRange and dir != 0 and inRTH
+if active
+    rH := math.max(rH, high)
+    rL := math.min(rL, low)
+
+    rng  = rH - rL
+    mid  = (rH + rL) / 2
+    f25  = rH - 0.25 * rng
+    f75  = rH - 0.75 * rng
+    risk = rng / 2                                   // entry(50%) to the far end
+    tgt  = dir == 1 ? mid + rr * risk : mid - rr * risk
+    x1   = startBar
+    x2   = bar_index + rightPad
+
+    f_clear()
+    // fib lines (0 = high, 1 = low)
+    lz0   := line.new(x1, rH,  x2, rH,  xloc = xloc.bar_index, color = color.new(color.gray, 0),   width = 1)
+    lz25  := line.new(x1, f25, x2, f25, xloc = xloc.bar_index, color = color.new(color.orange, 0), width = 1)
+    lz50  := line.new(x1, mid, x2, mid, xloc = xloc.bar_index, color = color.new(#8bc34a, 0),      width = 2)
+    lz75  := line.new(x1, f75, x2, f75, xloc = xloc.bar_index, color = color.new(color.teal, 30),  width = 1)
+    lz100 := line.new(x1, rL,  x2, rL,  xloc = xloc.bar_index, color = color.new(color.gray, 0),   width = 1)
+    ltgt  := line.new(x1, tgt, x2, tgt, xloc = xloc.bar_index, color = color.new(color.green, 0),  width = 1, style = line.style_dashed)
+
+    // risk (red) / reward (green) boxes — entry(50%) to stop, and entry to target
+    if showBoxes
+        if dir == 1
+            rbox := box.new(x1, mid, x2, rL,  xloc = xloc.bar_index, border_color = color.new(color.red, 100),   bgcolor = color.new(color.red, 88))
+            gbox := box.new(x1, tgt, x2, mid, xloc = xloc.bar_index, border_color = color.new(color.green, 100), bgcolor = color.new(color.green, 88))
+        else
+            rbox := box.new(x1, rH,  x2, mid, xloc = xloc.bar_index, border_color = color.new(color.red, 100),   bgcolor = color.new(color.red, 88))
+            gbox := box.new(x1, mid, x2, tgt, xloc = xloc.bar_index, border_color = color.new(color.green, 100), bgcolor = color.new(color.green, 88))
+
+    // price labels
+    if showLbls
+        la0   := label.new(x1, rH,  "0 ("    + str.tostring(math.round_to_mintick(rH))  + ")", xloc = xloc.bar_index, style = label.style_label_right, textcolor = color.gray,   color = color.new(color.gray, 100), size = size.small)
+        la25  := label.new(x1, f25, "0.25 (" + str.tostring(math.round_to_mintick(f25)) + ")", xloc = xloc.bar_index, style = label.style_label_right, textcolor = color.orange, color = color.new(color.gray, 100), size = size.small)
+        la50  := label.new(x1, mid, "0.5 ("  + str.tostring(math.round_to_mintick(mid)) + ")", xloc = xloc.bar_index, style = label.style_label_right, textcolor = color.new(#8bc34a, 0), color = color.new(color.gray, 100), size = size.small)
+        la75  := label.new(x1, f75, "0.75 (" + str.tostring(math.round_to_mintick(f75)) + ")", xloc = xloc.bar_index, style = label.style_label_right, textcolor = color.teal,   color = color.new(color.gray, 100), size = size.small)
+        la100 := label.new(x1, rL,  "1 ("    + str.tostring(math.round_to_mintick(rL))  + ")", xloc = xloc.bar_index, style = label.style_label_right, textcolor = color.gray,   color = color.new(color.gray, 100), size = size.small)
