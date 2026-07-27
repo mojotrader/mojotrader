@@ -14,6 +14,7 @@ strategy("15m Opening-Range Fib — Strategy", overlay = true, pyramiding = 0,
 tz        = input.string("America/New_York", "Timezone", group = "Session")
 openSess  = input.session("0930-0945", "Opening 15-min window", group = "Session")
 rthSess   = input.session("0930-1600", "Trading session", group = "Session")
+ibSess    = input.session("0930-1030", "Initial Balance window (invalidate on break)", group = "Session")
 cutH      = input.int(15, "Entry cutoff hour",   0, 23, group = "Session")
 cutM      = input.int(0,  "Entry cutoff minute", 0, 59, group = "Session")
 flatH     = input.int(15, "Flatten hour",   0, 23, group = "Session")
@@ -84,6 +85,28 @@ if openEnd
     armed := dir != 0
     beDone := false
 
+// ---------------------------------------------------------------- Initial Balance (first hour) break filter
+// Once the IB is complete (after 10:30), if price TAKES the IB high or low, no more new entries today.
+inIB    = not na(time(timeframe.period, ibSess, tz))
+ibStart = inIB and not inIB[1]
+ibEnd   = not inIB and inIB[1]
+var float ibHigh   = na
+var float ibLow    = na
+var bool  ibDone   = false
+var bool  ibBroken = false
+if ibStart
+    ibHigh   := high
+    ibLow    := low
+    ibDone   := false
+    ibBroken := false
+else if inIB
+    ibHigh := math.max(ibHigh, high)
+    ibLow  := math.min(ibLow, low)
+if ibEnd
+    ibDone := true
+if ibDone and not ibBroken and not na(ibHigh) and (high >= ibHigh or low <= ibLow)
+    ibBroken := true
+
 // ---------------------------------------------------------------- Pre-fill: auto-updating limit entry
 flat = strategy.position_size == 0
 if armed and flat and haveRange and dir != 0 and inRTH
@@ -99,11 +122,11 @@ if armed and flat and haveRange and dir != 0 and inRTH
     validSetup = stopRetr > retr and rng > 0
     priceOK    = dir == 1 ? close > pendEntry : close < pendEntry   // still a genuine pullback (not an instant fill)
 
-    if pastCutoff or flatten or not validSetup
+    if pastCutoff or flatten or not validSetup or ibBroken
         strategy.cancel("L")
         strategy.cancel("S")
-        if pastCutoff or flatten
-            armed := false                   // no fill by cutoff -> abandon today
+        if pastCutoff or flatten or ibBroken
+            armed := false                   // cutoff, EOD, or IB break -> abandon today
     else if priceOK and dir == 1
         strategy.entry("L", strategy.long,  qty = qty, limit = pendEntry)
     else if priceOK and dir == -1
