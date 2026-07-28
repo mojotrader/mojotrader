@@ -1,0 +1,123 @@
+//@version=6
+// 15m ORB false-breakout FADE (run on a 5m chart — the rule is defined on 5m candles).
+//   ORB = 09:30-09:45 range. After it:
+//   - WICK break: a 5m candle pokes beyond the ORB but CLOSES back inside -> fade it, enter next candle.
+//   - CLOSE break: a 5m candle CLOSES outside -> wait; when a later 5m candle CLOSES back inside, fade, enter next.
+//   Target = opposite side of the ORB. Stop from R:R (reward ~= ORB size): stop distance = reward / R:R.
+strategy("ORB 15m Fade — 5m false break", overlay = true, pyramiding = 0,
+     default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
+
+// ---------------------------------------------------------------- Inputs
+tz        = input.string("America/New_York", "Timezone", group = "Session")
+sess      = input.session("0930-1600", "RTH session", group = "Session")
+orbSess   = input.session("0930-0945", "ORB (15m) window", group = "Session")
+
+breakMode = input.string("Both", "Break type", options = ["Wick", "Close", "Both"], group = "Strategy",
+     tooltip="Wick: candle pokes outside the ORB but CLOSES back inside -> fade immediately. Close: candle CLOSES outside -> wait for a later candle to close back inside, then fade.")
+rrChoice  = input.string("1", "Reward:risk", options = ["0.5", "1", "2"], group = "Strategy",
+     tooltip="Target = opposite side of the ORB (reward ~= ORB size). Stop distance = reward / R:R. 0.5 = stop twice as far as target; 2 = stop half as far.")
+rr        = rrChoice == "2" ? 2.0 : rrChoice == "0.5" ? 0.5 : 1.0
+maxTrades = input.int(1, "Max trades per day", 1, 20, group = "Strategy")
+qty       = input.float(1, "Contracts", minval = 1, group = "Strategy")
+
+cutH      = input.int(15, "Entry cutoff hour",   0, 23, group = "Time")
+cutM      = input.int(0,  "Entry cutoff minute", 0, 59, group = "Time")
+flatH     = input.int(15, "Flatten hour",   0, 23, group = "Time")
+flatM     = input.int(55, "Flatten minute", 0, 59, group = "Time")
+
+// ---------------------------------------------------------------- Session / ORB detection
+inSess     = not na(time(timeframe.period, sess, tz))
+newSession = inSess and not inSess[1]
+inOrb      = not na(time(timeframe.period, orbSess, tz))
+
+var float orbH = na
+var float orbL = na
+var bool  waitShort = false   // closed above ORB high, awaiting close back inside -> short
+var bool  waitLong  = false   // closed below ORB low,  awaiting close back inside -> long
+var int   nTrades = 0
+if newSession
+    orbH := na
+    orbL := na
+    waitShort := false
+    waitLong  := false
+    nTrades := 0
+if inOrb
+    orbH := na(orbH) ? high : math.max(orbH, high)
+    orbL := na(orbL) ? low  : math.min(orbL, low)
+orbReady = not inOrb and not na(orbH)
+
+// ---------------------------------------------------------------- Time gates
+tod       = hour(time, tz) * 60 + minute(time, tz)
+beforeCut = tod <= (cutH*60 + cutM)
+flatten   = tod >= (flatH*60 + flatM)
+
+takeWick  = breakMode == "Wick"  or breakMode == "Both"
+takeClose = breakMode == "Close" or breakMode == "Both"
+
+// ---------------------------------------------------------------- False-break state machine (on 5m chart bars)
+bool sigShort = false
+bool sigLong  = false
+if orbReady and inSess
+    // ---- upside poke -> SHORT fade
+    if takeWick and high > orbH and close <= orbH
+        sigShort := true
+    if takeClose
+        if close > orbH
+            waitShort := true
+        else if waitShort
+            if close > orbL and close < orbH        // closed back inside the range
+                sigShort := true
+                waitShort := false
+            else if close <= orbL                    // ran through the other side -> void
+                waitShort := false
+    // ---- downside poke -> LONG fade
+    if takeWick and low < orbL and close >= orbL
+        sigLong := true
+    if takeClose
+        if close < orbL
+            waitLong := true
+        else if waitLong
+            if close < orbH and close > orbL
+                sigLong := true
+                waitLong := false
+            else if close >= orbH
+                waitLong := false
+
+// ---------------------------------------------------------------- Entries (next candle = market fill on next bar)
+flat     = strategy.position_size == 0
+canTrade = flat and orbReady and beforeCut and not flatten and nTrades < maxTrades
+if canTrade and sigShort
+    strategy.entry("S", strategy.short, qty = qty)
+else if canTrade and sigLong
+    strategy.entry("L", strategy.long, qty = qty)
+
+// ---------------------------------------------------------------- On fill: target = other side of ORB, stop from R:R
+var float curStop   = na
+var float curTarget = na
+justShort = strategy.position_size < 0 and strategy.position_size[1] >= 0
+justLong  = strategy.position_size > 0 and strategy.position_size[1] <= 0
+if justShort
+    nTrades += 1
+    e = strategy.position_avg_price
+    curTarget := orbL
+    reward = math.abs(e - curTarget)
+    curStop := e + reward / rr
+if justLong
+    nTrades += 1
+    e = strategy.position_avg_price
+    curTarget := orbH
+    reward = math.abs(curTarget - e)
+    curStop := e - reward / rr
+
+// ---------------------------------------------------------------- Exits
+if strategy.position_size != 0
+    strategy.exit("Sx", from_entry = "S", stop = curStop, limit = curTarget)
+    strategy.exit("Lx", from_entry = "L", stop = curStop, limit = curTarget)
+
+if flatten
+    strategy.close_all(comment = "EOD flat")
+
+// ---------------------------------------------------------------- Visuals
+plot(orbReady ? orbH : na, "ORB High", color = color.new(color.gray, 0), style = plot.style_linebr)
+plot(orbReady ? orbL : na, "ORB Low",  color = color.new(color.gray, 0), style = plot.style_linebr)
