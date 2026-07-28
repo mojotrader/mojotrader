@@ -1,0 +1,97 @@
+//@version=6
+// London-range breakout into the NY session (ORB-style).
+//   Range = high/low from London open (default 02:00 ET) to NY session start (08:30 or 09:30, dropdown).
+//   Breakout via STOP orders at the range high (long) / low (short).
+//   Stop loss = a fraction of the range (0.5 / 0.75 / 1.0). Target = R:R (1/1.5/2/2.5/3) OR no target -> EOD exit.
+//   Flatten at 16:00. REQUIRES an Extended-Hours (ETH) chart so the 02:00-NY bars exist.
+strategy("London Range Breakout — NY session", overlay = true, pyramiding = 0,
+     default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
+
+// ---------------------------------------------------------------- Inputs
+tz        = input.string("America/New_York", "Timezone", group = "Session")
+lonH      = input.int(2, "London start hour", 0, 23, group = "Session")
+lonM      = input.int(0, "London start minute", 0, 59, group = "Session")
+nyStart   = input.string("09:30", "NY session start (range END)", options = ["08:30", "09:30"], group = "Session")
+
+stopFracC = input.string("1", "Stop loss (fraction of range)", options = ["0.5", "0.75", "1"], group = "Strategy")
+stopFrac  = stopFracC == "0.5" ? 0.5 : stopFracC == "0.75" ? 0.75 : 1.0
+tgtMode   = input.string("2", "Target reward:risk", options = ["1", "1.5", "2", "2.5", "3", "No target (EOD)"], group = "Strategy")
+useTarget = tgtMode != "No target (EOD)"
+rr        = tgtMode == "1" ? 1.0 : tgtMode == "1.5" ? 1.5 : tgtMode == "2.5" ? 2.5 : tgtMode == "3" ? 3.0 : 2.0
+maxTrades = input.int(1, "Max trades per day", 1, 20, group = "Strategy")
+qty       = input.float(1, "Contracts", minval = 1, group = "Strategy")
+bufPts    = input.float(0, "Entry buffer beyond range (points)", minval = 0, group = "Strategy")
+
+cutH      = input.int(15, "Entry cutoff hour",   0, 23, group = "Time")
+cutM      = input.int(0,  "Entry cutoff minute", 0, 59, group = "Time")
+eodH      = input.int(16, "EOD flatten hour",   0, 23, group = "Time")
+eodM      = input.int(0,  "EOD flatten minute", 0, 59, group = "Time")
+
+// ---------------------------------------------------------------- Range window (time-of-day, works on ETH bars)
+tod    = hour(time, tz) * 60 + minute(time, tz)
+lonMin = lonH * 60 + lonM
+nyMin  = nyStart == "08:30" ? 510 : 570
+cutMin = cutH * 60 + cutM
+eodMin = eodH * 60 + eodM
+
+inRange  = tod >= lonMin and tod < nyMin
+newRange = inRange and not inRange[1]
+
+var float rH = na
+var float rL = na
+var int   nTrades = 0
+if newRange
+    rH := high
+    rL := low
+    nTrades := 0
+else if inRange
+    rH := math.max(rH, high)
+    rL := math.min(rL, low)
+
+rangeReady = not na(rH) and tod >= nyMin
+tradeWin   = tod >= nyMin and tod <= cutMin
+flatten    = tod >= eodMin
+
+// ---------------------------------------------------------------- Breakout stop orders (first break of the day)
+flat   = strategy.position_size == 0
+canArm = flat and rangeReady and tradeWin and not flatten and nTrades < maxTrades
+if canArm
+    strategy.entry("L", strategy.long,  qty = qty, stop = rH + bufPts)
+    strategy.entry("S", strategy.short, qty = qty, stop = rL - bufPts)
+else if flat
+    strategy.cancel("L")
+    strategy.cancel("S")
+
+// ---------------------------------------------------------------- On fill: stop = fraction of range, target = R:R (or none)
+var float curStop   = na
+var float curTarget = na
+rng       = rH - rL
+justLong  = strategy.position_size > 0 and strategy.position_size[1] <= 0
+justShort = strategy.position_size < 0 and strategy.position_size[1] >= 0
+if justLong
+    nTrades += 1
+    strategy.cancel("S")
+    e = strategy.position_avg_price
+    curStop   := rH - stopFrac * rng
+    curTarget := useTarget ? e + rr * (e - curStop) : na
+if justShort
+    nTrades += 1
+    strategy.cancel("L")
+    e = strategy.position_avg_price
+    curStop   := rL + stopFrac * rng
+    curTarget := useTarget ? e - rr * (curStop - e) : na
+
+// ---------------------------------------------------------------- Exits
+if strategy.position_size != 0
+    strategy.exit("Lx", from_entry = "L", stop = curStop, limit = curTarget)
+    strategy.exit("Sx", from_entry = "S", stop = curStop, limit = curTarget)
+
+if flatten
+    strategy.cancel("L")
+    strategy.cancel("S")
+    strategy.close_all(comment = "EOD flat")
+
+// ---------------------------------------------------------------- Visuals
+plot(rangeReady ? rH : na, "Range High", color = color.new(color.teal, 0), style = plot.style_linebr)
+plot(rangeReady ? rL : na, "Range Low",  color = color.new(color.red, 0),  style = plot.style_linebr)
