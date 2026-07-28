@@ -1,0 +1,157 @@
+//@version=6
+// 15m FVG magnet + 1m IFVG entry (ICT-style). RUN ON A 1m CHART.
+//   - First 15m Fair Value Gap whose displacement (middle) candle is at/after 09:30 is the MAGNET/target.
+//       bullish 15m FVG (gap below price) -> SHORT toward it ; bearish 15m FVG (gap above) -> LONG toward it.
+//   - Entry trigger = a 1m Inverse FVG in the trade direction (a 1m FVG of the opposite polarity that price
+//       CLOSES through / inverts).  short: a bullish 1m FVG closed below ; long: a bearish 1m FVG closed above.
+//   - TP = the 15m FVG near edge (first touch, not filled).  SL = HOD (shorts) / LOD (longs).
+//   NOTE: simplified IFVG (entry on the close-through of the most recent opposite 1m FVG). One trade/day, EOD flat.
+strategy("15m FVG Magnet -> 1m IFVG", overlay = true, pyramiding = 0, max_boxes_count = 50,
+     default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
+
+// ---------------------------------------------------------------- Inputs
+tz     = input.string("America/New_York", "Timezone", group = "Session")
+sess   = input.session("0930-1600", "RTH session", group = "Session")
+htf    = input.timeframe("15", "FVG timeframe", group = "Session")
+dispH  = input.int(9,  "Displacement candle at/after — hour",   0, 23, group = "Session")
+dispM  = input.int(30, "Displacement candle at/after — minute", 0, 59, group = "Session")
+cutH   = input.int(15, "Entry cutoff hour",   0, 23, group = "Time")
+cutM   = input.int(30, "Entry cutoff minute", 0, 59, group = "Time")
+eodH   = input.int(16, "EOD flatten hour",   0, 23, group = "Time")
+eodM   = input.int(0,  "EOD flatten minute", 0, 59, group = "Time")
+maxTrades = input.int(1, "Max trades per day", 1, 10, group = "Strategy")
+qty    = input.float(1, "Contracts", minval = 1, group = "Strategy")
+showFvg= input.bool(true, "Draw the 15m FVG", group = "Strategy")
+
+// ---------------------------------------------------------------- Session / time / HOD-LOD
+inSess     = not na(time(timeframe.period, sess, tz))
+newSession = inSess and not inSess[1]
+tod    = hour(time, tz) * 60 + minute(time, tz)
+dispMin= dispH * 60 + dispM
+cutMin = cutH * 60 + cutM
+eodMin = eodH * 60 + eodM
+flatten= tod >= eodMin
+
+var float dH = na
+var float dL = na
+if newSession
+    dH := high
+    dL := low
+else if inSess
+    dH := math.max(dH, high)
+    dL := math.min(dL, low)
+
+// ---------------------------------------------------------------- Rolling 3 completed 15m candles (C1=a oldest, C3=c newest)
+[hh, ll, tt] = request.security(syminfo.tickerid, htf, [high[1], low[1], time[1]], lookahead = barmerge.lookahead_on)
+newHTF = ta.change(tt) != 0
+var float a_h = na
+var float a_l = na
+var float b_h = na
+var float b_l = na
+var int   b_t = na
+var float c_h = na
+var float c_l = na
+var int   c_t = na
+if newHTF
+    a_h := b_h
+    a_l := b_l
+    b_h := c_h
+    b_l := c_l
+    b_t := c_t
+    c_h := hh
+    c_l := ll
+    c_t := tt
+
+// ---------------------------------------------------------------- FVG state + detection (first after 09:30)
+var bool  haveFVG = false
+var int   fvgDir  = 0        // -1 = short (bullish FVG below) ; +1 = long (bearish FVG above)
+var float tpLevel = na       // near edge = TP
+var float fvgTop  = na
+var float fvgBot  = na
+var bool  fvgLive = false
+var float bullBot = na       // bottom of the most recent bullish 1m FVG
+var float bearTop = na       // top of the most recent bearish 1m FVG
+var int   nTrades = 0
+var box   fvgBox  = na
+
+if newSession
+    haveFVG := false
+    fvgDir  := 0
+    tpLevel := na
+    fvgLive := false
+    bullBot := na
+    bearTop := na
+    nTrades := 0
+
+if newHTF and not haveFVG and not na(a_h) and not na(b_t) and inSess and tod <= cutMin
+    bMin = hour(b_t, tz) * 60 + minute(b_t, tz)          // middle (displacement) candle minute-of-day
+    if bMin >= dispMin
+        if a_h < c_l                                     // bullish 15m FVG -> gap below -> SHORT toward it
+            haveFVG := true
+            fvgDir  := -1
+            fvgBot  := a_h
+            fvgTop  := c_l
+            tpLevel := c_l
+            fvgLive := true
+            bullBot := na
+            bearTop := na
+            if showFvg
+                fvgBox := box.new(bar_index, fvgTop, bar_index + 60, fvgBot, border_color = color.new(color.teal, 0), bgcolor = color.new(color.teal, 85))
+        else if a_l > c_h                                // bearish 15m FVG -> gap above -> LONG toward it
+            haveFVG := true
+            fvgDir  := 1
+            fvgBot  := c_h
+            fvgTop  := a_l
+            tpLevel := c_h
+            fvgLive := true
+            bullBot := na
+            bearTop := na
+            if showFvg
+                fvgBox := box.new(bar_index, fvgTop, bar_index + 60, fvgBot, border_color = color.new(color.red, 0), bgcolor = color.new(color.red, 85))
+
+// ---------------------------------------------------------------- 1m FVGs (chart bars) -> IFVG trigger levels
+if high[2] < low                          // bullish 1m FVG (current bar is C3) -> bottom = high[2]
+    bullBot := high[2]
+if low[2] > high                          // bearish 1m FVG -> top = low[2]
+    bearTop := low[2]
+
+// ---------------------------------------------------------------- Void the setup if the magnet is reached pre-entry
+flat = strategy.position_size == 0
+if fvgLive and flat
+    if fvgDir == -1 and low  <= tpLevel
+        fvgLive := false
+    if fvgDir == 1  and high >= tpLevel
+        fvgLive := false
+
+// ---------------------------------------------------------------- Entries (1m IFVG close-through in trade direction)
+inWin    = inSess and tod <= cutMin and not flatten
+canTrade = flat and haveFVG and fvgLive and inWin and nTrades < maxTrades and not na(tpLevel)
+sigShort = canTrade and fvgDir == -1 and not na(bullBot) and close < bullBot and close > tpLevel
+sigLong  = canTrade and fvgDir == 1  and not na(bearTop) and close > bearTop and close < tpLevel
+if sigShort
+    strategy.entry("S", strategy.short, qty = qty)
+if sigLong
+    strategy.entry("L", strategy.long, qty = qty)
+
+// ---------------------------------------------------------------- On fill: TP = FVG edge, SL = HOD/LOD
+var float curStop   = na
+var float curTarget = na
+justShort = strategy.position_size < 0 and strategy.position_size[1] >= 0
+justLong  = strategy.position_size > 0 and strategy.position_size[1] <= 0
+if justShort
+    nTrades += 1
+    curTarget := tpLevel
+    curStop   := dH
+if justLong
+    nTrades += 1
+    curTarget := tpLevel
+    curStop   := dL
+
+// ---------------------------------------------------------------- Exits
+if strategy.position_size != 0
+    strategy.exit("Sx", from_entry = "S", stop = curStop, limit = curTarget)
+    strategy.exit("Lx", from_entry = "L", stop = curStop, limit = curTarget)
+
+if flatten
+    strategy.close_all(comment = "EOD flat")
