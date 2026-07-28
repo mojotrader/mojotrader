@@ -1,0 +1,106 @@
+//@version=6
+// Prior-Day H/L CLOSE-confirmation breakout (run on a 5m chart).
+//   - A 5m candle must CLOSE outside the prior-day high/low (not just touch it).
+//   - Stop = the breakout candle's opposite edge (its LOW for a long, HIGH for a short).
+//   - Target = R:R multiple of that risk (1 / 1.5 / 2 / 2.5 / 3).
+//   - Filter: skip days whose session OPENS already outside the prior range (gapped out).
+//   - Session selectable RTH or ETH/Globex (prior "day" H/L uses the chosen session).
+strategy("Prior-Day H/L Close Breakout", overlay = true, pyramiding = 0,
+     default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
+
+// ---------------------------------------------------------------- Inputs
+tz         = input.string("America/New_York", "Timezone", group = "Session")
+sessType   = input.string("RTH", "Session type", options = ["RTH", "ETH", "Custom"], group = "Session",
+     tooltip="RTH = 0930-1600. ETH = 1800-1700 (Globex). The prior-day H/L is taken from this session. Make sure your chart shows ETH bars if you pick ETH.")
+customSess = input.session("0930-1600", "Custom session", group = "Session")
+sess = sessType == "RTH" ? "0930-1600" : sessType == "ETH" ? "1800-1700" : customSess
+
+rrChoice   = input.string("2", "Target reward:risk", options = ["1", "1.5", "2", "2.5", "3"], group = "Strategy")
+rr         = rrChoice == "1" ? 1.0 : rrChoice == "1.5" ? 1.5 : rrChoice == "2.5" ? 2.5 : rrChoice == "3" ? 3.0 : 2.0
+maxTrades  = input.int(1, "Max trades per day", 1, 20, group = "Strategy")
+qty        = input.float(1, "Contracts", minval = 1, group = "Strategy")
+useOpenFlt = input.bool(true, "Skip days that OPEN outside the prior range", group = "Strategy")
+
+useTimeWin = input.bool(true, "Restrict entries to a time window", group = "Time")
+startH     = input.int(9,  "Trade start hour",   0, 23, group = "Time")
+startM     = input.int(30, "Trade start minute", 0, 59, group = "Time")
+cutH       = input.int(14, "Entry cutoff hour",   0, 23, group = "Time")
+cutM       = input.int(0,  "Entry cutoff minute", 0, 59, group = "Time")
+flatSessEnd= input.bool(false, "Flatten at session end (else fixed time)", group = "Time")
+flatH      = input.int(15, "Flatten hour",   0, 23, group = "Time")
+flatM      = input.int(55, "Flatten minute", 0, 59, group = "Time")
+
+// ---------------------------------------------------------------- Session tracking -> prior-day H/L + open check
+inSess     = not na(time(timeframe.period, sess, tz))
+newSession = inSess and not inSess[1]
+
+var float sessH = na
+var float sessL = na
+var float pdh   = na
+var float pdl   = na
+var bool  openInside = false
+var int   nTrades = 0
+if newSession
+    pdh := sessH
+    pdl := sessL
+    openInside := not na(pdh) and not na(pdl) and open <= pdh and open >= pdl
+    sessH := high
+    sessL := low
+    nTrades := 0
+else if inSess
+    sessH := math.max(sessH, high)
+    sessL := math.min(sessL, low)
+
+// ---------------------------------------------------------------- Time gates
+tod      = hour(time, tz) * 60 + minute(time, tz)
+inWin    = inSess and (not useTimeWin or (tod >= (startH*60+startM) and tod <= (cutH*60+cutM)))
+flatten  = flatSessEnd ? (not inSess) : (inSess and tod >= (flatH*60+flatM))
+dayValid = not useOpenFlt or openInside
+
+// ---------------------------------------------------------------- Breakout on 5m CLOSE (first of day)
+flat   = strategy.position_size == 0
+canArm = flat and inWin and not flatten and nTrades < maxTrades and not na(pdh) and not na(pdl) and dayValid
+
+var float pendStop = na
+if canArm and close > pdh
+    strategy.entry("L", strategy.long,  qty = qty)
+    pendStop := low                       // breakout candle's low = long stop
+else if canArm and close < pdl
+    strategy.entry("S", strategy.short, qty = qty)
+    pendStop := high                      // breakout candle's high = short stop
+else if flat
+    strategy.cancel("L")
+    strategy.cancel("S")
+
+// ---------------------------------------------------------------- On fill: stop = candle edge, target = R:R
+var float curStop   = na
+var float curTarget = na
+justLong  = strategy.position_size > 0 and strategy.position_size[1] <= 0
+justShort = strategy.position_size < 0 and strategy.position_size[1] >= 0
+if justLong
+    nTrades += 1
+    e = strategy.position_avg_price
+    curStop   := pendStop
+    risk = e - curStop
+    curTarget := risk > 0 ? e + rr * risk : na
+if justShort
+    nTrades += 1
+    e = strategy.position_avg_price
+    curStop   := pendStop
+    risk = curStop - e
+    curTarget := risk > 0 ? e - rr * risk : na
+
+// ---------------------------------------------------------------- Exits
+if strategy.position_size != 0
+    strategy.exit("Lx", from_entry = "L", stop = curStop, limit = curTarget)
+    strategy.exit("Sx", from_entry = "S", stop = curStop, limit = curTarget)
+
+if flatten
+    strategy.cancel("L")
+    strategy.cancel("S")
+    strategy.close_all(comment = "flat")
+
+// ---------------------------------------------------------------- Visuals
+plot(not na(pdh) ? pdh : na, "Prior-day High", color = color.new(color.teal, 0), style = plot.style_linebr)
+plot(not na(pdl) ? pdl : na, "Prior-day Low",  color = color.new(color.red, 0),  style = plot.style_linebr)
