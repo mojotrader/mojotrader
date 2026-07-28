@@ -1,0 +1,106 @@
+//@version=6
+// Anchored-VWAP pullback strategy (09:30 open).
+//   - VWAP anchored at the RTH open; direction from its slope.
+//   - LIMIT entry resting ON the VWAP, in the slope direction (long only when price is above a rising VWAP;
+//     short only when below a falling VWAP -> a genuine pullback, not an instant fill). Limit tracks the VWAP.
+//   - Target = High-of-Day (long) / Low-of-Day (short), captured at entry.
+//   - Filters: trade-start time, entry cutoff, and max trades/day (=1 for "one and done"). Flatten at session end.
+strategy("Anchored VWAP Pullback — 09:30", overlay = true, pyramiding = 0,
+     default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
+
+// ---------------------------------------------------------------- Inputs
+tz        = input.string("America/New_York", "Timezone", group = "Session")
+sess      = input.session("0930-1600", "Session (VWAP anchor)", group = "Session")
+srcIn     = input.source(hlc3, "VWAP source", group = "Session")
+slopeLen  = input.int(3, "VWAP slope lookback (bars)", 1, group = "Session")
+
+startH    = input.int(9,  "Trade start hour",   0, 23, group = "Time filters")
+startM    = input.int(45, "Trade start minute", 0, 59, group = "Time filters")
+cutH      = input.int(15, "Entry cutoff hour",   0, 23, group = "Time filters")
+cutM      = input.int(0,  "Entry cutoff minute", 0, 59, group = "Time filters")
+flatH     = input.int(15, "Flatten hour",   0, 23, group = "Time filters")
+flatM     = input.int(55, "Flatten minute", 0, 59, group = "Time filters")
+
+maxTrades = input.int(1, "Max trades per day", 1, 20, group = "Strategy")
+qty       = input.float(1, "Contracts", minval = 1, group = "Strategy")
+stopMode  = input.string("Opposite day extreme", "Stop loss", options = ["Opposite day extreme", "Fixed points", "None (EOD only)"], group = "Strategy")
+stopPts   = input.float(30, "Stop (points, for 'Fixed points')", minval = 0, group = "Strategy")
+showVwap  = input.bool(true, "Plot VWAP", group = "Strategy")
+
+// ---------------------------------------------------------------- Anchored VWAP (session-reset)
+inSess     = not na(time(timeframe.period, sess, tz))
+newSession = inSess and not inSess[1]
+
+var float sPV = 0.0
+var float sV  = 0.0
+if newSession
+    sPV := 0.0
+    sV  := 0.0
+if inSess
+    v = nz(volume, 1.0)
+    sPV += srcIn * v
+    sV  += v
+vwap = inSess and sV > 0 ? sPV / sV : na
+
+vwapUp = not na(vwap) and not na(vwap[slopeLen]) and vwap > vwap[slopeLen]
+vwapDn = not na(vwap) and not na(vwap[slopeLen]) and vwap < vwap[slopeLen]
+
+plot(showVwap ? vwap : na, "VWAP", color = vwapUp ? color.teal : vwapDn ? color.red : color.gray, linewidth = 2)
+
+// ---------------------------------------------------------------- Session HOD / LOD + trade counter
+var float dHigh = na
+var float dLow  = na
+var int   nTrades = 0
+if newSession
+    dHigh := high
+    dLow  := low
+    nTrades := 0
+else if inSess
+    dHigh := math.max(dHigh, high)
+    dLow  := math.min(dLow, low)
+
+// ---------------------------------------------------------------- Time windows
+tod        = hour(time, tz) * 60 + minute(time, tz)
+inWindow   = tod >= (startH*60+startM) and tod <= (cutH*60+cutM) and inSess
+flatten    = tod >= (flatH*60+flatM)
+
+// ---------------------------------------------------------------- Entry (limit resting on the VWAP, in trend direction)
+var float curStop   = na
+var float curTarget = na
+flat = strategy.position_size == 0
+
+canArm = flat and inWindow and not flatten and nTrades < maxTrades and not na(vwap)
+longSetup  = canArm and vwapUp and close > vwap and dHigh > vwap   // pullback long to rising VWAP, room to HOD
+shortSetup = canArm and vwapDn and close < vwap and dLow  < vwap   // pullback short to falling VWAP, room to LOD
+
+if longSetup
+    strategy.entry("L", strategy.long, qty = qty, limit = vwap)
+else if shortSetup
+    strategy.entry("S", strategy.short, qty = qty, limit = vwap)
+else if flat
+    strategy.cancel("L")
+    strategy.cancel("S")
+
+// ---------------------------------------------------------------- On fill: lock target/stop and count the trade
+justLong  = strategy.position_size > 0 and strategy.position_size[1] <= 0
+justShort = strategy.position_size < 0 and strategy.position_size[1] >= 0
+if justLong or justShort
+    nTrades += 1
+    e = strategy.position_avg_price
+    if justLong
+        curTarget := dHigh
+        curStop   := stopMode == "Opposite day extreme" ? dLow : stopMode == "Fixed points" ? e - stopPts : na
+    else
+        curTarget := dLow
+        curStop   := stopMode == "Opposite day extreme" ? dHigh : stopMode == "Fixed points" ? e + stopPts : na
+
+// ---------------------------------------------------------------- Exits
+if strategy.position_size != 0
+    strategy.exit("Lx", from_entry = "L", stop = curStop, limit = curTarget)
+    strategy.exit("Sx", from_entry = "S", stop = curStop, limit = curTarget)
+
+if flatten
+    strategy.cancel("L")
+    strategy.cancel("S")
+    strategy.close_all(comment = "EOD flat")
