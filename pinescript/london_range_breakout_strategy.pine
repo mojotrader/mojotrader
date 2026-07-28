@@ -14,11 +14,11 @@ lonH      = input.int(2, "London start hour", 0, 23, group = "Session")
 lonM      = input.int(0, "London start minute", 0, 59, group = "Session")
 nyStart   = input.string("09:30", "NY session start (range END)", options = ["08:30", "09:30"], group = "Session")
 
-stopFracC = input.string("1", "Stop loss (fraction of range)", options = ["0.5", "0.75", "1"], group = "Strategy")
-stopFrac  = stopFracC == "0.5" ? 0.5 : stopFracC == "0.75" ? 0.75 : 1.0
-tgtMode   = input.string("2", "Target reward:risk", options = ["1", "1.5", "2", "2.5", "3", "No target (EOD)"], group = "Strategy")
-useTarget = tgtMode != "No target (EOD)"
-rr        = tgtMode == "1" ? 1.0 : tgtMode == "1.5" ? 1.5 : tgtMode == "2.5" ? 2.5 : tgtMode == "3" ? 3.0 : 2.0
+stopFracC = input.string("50", "Stop loss (% of range)", options = ["25", "50", "75"], group = "Strategy")
+stopFrac  = stopFracC == "25" ? 0.25 : stopFracC == "75" ? 0.75 : 0.5
+tgtMode   = input.string("Measured move (RR from SL)", "Target", options = ["Measured move (RR from SL)", "No target (EOD)"], group = "Strategy",
+     tooltip="Measured move = 1x range extension beyond the breakout. Reward = range, risk = SL% of range, so R:R = 1 / SL% : 25%->4:1, 50%->2:1, 75%->1.33:1.")
+useTarget = tgtMode == "Measured move (RR from SL)"
 maxTrades = input.int(1, "Max trades per day", 1, 20, group = "Strategy")
 qty       = input.float(1, "Contracts", minval = 1, group = "Strategy")
 bufPts    = input.float(0, "Entry buffer beyond range (points)", minval = 0, group = "Strategy")
@@ -74,13 +74,13 @@ if justLong
     strategy.cancel("S")
     e = strategy.position_avg_price
     curStop   := rH - stopFrac * rng
-    curTarget := useTarget ? e + rr * (e - curStop) : na
+    curTarget := useTarget ? rH + rng : na          // 1x range measured move -> R:R = 1 / SL%
 if justShort
     nTrades += 1
     strategy.cancel("L")
     e = strategy.position_avg_price
     curStop   := rL + stopFrac * rng
-    curTarget := useTarget ? e - rr * (curStop - e) : na
+    curTarget := useTarget ? rL - rng : na          // 1x range measured move -> R:R = 1 / SL%
 
 // ---------------------------------------------------------------- Exits
 if strategy.position_size != 0
