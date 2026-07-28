@@ -1,0 +1,92 @@
+//@version=6
+// Prior-Day High/Low breakout.
+//   Track the prior RTH session's high (PDH) and low (PDL). Break PDH -> long (buy stop);
+//   break PDL -> short (sell stop). Fixed-point stop, R:R target. First break only (max trades/day),
+//   entry cutoff, flatten at session end. Uses STOP orders, so on a gap it fills at the level or worse
+//   (realistic). Backtested edge is modest — validate on your own chart before trusting it.
+strategy("Prior-Day H/L Breakout", overlay = true, pyramiding = 0,
+     default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
+
+// ---------------------------------------------------------------- Inputs
+tz        = input.string("America/New_York", "Timezone", group = "Session")
+sess      = input.session("0930-1600", "Reference RTH session (defines prior-day H/L)", group = "Session")
+
+stopPts   = input.float(40, "Stop loss (points)", minval = 1, group = "Strategy")
+rr        = input.float(2.0, "Target reward:risk", minval = 0.1, step = 0.5, group = "Strategy")
+bufPts    = input.float(0, "Entry buffer beyond level (points)", minval = 0, group = "Strategy")
+maxTrades = input.int(1, "Max trades per day", 1, 20, group = "Strategy")
+qty       = input.float(1, "Contracts", minval = 1, group = "Strategy")
+
+startH    = input.int(9,  "Trade start hour",   0, 23, group = "Time")
+startM    = input.int(30, "Trade start minute", 0, 59, group = "Time")
+cutH      = input.int(14, "Entry cutoff hour",   0, 23, group = "Time")
+cutM      = input.int(0,  "Entry cutoff minute", 0, 59, group = "Time")
+flatH     = input.int(15, "Flatten hour",   0, 23, group = "Time")
+flatM     = input.int(55, "Flatten minute", 0, 59, group = "Time")
+
+// ---------------------------------------------------------------- Track RTH session H/L -> carry to prior day
+inSess     = not na(time(timeframe.period, sess, tz))
+newSession = inSess and not inSess[1]
+
+var float sessH = na
+var float sessL = na
+var float pdh   = na
+var float pdl   = na
+var int   nTrades = 0
+if newSession
+    pdh := sessH                 // the session that just ended becomes the prior day
+    pdl := sessL
+    sessH := high
+    sessL := low
+    nTrades := 0
+else if inSess
+    sessH := math.max(sessH, high)
+    sessL := math.min(sessL, low)
+
+// ---------------------------------------------------------------- Time gates
+tod      = hour(time, tz) * 60 + minute(time, tz)
+inWindow = inSess and tod >= (startH*60+startM) and tod <= (cutH*60+cutM)
+flatten  = tod >= (flatH*60+flatM)
+
+// ---------------------------------------------------------------- Breakout stop orders (first break of the day)
+flat     = strategy.position_size == 0
+canArm   = flat and inWindow and not flatten and nTrades < maxTrades and not na(pdh) and not na(pdl)
+if canArm
+    strategy.entry("L", strategy.long,  qty = qty, stop = pdh + bufPts)
+    strategy.entry("S", strategy.short, qty = qty, stop = pdl - bufPts)
+else if flat
+    strategy.cancel("L")
+    strategy.cancel("S")
+
+// ---------------------------------------------------------------- On fill: set stop / target, cancel the other side
+var float curStop   = na
+var float curTarget = na
+justLong  = strategy.position_size > 0 and strategy.position_size[1] <= 0
+justShort = strategy.position_size < 0 and strategy.position_size[1] >= 0
+if justLong
+    nTrades += 1
+    strategy.cancel("S")
+    e = strategy.position_avg_price
+    curStop   := e - stopPts
+    curTarget := e + rr * stopPts
+if justShort
+    nTrades += 1
+    strategy.cancel("L")
+    e = strategy.position_avg_price
+    curStop   := e + stopPts
+    curTarget := e - rr * stopPts
+
+// ---------------------------------------------------------------- Exits
+if strategy.position_size != 0
+    strategy.exit("Lx", from_entry = "L", stop = curStop, limit = curTarget)
+    strategy.exit("Sx", from_entry = "S", stop = curStop, limit = curTarget)
+
+if flatten
+    strategy.cancel("L")
+    strategy.cancel("S")
+    strategy.close_all(comment = "EOD flat")
+
+// ---------------------------------------------------------------- Visuals
+plot(not na(pdh) ? pdh : na, "Prior-day High", color = color.new(color.teal, 0), style = plot.style_linebr)
+plot(not na(pdl) ? pdl : na, "Prior-day Low",  color = color.new(color.red, 0),  style = plot.style_linebr)
