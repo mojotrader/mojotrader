@@ -24,8 +24,11 @@ flatM     = input.int(55, "Flatten minute", 0, 59, group = "Time filters")
 
 maxTrades = input.int(1, "Max trades per day", 1, 20, group = "Strategy")
 qty       = input.float(1, "Contracts", minval = 1, group = "Strategy")
-stopMode  = input.string("Opposite day extreme", "Stop loss", options = ["Opposite day extreme", "Fixed points", "None (EOD only)"], group = "Strategy")
+stopMode  = input.string("R:R from target", "Stop loss", options = ["R:R from target", "Opposite day extreme", "Fixed points", "None (EOD only)"], group = "Strategy")
+rrChoice  = input.string("1", "Reward:risk (for 'R:R from target')", options = ["1", "1.5", "2"], group = "Strategy",
+     tooltip="Target is HOD/LOD. Stop distance = (entry->target distance) / R:R. 1 = stop as far as the target; 2 = stop half as far.")
 stopPts   = input.float(30, "Stop (points, for 'Fixed points')", minval = 0, group = "Strategy")
+rr        = rrChoice == "2" ? 2.0 : rrChoice == "1.5" ? 1.5 : 1.0
 showVwap  = input.bool(true, "Plot VWAP", group = "Strategy")
 
 // ---------------------------------------------------------------- Anchored VWAP (session-reset)
@@ -90,10 +93,12 @@ if justLong or justShort
     e = strategy.position_avg_price
     if justLong
         curTarget := dHigh
-        curStop   := stopMode == "Opposite day extreme" ? dLow : stopMode == "Fixed points" ? e - stopPts : na
+        rewardDist = math.abs(curTarget - e)
+        curStop   := stopMode == "R:R from target" ? e - rewardDist / rr : stopMode == "Opposite day extreme" ? dLow : stopMode == "Fixed points" ? e - stopPts : na
     else
         curTarget := dLow
-        curStop   := stopMode == "Opposite day extreme" ? dHigh : stopMode == "Fixed points" ? e + stopPts : na
+        rewardDist = math.abs(curTarget - e)
+        curStop   := stopMode == "R:R from target" ? e + rewardDist / rr : stopMode == "Opposite day extreme" ? dHigh : stopMode == "Fixed points" ? e + stopPts : na
 
 // ---------------------------------------------------------------- Exits
 if strategy.position_size != 0
