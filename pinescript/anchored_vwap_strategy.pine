@@ -31,6 +31,12 @@ stopPts   = input.float(30, "Stop (points, for 'Fixed points')", minval = 0, gro
 rr        = rrChoice == "2" ? 2.0 : rrChoice == "1.5" ? 1.5 : 1.0
 showVwap  = input.bool(true, "Plot VWAP", group = "Strategy")
 
+// ORB break filter
+useOrb  = input.bool(true, "Only trade after 15m ORB break", group = "ORB break filter")
+orbSess = input.session("0930-0945", "ORB (opening range) window", group = "ORB break filter")
+orbType = input.string("Close", "Break type", options = ["Wick", "Close"], group = "ORB break filter",
+     tooltip="Wick = price trades beyond the ORB. Close = the CHART-timeframe candle closes beyond it (1m candle on a 1m chart, 5m on a 5m chart). Long needs an UPSIDE break; short needs a DOWNSIDE break.")
+
 // ---------------------------------------------------------------- Anchored VWAP (session-reset)
 inSess     = not na(time(timeframe.period, sess, tz))
 newSession = inSess and not inSess[1]
@@ -63,6 +69,27 @@ else if inSess
     dHigh := math.max(dHigh, high)
     dLow  := math.min(dLow, low)
 
+// ---------------------------------------------------------------- 15m ORB break gate
+// "Close" break uses the CHART-timeframe candle (1m candle on 1m chart, 5m on 5m chart).
+inOrb = not na(time(timeframe.period, orbSess, tz))
+var float orbH   = na
+var float orbL   = na
+var bool  brokeUp = false
+var bool  brokeDn = false
+if newSession
+    orbH    := na
+    orbL    := na
+    brokeUp := false
+    brokeDn := false
+if inOrb
+    orbH := na(orbH) ? high : math.max(orbH, high)
+    orbL := na(orbL) ? low  : math.min(orbL, low)
+if not inOrb and not na(orbH)
+    if (orbType == "Wick" ? high >= orbH : close > orbH)
+        brokeUp := true
+    if (orbType == "Wick" ? low <= orbL : close < orbL)
+        brokeDn := true
+
 // ---------------------------------------------------------------- Time windows
 tod        = hour(time, tz) * 60 + minute(time, tz)
 inWindow   = tod >= (startH*60+startM) and tod <= (cutH*60+cutM) and inSess
@@ -74,8 +101,10 @@ var float curTarget = na
 flat = strategy.position_size == 0
 
 canArm = flat and inWindow and not flatten and nTrades < maxTrades and not na(vwap)
-longSetup  = canArm and vwapUp and close > vwap and dHigh > vwap   // pullback long to rising VWAP, room to HOD
-shortSetup = canArm and vwapDn and close < vwap and dLow  < vwap   // pullback short to falling VWAP, room to LOD
+orbOkLong  = not useOrb or brokeUp     // longs only after an upside 15m ORB break
+orbOkShort = not useOrb or brokeDn     // shorts only after a downside 15m ORB break
+longSetup  = canArm and vwapUp and close > vwap and dHigh > vwap and orbOkLong   // pullback long to rising VWAP, room to HOD
+shortSetup = canArm and vwapDn and close < vwap and dLow  < vwap and orbOkShort  // pullback short to falling VWAP, room to LOD
 
 if longSetup
     strategy.entry("L", strategy.long, qty = qty, limit = vwap)
