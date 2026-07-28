@@ -20,7 +20,7 @@ cutH   = input.int(15, "Entry cutoff hour",   0, 23, group = "Time")
 cutM   = input.int(30, "Entry cutoff minute", 0, 59, group = "Time")
 eodH   = input.int(16, "EOD flatten hour",   0, 23, group = "Time")
 eodM   = input.int(0,  "EOD flatten minute", 0, 59, group = "Time")
-maxTrades = input.int(1, "Max trades per day", 1, 10, group = "Strategy")
+maxTrades = input.int(3, "Max trades per day (re-enter after loss while FVG untouched)", 1, 10, group = "Strategy")
 qty    = input.float(1, "Contracts", minval = 1, group = "Strategy")
 showFvg= input.bool(true, "Draw the 15m FVG", group = "Strategy")
 
@@ -116,9 +116,10 @@ if high[2] < low                          // bullish 1m FVG (current bar is C3) 
 if low[2] > high                          // bearish 1m FVG -> top = low[2]
     bearTop := low[2]
 
-// ---------------------------------------------------------------- Void the setup if the magnet is reached pre-entry
+// ---------------------------------------------------------------- Void the setup once the FVG (magnet) is touched
+// Touched by a winning TP or by price simply reaching it -> no more re-entries. Checked in or out of a trade.
 flat = strategy.position_size == 0
-if fvgLive and flat
+if fvgLive
     if fvgDir == -1 and low  <= tpLevel
         fvgLive := false
     if fvgDir == 1  and high >= tpLevel
@@ -143,10 +144,14 @@ if justShort
     nTrades += 1
     curTarget := tpLevel
     curStop   := dH
+    bullBot := na          // require a FRESH 1m IFVG before any re-entry
+    bearTop := na
 if justLong
     nTrades += 1
     curTarget := tpLevel
     curStop   := dL
+    bullBot := na
+    bearTop := na
 
 // ---------------------------------------------------------------- Exits
 if strategy.position_size != 0
