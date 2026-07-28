@@ -1,0 +1,57 @@
+//@version=6
+// Anchored VWAP from the 09:30 NY open.
+// Re-anchors at the start of each RTH session and accumulates only within it, so every day
+// plots as its own clean anchored VWAP. Optional standard-deviation bands (1/2/3 sigma).
+indicator("Anchored VWAP — 09:30 open", overlay = true)
+
+// ---------------------------------------------------------------- Inputs
+tz       = input.string("America/New_York", "Timezone", group = "Anchor")
+sess     = input.session("0930-1600", "Session (VWAP anchors at its START)", group = "Anchor")
+src      = input.source(hlc3, "Source", group = "Anchor")
+
+vwapCol  = input.color(color.new(#ff9800, 0), "VWAP color", group = "Style")
+vwapW    = input.int(2, "VWAP width", 1, 5, group = "Style")
+showBands= input.bool(true, "Show std-dev bands", group = "Bands")
+m1       = input.float(1.0, "Band 1 (sigma)", 0, step = 0.5, group = "Bands")
+m2       = input.float(2.0, "Band 2 (sigma)", 0, step = 0.5, group = "Bands")
+m3       = input.float(3.0, "Band 3 (sigma)", 0, step = 0.5, group = "Bands")
+bandCol  = input.color(color.new(color.gray, 20), "Band color", group = "Bands")
+fillIn   = input.bool(true, "Shade inner band", group = "Bands")
+
+// ---------------------------------------------------------------- Session-anchored accumulation
+inSess     = not na(time(timeframe.period, sess, tz))
+newSession = inSess and not inSess[1]      // first bar of the RTH session = the 09:30 anchor
+
+var float sPV  = 0.0   // sum(src * vol)
+var float sV   = 0.0   // sum(vol)
+var float sP2V = 0.0   // sum(src^2 * vol)
+if newSession
+    sPV  := 0.0
+    sV   := 0.0
+    sP2V := 0.0
+if inSess
+    v = nz(volume, 1.0)                     // fall back to 1 if the symbol has no volume
+    sPV  += src * v
+    sV   += v
+    sP2V += src * src * v
+
+vwap = inSess and sV > 0 ? sPV / sV : na
+varc = inSess and sV > 0 ? math.max(sP2V / sV - vwap * vwap, 0) : na
+dev  = na(varc) ? na : math.sqrt(varc)
+
+up1 = na(dev) ? na : vwap + m1 * dev
+dn1 = na(dev) ? na : vwap - m1 * dev
+up2 = na(dev) ? na : vwap + m2 * dev
+dn2 = na(dev) ? na : vwap - m2 * dev
+up3 = na(dev) ? na : vwap + m3 * dev
+dn3 = na(dev) ? na : vwap - m3 * dev
+
+// ---------------------------------------------------------------- Plots (na outside session -> clean daily segments)
+plot(vwap, "VWAP", color = vwapCol, linewidth = vwapW)
+pu1 = plot(showBands ? up1 : na, "Upper 1", color = bandCol)
+pd1 = plot(showBands ? dn1 : na, "Lower 1", color = bandCol)
+plot(showBands ? up2 : na, "Upper 2", color = bandCol)
+plot(showBands ? dn2 : na, "Lower 2", color = bandCol)
+plot(showBands ? up3 : na, "Upper 3", color = color.new(bandCol, 40))
+plot(showBands ? dn3 : na, "Lower 3", color = color.new(bandCol, 40))
+fill(pu1, pd1, color = (showBands and fillIn) ? color.new(vwapCol, 92) : na, title = "Inner band fill")
