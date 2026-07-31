@@ -1,0 +1,91 @@
+//@version=6
+// Initial Balance (first hour) indicator.
+//   - Marks the IB high/low (09:30-10:30) and the IB range as a box.
+//   - Fib retracement inside the range: 25 / 50 / 75%.
+//   - Range extensions above & below: 10 / 20 / 30 / 40 / 50% of the range.
+//   - Bias 1 (sequence): LOW made before HIGH in the first hour -> long bias; HIGH before LOW -> short bias.
+//   - Bias 2 (1H candle direction): green first-hour candle -> long; red -> short.
+indicator("Initial Balance (IB) — fib + extensions + bias", overlay = true,
+     max_lines_count = 500, max_labels_count = 500, max_boxes_count = 100)
+
+// ---------------------------------------------------------------- Inputs
+tz       = input.string("America/New_York", "Timezone", group = "Session")
+ibSess   = input.session("0930-1030", "Initial Balance window", group = "Session")
+rightBars= input.int(60, "Extend levels right (bars)", 0, 500, group = "Style")
+showFib  = input.bool(true, "Show fib retracement (25/50/75%)", group = "Levels")
+showExt  = input.bool(true, "Show range extensions (10..50%)", group = "Levels")
+showBias = input.bool(true, "Show bias labels", group = "Levels")
+ibCol    = input.color(color.new(color.gray, 0),   "IB high/low", group = "Colors")
+fibCol   = input.color(color.new(color.orange, 0), "Fib levels",  group = "Colors")
+extCol   = input.color(color.new(color.blue, 0),   "Extensions",  group = "Colors")
+
+// ---------------------------------------------------------------- IB tracking
+inIB   = not na(time(timeframe.period, ibSess, tz))
+newIB  = inIB and not inIB[1]
+ibDone = not inIB and inIB[1]
+
+var float ibH = na
+var float ibL = na
+var int   ibHbar = na
+var int   ibLbar = na
+var int   ibStart = na
+var float ibOpen  = na
+if newIB
+    ibH := high
+    ibL := low
+    ibHbar := bar_index
+    ibLbar := bar_index
+    ibStart := bar_index
+    ibOpen := open
+else if inIB
+    if high > ibH
+        ibH := high
+        ibHbar := bar_index
+    if low < ibL
+        ibL := low
+        ibLbar := bar_index
+
+// ---------------------------------------------------------------- Draw helper (one level = line + right-side label)
+drawLevel(int x1, int x2, float p, string txt, color col, string stl) =>
+    line.new(x1, p, x2, p, xloc = xloc.bar_index, color = col, style = stl)
+    label.new(x2, p, txt, xloc = xloc.bar_index, style = label.style_label_left, textcolor = col, color = color.new(color.black, 100), size = size.small)
+
+// ---------------------------------------------------------------- On IB completion: draw everything + biases
+if ibDone and not na(ibH) and ibH > ibL
+    x1  = ibStart
+    x2  = bar_index + rightBars
+    rng = ibH - ibL
+    ibClose = close[1]                       // close of the last IB bar
+
+    // biases
+    seqBias  = ibLbar < ibHbar ? 1 : ibHbar < ibLbar ? -1 : 0     // low-first -> long
+    candBias = ibClose > ibOpen ? 1 : ibClose < ibOpen ? -1 : 0   // green 1H -> long
+
+    // IB range box, tinted by the 1H candle bias
+    boxCol = candBias == 1 ? color.new(color.teal, 88) : candBias == -1 ? color.new(color.red, 88) : color.new(color.gray, 90)
+    box.new(x1, ibH, x2, ibL, xloc = xloc.bar_index, border_color = color.new(ibCol, 40), bgcolor = boxCol)
+
+    // IB high / low
+    drawLevel(x1, x2, ibH, "IB High", ibCol, line.style_solid)
+    drawLevel(x1, x2, ibL, "IB Low",  ibCol, line.style_solid)
+
+    // fib retracement
+    if showFib
+        drawLevel(x1, x2, ibL + 0.25 * rng, "25%", fibCol, line.style_dashed)
+        drawLevel(x1, x2, ibL + 0.50 * rng, "50%", fibCol, line.style_dashed)
+        drawLevel(x1, x2, ibL + 0.75 * rng, "75%", fibCol, line.style_dashed)
+
+    // range extensions 10..50% above and below
+    if showExt
+        for k = 1 to 5
+            m = k * 0.10
+            drawLevel(x1, x2, ibH + m * rng, "+" + str.tostring(k * 10) + "%", extCol, line.style_dotted)
+            drawLevel(x1, x2, ibL - m * rng, "-" + str.tostring(k * 10) + "%", extCol, line.style_dotted)
+
+    // bias label
+    if showBias
+        seqTxt  = seqBias  == 1 ? "Seq: LONG (low→high)" : seqBias  == -1 ? "Seq: SHORT (high→low)" : "Seq: —"
+        candTxt = candBias == 1 ? "1H: GREEN → long"     : candBias == -1 ? "1H: RED → short"       : "1H: flat"
+        bCol    = candBias == 1 ? color.teal : candBias == -1 ? color.red : color.gray
+        label.new(x1, ibH, seqTxt + "\n" + candTxt, xloc = xloc.bar_index, style = label.style_label_down,
+             color = color.new(bCol, 80), textcolor = bCol, size = size.small)
