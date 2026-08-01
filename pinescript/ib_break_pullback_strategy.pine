@@ -29,6 +29,15 @@ cutM      = input.int(0,  "Entry cutoff minute", 0, 59, group = "Time")
 flatH     = input.int(16, "Flatten hour",   0, 23, group = "Time")
 flatM     = input.int(0,  "Flatten minute", 0, 59, group = "Time")
 
+// ---- Automation (PickMyTrade webhook -> Tradovate)
+grpA      = "Automation - PickMyTrade"
+autoOn    = input.bool(false, "Enable webhook alerts", group = grpA,
+     tooltip = "Turn ON, then create ONE alert on this strategy with condition 'alert() function calls only' and paste PickMyTrade's webhook URL. IMPORTANT: verify the JSON fields below match PickMyTrade's current template before trading live; adjust the f_pmt() function if needed. Alerts fire on bar close after a fill, so the broker enters slightly after the simulated fill.")
+pmtToken  = input.string("", "PickMyTrade token", group = grpA)
+pmtAcct   = input.string("", "Tradovate account id", group = grpA)
+pmtSym    = input.string("MNQ1!", "Broker symbol", group = grpA)
+pmtType   = input.string("market", "Order type", options = ["market", "limit"], group = grpA)
+
 // ---------------------------------------------------------------- Session / IB tracking
 inSess     = not na(time(timeframe.period, sess, tz))
 newSession = inSess and not inSess[1]
@@ -160,6 +169,28 @@ if strategy.position_size != 0
 
 if flatten
     strategy.close_all(comment = "EOD flat")
+
+// ---------------------------------------------------------------- Automation: PickMyTrade webhook JSON
+// VERIFY these field names against PickMyTrade's current alert template and edit here if needed.
+f_pmt(string act, float q, float slp, float tpp) =>
+    '{"token":"' + pmtToken + '","account_id":"' + pmtAcct + '","symbol":"' + pmtSym +
+      '","action":"' + act + '","quantity":' + str.tostring(q) +
+      ',"order_type":"' + pmtType +
+      '","sl":' + str.tostring(math.round_to_mintick(slp)) +
+      ',"tp":' + str.tostring(math.round_to_mintick(tpp)) + '}'
+
+buyNow   = strategy.position_size > 0 and (strategy.position_size[1] <= 0 or strategy.position_size > strategy.position_size[1])
+sellNow  = strategy.position_size < 0 and (strategy.position_size[1] >= 0 or strategy.position_size < strategy.position_size[1])
+closeNow = flatten and strategy.position_size[1] != 0
+if autoOn and buyNow
+    alert(f_pmt("buy",  qty, curStop, curTP), alert.freq_once_per_bar)
+if autoOn and sellNow
+    alert(f_pmt("sell", qty, curStop, curTP), alert.freq_once_per_bar)
+if autoOn and closeNow
+    alert(f_pmt("close", 0, 0.0, 0.0), alert.freq_once_per_bar)
+// Optional: propagate the breakeven stop move (confirm PickMyTrade's SL-update action name)
+if autoOn and useBE and beDone and not beDone[1]
+    alert(f_pmt("update_sl", 0, curStop, 0.0), alert.freq_once_per_bar)
 
 // ---------------------------------------------------------------- Visuals
 plot(not na(ibH) ? ibH : na, "IB High", color = color.new(color.teal, 0), style = plot.style_linebr)
