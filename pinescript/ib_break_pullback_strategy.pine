@@ -8,7 +8,7 @@
 //   Stop = zone (shallow: IB low ; deeper: 75% line) — shared by both units. Optional breakeven when price
 //   reclaims the IB level. TP = IB level / HOD-LOD / +10% / +30%. One setup/day, EOD flatten.
 //   Capital & leverage limits removed (margin 0, big initial capital) so trades never get skipped on a small acct.
-strategy("IB Break-then-Pullback", overlay = true, pyramiding = 2,
+strategy("IB Break-then-Pullback", overlay = true, pyramiding = 2, max_boxes_count = 20, max_labels_count = 50,
      initial_capital = 1000000, margin_long = 0, margin_short = 0,
      default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
      commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
@@ -37,6 +37,12 @@ pmtToken  = input.string("", "PickMyTrade token", group = grpA)
 pmtAcct   = input.string("", "Tradovate account id", group = grpA)
 pmtSym    = input.string("MNQ1!", "Broker symbol", group = grpA)
 pmtType   = input.string("market", "Order type", options = ["market", "limit"], group = grpA)
+
+// ---- Risk/Reward tool
+grpRR     = "Risk / Reward tool"
+showRR    = input.bool(true, "Show risk/reward box at the break", group = grpRR)
+ptVal     = input.float(2.0, "$ per point per contract", group = grpRR, tooltip = "MNQ=2, NQ=20, MES=5, ES=50. Risk/reward $ = points x this x contracts.")
+rrBars    = input.int(24, "R/R box width (bars)", 1, 300, group = grpRR)
 
 // ---------------------------------------------------------------- Session / IB tracking
 inSess     = not na(time(timeframe.period, sess, tz))
@@ -191,6 +197,32 @@ if autoOn and closeNow
 // Optional: propagate the breakeven stop move (confirm PickMyTrade's SL-update action name)
 if autoOn and useBE and beDone and not beDone[1]
     alert(f_pmt("update_sl", 0, curStop, 0.0), alert.freq_once_per_bar)
+
+// ---------------------------------------------------------------- Risk/Reward tool (drawn when the IB level breaks)
+var box   rrRisk = na
+var box   rrRew  = na
+var label rrLbl  = na
+if newSession
+    box.delete(rrRisk)
+    box.delete(rrRew)
+    label.delete(rrLbl)
+if showRR and dir != 0 and broke and not broke[1] and not na(entry1) and not na(zstop)
+    ptp = dir == 1 ? (tpMethod == "HOD/LOD" ? dHigh : tpMethod == "Ext 10%" ? ibH + 0.10*rng : tpMethod == "Ext 30%" ? ibH + 0.30*rng : ibH) : (tpMethod == "HOD/LOD" ? dLow : tpMethod == "Ext 10%" ? ibL - 0.10*rng : tpMethod == "Ext 30%" ? ibL - 0.30*rng : ibL)
+    x1 = bar_index
+    x2 = bar_index + rrBars
+    riskUsd = math.abs(entry1 - zstop) * ptVal * qty
+    rewUsd  = math.abs(ptp - entry1) * ptVal * qty
+    rrr = riskUsd > 0 ? rewUsd / riskUsd : na
+    box.delete(rrRisk)
+    box.delete(rrRew)
+    label.delete(rrLbl)
+    if dir == 1
+        rrRew  := box.new(x1, ptp,    x2, entry1, xloc = xloc.bar_index, border_color = color.new(color.green, 100), bgcolor = color.new(color.green, 82))
+        rrRisk := box.new(x1, entry1, x2, zstop,  xloc = xloc.bar_index, border_color = color.new(color.red, 100),   bgcolor = color.new(color.red, 82))
+    else
+        rrRew  := box.new(x1, entry1, x2, ptp,    xloc = xloc.bar_index, border_color = color.new(color.green, 100), bgcolor = color.new(color.green, 82))
+        rrRisk := box.new(x1, zstop,  x2, entry1, xloc = xloc.bar_index, border_color = color.new(color.red, 100),   bgcolor = color.new(color.red, 82))
+    rrLbl := label.new(x2, entry1, "Risk $" + str.tostring(riskUsd, "#") + "  |  Reward $" + str.tostring(rewUsd, "#") + "  (" + str.tostring(rrr, "#.##") + "R, " + str.tostring(qty, "#.#") + "x)", xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.gray, 15), textcolor = color.white, size = size.small)
 
 // ---------------------------------------------------------------- Visuals
 plot(not na(ibH) ? ibH : na, "IB High", color = color.new(color.teal, 0), style = plot.style_linebr)
