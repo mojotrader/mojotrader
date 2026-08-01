@@ -20,9 +20,10 @@ ibSess    = input.session("0930-1030", "Initial Balance window", group = "Sessio
 allowLong = input.bool(true,  "Take longs", group = "Strategy")
 allowShort= input.bool(false, "Take shorts (weak in tests)", group = "Strategy")
 avgDown   = input.bool(true,  "Average down: add 2nd unit at 50% (shallow setups)", group = "Strategy")
-stopCfg   = input.string("25%->75% , 50%->100%", "Stop placement", options = ["25%->75% , 50%->100%", "25%->100% , 50%->75%"], group = "Strategy",
-     tooltip = "Where the protective stop sits, named by [entry zone -> stop level] (fib 0% = IB high for longs):\n\n• 25%->75% , 50%->100%  (DEFAULT):  a 25% entry stops at the 75% line ; a 50% entry stops at the IB extreme (100%). Both then risk 0.5x the IB range -> uniform sizing.\n\n• 25%->100% , 50%->75%:  a 25% entry stops at the IB extreme ; a 50% entry stops at the 75% line. (This was the earlier EV-sweep placement.)\n\nLongs: the stop is on the IB-low side, below entry. Shorts mirror above. The two configs backtested about equal.")
-tpMethod  = input.string("IB level", "Take profit", options = ["IB level", "HOD/LOD", "Ext 10%", "Ext 30%"], group = "Strategy")
+tpMethod  = input.string("IB level", "Take profit", options = ["IB level", "HOD/LOD", "Ext 10%", "Ext 30%"], group = "Strategy",
+     tooltip = "Stops (fixed, best in tests): 25% entry -> IB extreme (100%) ; 50% entry -> 75% line.")
+usePDtgt  = input.bool(false, "Prior-day-range target when 09:30 opens inside yesterday's RTH range", group = "Strategy",
+     tooltip = "When today's 09:30 open is INSIDE yesterday's RTH high/low, one side of that range usually gets breached. If checked, the target is moved to the prior-day RTH HIGH (long) / LOW (short) — but never closer than the +30% extension. So: target = the FURTHER of {prior-day level, +30% ext}. Overrides the 'Take profit' setting on those days only.")
 useBE     = input.bool(false, "Breakeven when price reclaims the IB level", group = "Strategy")
 qty       = input.float(1, "Contracts per unit", minval = 1, group = "Strategy")
 cutH      = input.int(15, "Entry cutoff hour",   0, 23, group = "Time")
@@ -42,6 +43,9 @@ var int   ibHbar = na
 var int   ibLbar = na
 var float dHigh = na
 var float dLow  = na
+var float pdH   = na    // prior-day RTH high / low, and today's 09:30 open
+var float pdL   = na
+var float dayOpen = na
 var int   dir     = 0
 var bool  shallow = false
 var float entry1  = na
@@ -54,6 +58,9 @@ var bool  wasIn   = false
 var bool  done    = false
 
 if newSession
+    pdH := dHigh                 // prior session's RTH high/low (captured before reset)
+    pdL := dLow
+    dayOpen := open              // today's 09:30 open
     ibH := na
     ibL := na
     dHigh := high
@@ -88,13 +95,13 @@ if ibDone and not na(ibH) and ibH > ibL
         shallow := pos >= 0.75
         entry1 := shallow ? ibL + 0.75*rng : ibL + 0.5*rng
         entry2 := ibL + 0.5*rng                     // 50% line, used only if shallow + avgDown
-        zstop := stopCfg == "25%->75% , 50%->100%" ? (shallow ? ibL + 0.25*rng : ibL) : (shallow ? ibL : ibL + 0.25*rng)
+        zstop := shallow ? ibL : ibL + 0.25*rng           // 25% entry -> IB low ; 50% entry -> 75% line
     else if allowShort and (not lowFirst) and pos <= 0.5
         dir := -1
         shallow := pos <= 0.25
         entry1 := shallow ? ibL + 0.25*rng : ibL + 0.5*rng
         entry2 := ibL + 0.5*rng
-        zstop := stopCfg == "25%->75% , 50%->100%" ? (shallow ? ibL + 0.75*rng : ibH) : (shallow ? ibH : ibL + 0.75*rng)
+        zstop := shallow ? ibH : ibL + 0.75*rng           // 25% entry -> IB high ; 50% entry -> 75% line
 
 useAdd = avgDown and shallow and not na(entry2)
 
@@ -141,6 +148,13 @@ if opened
         curTP := tpMethod == "HOD/LOD" ? dHigh : tpMethod == "Ext 10%" ? ibH + 0.10*rng : tpMethod == "Ext 30%" ? ibH + 0.30*rng : ibH
     else
         curTP := tpMethod == "HOD/LOD" ? dLow  : tpMethod == "Ext 10%" ? ibL - 0.10*rng : tpMethod == "Ext 30%" ? ibL - 0.30*rng : ibL
+    // prior-day-range target override: only when 09:30 opened INSIDE yesterday's RTH range
+    openInside = not na(pdH) and not na(pdL) and not na(dayOpen) and dayOpen >= pdL and dayOpen <= pdH
+    if usePDtgt and openInside
+        if dir == 1
+            curTP := math.max(pdH, ibH + 0.30*rng)        // further of prior-day high / +30% ext
+        else
+            curTP := math.min(pdL, ibL - 0.30*rng)        // further of prior-day low / +30% ext
     beDone := false
 
 // ---------------------------------------------------------------- Breakeven (uses blended avg price) when IB reclaimed
