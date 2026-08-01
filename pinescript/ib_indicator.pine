@@ -53,6 +53,7 @@ drawLevel(int x1, int x2, float p, string txt, color col, string stl) =>
 // ---------------------------------------------------------------- On IB completion: draw everything + biases
 if ibDone and not na(ibH) and ibH > ibL
     x1  = ibStart
+    ibEnd = bar_index                        // this bar = 10:30 (first bar after the IB window)
     x2  = bar_index + rightBars
     rng = ibH - ibL
     ibClose = close[1]                       // close of the last IB bar
@@ -63,7 +64,7 @@ if ibDone and not na(ibH) and ibH > ibL
 
     // IB range box, tinted by the 1H candle bias
     boxCol = candBias == 1 ? color.new(color.teal, 88) : candBias == -1 ? color.new(color.red, 88) : color.new(color.gray, 90)
-    box.new(x1, ibH, x2, ibL, xloc = xloc.bar_index, border_color = color.new(ibCol, 40), bgcolor = boxCol)
+    box.new(x1, ibH, ibEnd, ibL, xloc = xloc.bar_index, border_color = color.new(ibCol, 40), bgcolor = boxCol)
 
     // IB high / low
     drawLevel(x1, x2, ibH, "IB High", ibCol, line.style_solid)
