@@ -1,0 +1,146 @@
+//@version=6
+// IB break-then-pullback (run on a 5m chart).
+//   1) First hour (09:30-10:30) sets the IB. At 10:30: bias = low-before-high (long) / high-before-low (short),
+//      and the 10:30 close must be in the top half (long) / bottom half (short) of the IB range.
+//   2) The trade ARMS only AFTER the IB level breaks (high>IB high for longs / low<IB low for shorts).
+//   3) Then a LIMIT buy/sell rests at the fib pullback line: shallow(0-25%)->25% line, deeper(25-50%)->50% line.
+//   4) Fill on the pullback. Stop = zone (shallow: IB low ; deeper: 75% line). Optional breakeven when price
+//      reclaims the IB level. TP = IB level / HOD-LOD / +10% / +30% extension.  One trade/day, EOD flatten.
+//   NOTE: this is the "break-then-pullback" idea (PF looked high but small sample / fat-tail) — validate honestly.
+strategy("IB Break-then-Pullback", overlay = true, pyramiding = 0,
+     default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
+
+// ---------------------------------------------------------------- Inputs
+tz        = input.string("America/New_York", "Timezone", group = "Session")
+sess      = input.session("0930-1600", "RTH session", group = "Session")
+ibSess    = input.session("0930-1030", "Initial Balance window", group = "Session")
+allowLong = input.bool(true,  "Take longs", group = "Strategy")
+allowShort= input.bool(false, "Take shorts (weak in tests)", group = "Strategy")
+tpMethod  = input.string("IB level", "Take profit", options = ["IB level", "HOD/LOD", "Ext 10%", "Ext 30%"], group = "Strategy")
+useBE     = input.bool(false, "Breakeven when price reclaims the IB level", group = "Strategy")
+qty       = input.float(1, "Contracts", minval = 1, group = "Strategy")
+cutH      = input.int(15, "Entry cutoff hour",   0, 23, group = "Time")
+cutM      = input.int(0,  "Entry cutoff minute", 0, 59, group = "Time")
+flatH     = input.int(16, "Flatten hour",   0, 23, group = "Time")
+flatM     = input.int(0,  "Flatten minute", 0, 59, group = "Time")
+
+// ---------------------------------------------------------------- Session / IB tracking
+inSess     = not na(time(timeframe.period, sess, tz))
+newSession = inSess and not inSess[1]
+inIB       = not na(time(timeframe.period, ibSess, tz))
+ibDone     = not inIB and inIB[1]
+
+var float ibH = na
+var float ibL = na
+var int   ibHbar = na
+var int   ibLbar = na
+var float dHigh = na
+var float dLow  = na
+var int   nTrades = 0
+// setup (resolved at 10:30)
+var int   dir   = 0
+var float entry = na
+var float zstop = na
+var float rng   = na
+var bool  broke = false
+
+if newSession
+    ibH := na
+    ibL := na
+    dHigh := high
+    dLow  := low
+    nTrades := 0
+    dir := 0
+    broke := false
+    entry := na
+    zstop := na
+if inIB
+    if na(ibH) or high > ibH
+        ibH := high
+        ibHbar := bar_index
+    if na(ibL) or low < ibL
+        ibL := low
+        ibLbar := bar_index
+if inSess and not newSession
+    dHigh := math.max(dHigh, high)
+    dLow  := math.min(dLow, low)
+
+// resolve setup at 10:30
+if ibDone and not na(ibH) and ibH > ibL
+    rng := ibH - ibL
+    lowFirst = ibLbar < ibHbar
+    pos = (close[1] - ibL) / rng
+    if allowLong and lowFirst and pos >= 0.5
+        dir := 1
+        entry := pos >= 0.75 ? ibL + 0.75*rng : ibL + 0.5*rng
+        zstop := pos >= 0.75 ? ibL            : ibL + 0.25*rng
+    else if allowShort and (not lowFirst) and pos <= 0.5
+        dir := -1
+        entry := pos <= 0.25 ? ibL + 0.25*rng : ibL + 0.5*rng
+        zstop := pos <= 0.25 ? ibH            : ibL + 0.75*rng
+
+// ---------------------------------------------------------------- Time gates
+tod      = hour(time, tz) * 60 + minute(time, tz)
+inWindow = inSess and tod <= (cutH*60 + cutM)
+flatten  = tod >= (flatH*60 + flatM)
+
+// ---------------------------------------------------------------- Detect the IB break, then arm the pullback limit
+if dir == 1 and high >= ibH
+    broke := true
+if dir == -1 and low <= ibL
+    broke := true
+
+flat = strategy.position_size == 0
+canArm = flat and dir != 0 and broke and inWindow and not flatten and nTrades < 1 and not na(entry)
+if canArm and dir == 1
+    strategy.entry("L", strategy.long,  qty = qty, limit = entry)
+else if canArm and dir == -1
+    strategy.entry("S", strategy.short, qty = qty, limit = entry)
+else if flat
+    strategy.cancel("L")
+    strategy.cancel("S")
+
+// ---------------------------------------------------------------- On fill: set TP / stop
+var float curStop   = na
+var float curTP     = na
+var float curEntry  = na
+var bool  beDone    = false
+justLong  = strategy.position_size > 0 and strategy.position_size[1] <= 0
+justShort = strategy.position_size < 0 and strategy.position_size[1] >= 0
+if justLong
+    nTrades += 1
+    curEntry := strategy.position_avg_price
+    curStop  := zstop
+    curTP    := tpMethod == "HOD/LOD" ? dHigh : tpMethod == "Ext 10%" ? ibH + 0.10*rng : tpMethod == "Ext 30%" ? ibH + 0.30*rng : ibH
+    beDone   := false
+if justShort
+    nTrades += 1
+    curEntry := strategy.position_avg_price
+    curStop  := zstop
+    curTP    := tpMethod == "HOD/LOD" ? dLow  : tpMethod == "Ext 10%" ? ibL - 0.10*rng : tpMethod == "Ext 30%" ? ibL - 0.30*rng : ibL
+    beDone   := false
+
+// ---------------------------------------------------------------- Breakeven when price reclaims the IB level
+if useBE and not beDone and strategy.position_size != 0 and not na(curEntry)
+    if strategy.position_size > 0 and high >= ibH
+        curStop := math.max(curStop, curEntry)
+        beDone  := true
+    if strategy.position_size < 0 and low <= ibL
+        curStop := math.min(curStop, curEntry)
+        beDone  := true
+
+// ---------------------------------------------------------------- Exits
+if strategy.position_size != 0
+    strategy.exit("Lx", from_entry = "L", stop = curStop, limit = curTP)
+    strategy.exit("Sx", from_entry = "S", stop = curStop, limit = curTP)
+
+if flatten
+    strategy.cancel("L")
+    strategy.cancel("S")
+    strategy.close_all(comment = "EOD flat")
+
+// ---------------------------------------------------------------- Visuals
+plot(not na(ibH) ? ibH : na, "IB High", color = color.new(color.teal, 0), style = plot.style_linebr)
+plot(not na(ibL) ? ibL : na, "IB Low",  color = color.new(color.red, 0),  style = plot.style_linebr)
+plot(dir != 0 and not na(entry) ? entry : na, "Entry (fib)", color = color.new(color.orange, 0), style = plot.style_linebr)
