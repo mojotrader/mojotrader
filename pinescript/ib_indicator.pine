@@ -13,6 +13,7 @@ tz       = input.string("America/New_York", "Timezone", group = "Session")
 ibSess   = input.session("0930-1030", "Initial Balance window", group = "Session")
 rightBars= input.int(60, "Extend levels right (bars)", 0, 500, group = "Style")
 showFib  = input.bool(true, "Show fib retracement (25/50/75%)", group = "Levels")
+fibBiasSrc = input.string("Sequence", "Flip fib by bias", options = ["Sequence", "Candle"], group = "Levels", tooltip = "Long bias -> fib 0% at the TOP (25% near the high, the shallow-pullback zone). Short bias -> 0% at the bottom.")
 showExt  = input.bool(true, "Show range extensions (10..50%)", group = "Levels")
 showBias = input.bool(true, "Show bias labels", group = "Levels")
 ibCol    = input.color(color.new(color.gray, 0),   "IB high/low", group = "Colors")
@@ -61,6 +62,7 @@ if ibDone and not na(ibH) and ibH > ibL
     // biases
     seqBias  = ibLbar < ibHbar ? 1 : ibHbar < ibLbar ? -1 : 0     // low-first -> long
     candBias = ibClose > ibOpen ? 1 : ibClose < ibOpen ? -1 : 0   // green 1H -> long
+    effBias  = fibBiasSrc == "Candle" ? candBias : seqBias        // drives fib orientation
 
     // IB range box, tinted by the 1H candle bias
     boxCol = candBias == 1 ? color.new(color.teal, 88) : candBias == -1 ? color.new(color.red, 88) : color.new(color.gray, 90)
@@ -70,11 +72,13 @@ if ibDone and not na(ibH) and ibH > ibL
     drawLevel(x1, x2, ibH, "IB High", ibCol, line.style_solid)
     drawLevel(x1, x2, ibL, "IB Low",  ibCol, line.style_solid)
 
-    // fib retracement
+    // fib retracement — long: 0% at the top (25% near the high); short: 0% at the bottom
     if showFib
-        drawLevel(x1, x2, ibL + 0.25 * rng, "25%", fibCol, line.style_dashed)
-        drawLevel(x1, x2, ibL + 0.50 * rng, "50%", fibCol, line.style_dashed)
-        drawLevel(x1, x2, ibL + 0.75 * rng, "75%", fibCol, line.style_dashed)
+        p25 = effBias == -1 ? ibL + 0.25 * rng : ibH - 0.25 * rng
+        p75 = effBias == -1 ? ibL + 0.75 * rng : ibH - 0.75 * rng
+        drawLevel(x1, x2, p25,             "25%", fibCol, line.style_dashed)
+        drawLevel(x1, x2, ibL + 0.5 * rng, "50%", fibCol, line.style_dashed)
+        drawLevel(x1, x2, p75,             "75%", fibCol, line.style_dashed)
 
     // range extensions 10..50% above and below
     if showExt
