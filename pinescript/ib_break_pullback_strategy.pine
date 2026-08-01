@@ -20,8 +20,8 @@ ibSess    = input.session("0930-1030", "Initial Balance window", group = "Sessio
 allowLong = input.bool(true,  "Take longs", group = "Strategy")
 allowShort= input.bool(false, "Take shorts (weak in tests)", group = "Strategy")
 avgDown   = input.bool(true,  "Average down: add 2nd unit at 50% (shallow setups)", group = "Strategy")
-stopCfg   = input.string("Symmetric (new)", "Stop placement", options = ["Symmetric (new)", "Original"], group = "Strategy",
-     tooltip = "Where the protective stop sits, by setup zone (fib 0% = IB high for longs):\n\n• Symmetric (new): 25% entry -> stop at the 75% line ; 50% entry -> stop at the IB extreme (100%). Both setups then risk 0.5x the IB range, so position sizing is uniform.\n\n• Original: 25% entry -> stop at the IB extreme (100%) ; 50% entry -> stop at the 75% line.\n\nLongs: stop is on the IB-low side, below entry. Shorts mirror above. Backtests were about equal; 'Symmetric' is preferred for even risk per trade.")
+stopCfg   = input.string("25%->75% , 50%->100%", "Stop placement", options = ["25%->75% , 50%->100%", "25%->100% , 50%->75%"], group = "Strategy",
+     tooltip = "Where the protective stop sits, named by [entry zone -> stop level] (fib 0% = IB high for longs):\n\n• 25%->75% , 50%->100%  (DEFAULT):  a 25% entry stops at the 75% line ; a 50% entry stops at the IB extreme (100%). Both then risk 0.5x the IB range -> uniform sizing.\n\n• 25%->100% , 50%->75%:  a 25% entry stops at the IB extreme ; a 50% entry stops at the 75% line. (This was the earlier EV-sweep placement.)\n\nLongs: the stop is on the IB-low side, below entry. Shorts mirror above. The two configs backtested about equal.")
 tpMethod  = input.string("IB level", "Take profit", options = ["IB level", "HOD/LOD", "Ext 10%", "Ext 30%"], group = "Strategy")
 useBE     = input.bool(false, "Breakeven when price reclaims the IB level", group = "Strategy")
 qty       = input.float(1, "Contracts per unit", minval = 1, group = "Strategy")
@@ -88,13 +88,13 @@ if ibDone and not na(ibH) and ibH > ibL
         shallow := pos >= 0.75
         entry1 := shallow ? ibL + 0.75*rng : ibL + 0.5*rng
         entry2 := ibL + 0.5*rng                     // 50% line, used only if shallow + avgDown
-        zstop := stopCfg == "Symmetric (new)" ? (shallow ? ibL + 0.25*rng : ibL) : (shallow ? ibL : ibL + 0.25*rng)
+        zstop := stopCfg == "25%->75% , 50%->100%" ? (shallow ? ibL + 0.25*rng : ibL) : (shallow ? ibL : ibL + 0.25*rng)
     else if allowShort and (not lowFirst) and pos <= 0.5
         dir := -1
         shallow := pos <= 0.25
         entry1 := shallow ? ibL + 0.25*rng : ibL + 0.5*rng
         entry2 := ibL + 0.5*rng
-        zstop := stopCfg == "Symmetric (new)" ? (shallow ? ibL + 0.75*rng : ibH) : (shallow ? ibH : ibL + 0.75*rng)
+        zstop := stopCfg == "25%->75% , 50%->100%" ? (shallow ? ibL + 0.75*rng : ibH) : (shallow ? ibH : ibL + 0.75*rng)
 
 useAdd = avgDown and shallow and not na(entry2)
 
