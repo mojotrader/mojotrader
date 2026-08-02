@@ -61,6 +61,11 @@ ibQty     = input.float(1, "  IB contracts per unit", minval = 1, group = gIB)
 ibCutH    = input.int(15, "  IB entry cutoff hour",   0, 23, group = gIB)
 ibCutM    = input.int(0,  "  IB entry cutoff minute", 0, 59, group = gIB)
 
+// ---------------------------------------------------------------- Filters
+gFilt     = "Filters"
+noDbl     = input.bool(true, "Skip double-break days (both range sides break)", group = gFilt,
+     tooltip = "If the side OPPOSITE the setup direction also breaks (long: price trades below the range low; short: above the range high), cancel the pending entry and take no trade that day. Keeps you to clean one-directional break days only.")
+
 // ---------------------------------------------------------------- Automation (PickMyTrade webhook -> Tradovate)
 grpA      = "Automation - PickMyTrade"
 autoOn    = input.bool(false, "Enable webhook alerts", group = grpA,
@@ -125,6 +130,7 @@ var float or_curStop = na
 var float or_curTP = na
 var bool  or_beDone = false
 var bool  or_closed = false
+var bool  or_oppBroke = false
 
 if newSession
     or_rH := na
@@ -144,6 +150,7 @@ if newSession
     or_curTP := na
     or_beDone := false
     or_closed := false
+    or_oppBroke := false
 if or_inR
     if na(or_rH) or high > or_rH
         or_rH := high
@@ -172,9 +179,14 @@ or_useAdd = orbAvg and or_shallow and not na(or_e2)
 or_brk = orbBreak == "Wick (touch)" ? ((or_dir == 1 and high >= or_rH) or (or_dir == -1 and low <= or_rL)) : ((or_dir == 1 and close > or_rH) or (or_dir == -1 and close < or_rL))
 if or_dir != 0 and or_brk
     or_broke := true
+// double-break detection: opposite range extreme is violated
+if or_dir == 1 and low < or_rL
+    or_oppBroke := true
+if or_dir == -1 and high > or_rH
+    or_oppBroke := true
 // entry window: before IB forms (when IB is on), within ORB cutoff otherwise
 orbWin = inSess and tod <= (orbCutH*60 + orbCutM) and (not runIB or not ibFormed)
-if runORB and or_dir != 0 and or_broke and not or_placed and not or_closed and orbWin and not flatten
+if runORB and or_dir != 0 and or_broke and not or_placed and not or_closed and orbWin and not flatten and (not noDbl or not or_oppBroke)
     if or_dir == 1
         strategy.entry("ORL", strategy.long, qty = orbQty, limit = or_e1)
         if or_useAdd
@@ -219,8 +231,8 @@ if (or_f1 or or_f2) and not or_closed and not na(or_curStop)
         or_closed := true
     if or_dir == -1 and (high >= or_curStop or low <= or_curTP)
         or_closed := true
-// cancel resting ORB entries once the window closes unfilled, or done/flat/off
-if or_closed or flatten or not runORB or ((not orbWin) and not (or_f1 or or_f2))
+// cancel resting ORB entries once the window closes unfilled, or done/flat/off/double-break
+if or_closed or flatten or not runORB or (noDbl and or_oppBroke) or ((not orbWin) and not (or_f1 or or_f2))
     strategy.cancel("ORL")
     strategy.cancel("ORL2")
     strategy.cancel("ORS")
@@ -246,6 +258,7 @@ var float ib_curStop = na
 var float ib_curTP = na
 var bool  ib_beDone = false
 var bool  ib_closed = false
+var bool  ib_oppBroke = false
 
 if newSession
     ib_rH := na
@@ -265,6 +278,7 @@ if newSession
     ib_curTP := na
     ib_beDone := false
     ib_closed := false
+    ib_oppBroke := false
 if ib_inR
     if na(ib_rH) or high > ib_rH
         ib_rH := high
@@ -301,8 +315,12 @@ ib_useAdd = ibAvg and ib_shallow and not na(ib_e2)
 ib_brk = ibBreak == "Wick (touch)" ? ((ib_dir == 1 and high >= ib_rH) or (ib_dir == -1 and low <= ib_rL)) : ((ib_dir == 1 and close > ib_rH) or (ib_dir == -1 and close < ib_rL))
 if ib_dir != 0 and ib_brk
     ib_broke := true
+if ib_dir == 1 and low < ib_rL
+    ib_oppBroke := true
+if ib_dir == -1 and high > ib_rH
+    ib_oppBroke := true
 ibWin = inSess and tod <= (ibCutH*60 + ibCutM)
-if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and ibWin and not flatten
+if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and ibWin and not flatten and (not noDbl or not ib_oppBroke)
     if ib_dir == 1
         strategy.entry("IBL", strategy.long, qty = ibQty, limit = ib_e1)
         if ib_useAdd
@@ -347,7 +365,7 @@ if (ib_f1 or ib_f2) and not ib_closed and not na(ib_curStop)
         ib_closed := true
     if ib_dir == -1 and (high >= ib_curStop or low <= ib_curTP)
         ib_closed := true
-if ib_closed or flatten or not runIB or ((not ibWin) and not (ib_f1 or ib_f2))
+if ib_closed or flatten or not runIB or (noDbl and ib_oppBroke) or ((not ibWin) and not (ib_f1 or ib_f2))
     strategy.cancel("IBL")
     strategy.cancel("IBL2")
     strategy.cancel("IBS")
