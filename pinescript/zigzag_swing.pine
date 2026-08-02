@@ -1,70 +1,125 @@
 //@version=6
-// 3-bar swing ZigZag.
-//   Swing HIGH  = a 3-candle formation where the MIDDLE candle's high is above the high of the candle before
-//                 AND the candle after it.
-//   Swing LOW   = mirror: the MIDDLE candle's low is below the low of the candle before and the candle after.
-//   Pivots are confirmed on the close of the 3rd candle (non-repainting) and sit on the middle candle
-//   (bar_index - 1). The zigzag connects alternating swing highs and lows; when two same-type swings occur in a
-//   row, the more extreme one extends the current leg.
-indicator("3-Bar Swing ZigZag", overlay = true, max_lines_count = 500, max_labels_count = 500)
+// 3-bar swing ZigZag + confirmed market-structure line.
+//
+// RAW ZIGZAG (thin): connects every 3-candle swing.
+//   Swing HIGH = middle candle's high above the high of the candle before AND after it. Swing LOW mirrors.
+//   Pivots confirm on the 3rd candle's close (non-repainting) and sit on the middle candle.
+//
+// STRUCTURE LINE (thick, "different line"): only confirmed swings, NO inside swings.
+//   A swing LOW is confirmed only once a later candle TAKES the prior swing HIGH (breaks above it); the
+//   confirmed low is the lowest swing low of that leg. Vice versa: a swing HIGH is confirmed once a swing LOW
+//   is taken (broken below), using the highest swing high of the leg. Optional HH/HL/LH/LL labels.
+indicator("Swing ZigZag + Structure", overlay = true, max_lines_count = 500, max_labels_count = 500)
 
 // ---------------------------------------------------------------- Inputs
-upCol   = input.color(color.teal, "Up leg (to swing high)")
-dnCol   = input.color(color.red,  "Down leg (to swing low)")
-lw      = input.int(2, "Line width", 1, 5)
-showLbl = input.bool(true, "Mark swing points (H / L)")
+showZig  = input.bool(true,  "Show raw zigzag", group = "Raw zigzag")
+upCol    = input.color(color.new(color.teal, 20), "Up leg (to swing high)", group = "Raw zigzag")
+dnCol    = input.color(color.new(color.red, 20),  "Down leg (to swing low)", group = "Raw zigzag")
+zw       = input.int(1, "Line width", 1, 5, group = "Raw zigzag")
 
-// ---------------------------------------------------------------- State
-var float lastPrice = na       // price of the current zigzag tip
-var int   lastBar   = na       // bar_index of the current tip
-var int   lastDir   = 0        // 1 = tip is a swing high, -1 = tip is a swing low
-var line  curLine   = na       // the leg currently being drawn/extended
-var label tipLbl    = na       // label on the current tip
+showStr   = input.bool(true, "Show structure line", group = "Structure (confirmed swings)")
+strCol    = input.color(color.new(color.blue, 0), "Structure line color", group = "Structure (confirmed swings)")
+sw        = input.int(2, "Structure width", 1, 6, group = "Structure (confirmed swings)")
+strBreak  = input.string("Wick (touch)", "Structure break", options = ["Wick (touch)", "Close beyond"], group = "Structure (confirmed swings)",
+     tooltip = "How a high/low is 'taken': Wick = the high/low is exceeded intrabar; Close = the candle must close beyond it.")
+showStrLbl= input.bool(true, "Show HH / HL / LH / LL labels", group = "Structure (confirmed swings)")
 
 // ---------------------------------------------------------------- 3-bar pivots (middle candle = [1])
 phRaw = high[1] > high[2] and high[1] > high
 plRaw = low[1]  < low[2]  and low[1]  < low
-both  = phRaw and plRaw
-// on an ambiguous outside bar, resolve toward the direction that keeps the zigzag alternating
+
+// ================================================================ RAW ZIGZAG
+var float lastPrice = na
+var int   lastBar   = na
+var int   lastDir   = 0
+var line  curLine   = na
+var label tipLbl    = na
+both = phRaw and plRaw
 ph = phRaw and (not both or lastDir == -1)
 pl = plRaw and (not both or lastDir == 1)
-
-// ---------------------------------------------------------------- Swing HIGH
-if ph
+if showZig and ph
     b = bar_index - 1
     v = high[1]
     if lastDir != 1
         if not na(lastPrice)
-            curLine := line.new(lastBar, lastPrice, b, v, xloc = xloc.bar_index, color = upCol, width = lw)
+            curLine := line.new(lastBar, lastPrice, b, v, xloc = xloc.bar_index, color = upCol, width = zw)
         lastDir := 1
         lastBar := b
         lastPrice := v
-        if showLbl
-            tipLbl := label.new(b, v, "H", xloc = xloc.bar_index, style = label.style_label_down, color = color.new(upCol, 30), textcolor = color.white, size = size.tiny)
     else if v > lastPrice
         lastBar := b
         lastPrice := v
         if not na(curLine)
             line.set_xy2(curLine, b, v)
-        if showLbl and not na(tipLbl)
-            label.set_xy(tipLbl, b, v)
-
-// ---------------------------------------------------------------- Swing LOW (mirror)
-if pl
+if showZig and pl
     b = bar_index - 1
     v = low[1]
     if lastDir != -1
         if not na(lastPrice)
-            curLine := line.new(lastBar, lastPrice, b, v, xloc = xloc.bar_index, color = dnCol, width = lw)
+            curLine := line.new(lastBar, lastPrice, b, v, xloc = xloc.bar_index, color = dnCol, width = zw)
         lastDir := -1
         lastBar := b
         lastPrice := v
-        if showLbl
-            tipLbl := label.new(b, v, "L", xloc = xloc.bar_index, style = label.style_label_up, color = color.new(dnCol, 30), textcolor = color.white, size = size.tiny)
     else if v < lastPrice
         lastBar := b
         lastPrice := v
         if not na(curLine)
             line.set_xy2(curLine, b, v)
-        if showLbl and not na(tipLbl)
-            label.set_xy(tipLbl, b, v)
+
+// ================================================================ STRUCTURE (confirmed swings only)
+var float sHrec = na       // most recent swing high  (break level to take)
+var int   sHrecBar = na
+var float sLrec = na       // most recent swing low
+var int   sLrecBar = na
+var float candHigh = na    // highest swing high since the last confirmed LOW
+var int   candHighBar = na
+var float candLow  = na    // lowest swing low since the last confirmed HIGH
+var int   candLowBar = na
+var int   stLast = 0       // 1 = last confirmed structure point is a HIGH, -1 = a LOW
+var int   sPrevX = na      // last plotted structure point (for connecting lines)
+var float sPrevY = na
+var float prevHigh = na    // last confirmed structure high price (for HH/LH)
+var float prevLow  = na    // last confirmed structure low price  (for HL/LL)
+
+// track fractals + running leg extremes
+if phRaw
+    sHrec := high[1]
+    sHrecBar := bar_index - 1
+    if na(candHigh) or high[1] > candHigh
+        candHigh := high[1]
+        candHighBar := bar_index - 1
+if plRaw
+    sLrec := low[1]
+    sLrecBar := bar_index - 1
+    if na(candLow) or low[1] < candLow
+        candLow := low[1]
+        candLowBar := bar_index - 1
+
+// a high is TAKEN -> confirm the LOW ; a low is TAKEN -> confirm the HIGH
+highTaken = not na(sHrec) and (strBreak == "Close beyond" ? close > sHrec : high > sHrec)
+lowTaken  = not na(sLrec) and (strBreak == "Close beyond" ? close < sLrec : low  < sLrec)
+
+if showStr and highTaken and stLast != -1 and not na(candLow)
+    if not na(sPrevX)
+        line.new(sPrevX, sPrevY, candLowBar, candLow, xloc = xloc.bar_index, color = strCol, width = sw)
+    if showStrLbl
+        txt = na(prevLow) ? "L" : (candLow > prevLow ? "HL" : "LL")
+        label.new(candLowBar, candLow, txt, xloc = xloc.bar_index, style = label.style_label_up, color = color.new(strCol, 20), textcolor = color.white, size = size.tiny)
+    sPrevX := candLowBar
+    sPrevY := candLow
+    prevLow := candLow
+    stLast := -1
+    candHigh := na            // start tracking the new up-leg's highest high
+    candHighBar := na
+else if showStr and lowTaken and stLast != 1 and not na(candHigh)
+    if not na(sPrevX)
+        line.new(sPrevX, sPrevY, candHighBar, candHigh, xloc = xloc.bar_index, color = strCol, width = sw)
+    if showStrLbl
+        txt = na(prevHigh) ? "H" : (candHigh > prevHigh ? "HH" : "LH")
+        label.new(candHighBar, candHigh, txt, xloc = xloc.bar_index, style = label.style_label_down, color = color.new(strCol, 20), textcolor = color.white, size = size.tiny)
+    sPrevX := candHighBar
+    sPrevY := candHigh
+    prevHigh := candHigh
+    stLast := 1
+    candLow := na             // start tracking the new down-leg's lowest low
+    candLowBar := na
