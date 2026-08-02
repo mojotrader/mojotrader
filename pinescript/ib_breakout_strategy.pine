@@ -1,0 +1,156 @@
+//@version=6
+// IB Breakout (nqstats "IB breaks" study) — run on a 5m chart.
+//   Initial Balance = first hour (09:30-10:30 ET). At 10:30 the close's position in the IB range sets the bias:
+//     - close in the TOP quartile (>=75%)  -> long bias  (nqstats: high breaks ~81% when close is upper half)
+//     - close in the BOTTOM quartile (<=25%) -> short bias (low breaks ~74-76% when close is lower half)
+//     - middle -> no trade (the "Bias zone" input can relax this to halves).
+//   ENTRY: a stop-order breakout of the IB high (long) / IB low (short).
+//   STOP : the opposite IB extreme (full IB range). Tight stops were tested and lose badly here.
+//   TARGET: a measured move of N x the IB range beyond the broken level (1.0-1.5x tested best; EOD-hold is worse).
+//   One trade/day, EOD flatten. Validated on ~1yr MNQ 5m (PF ~1.20, holds in both out-of-sample halves).
+//   Leverage/capital limits removed. NOTE: modest edge on one year — validate on more data before sizing up.
+strategy("IB Breakout (nqstats)", overlay = true, pyramiding = 1, max_boxes_count = 200, max_labels_count = 200,
+     initial_capital = 1000000, margin_long = 0, margin_short = 0,
+     default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
+
+// ---------------------------------------------------------------- Inputs
+tz        = input.string("America/New_York", "Timezone", group = "Session")
+sess      = input.session("0930-1600", "RTH session", group = "Session")
+ibSess    = input.session("0930-1030", "Initial Balance window", group = "Session")
+biasZone  = input.string("Quartile (25%)", "Bias zone", options = ["Quartile (25%)", "Half (50%)"], group = "Strategy",
+     tooltip = "Quartile = only trade when the IB close is in the extreme 25% of its range (stronger bias, fewer/better trades). Half = trade whenever the close is in the upper/lower half.")
+allowLong = input.bool(true,  "Take longs",  group = "Strategy")
+allowShort= input.bool(true,  "Take shorts", group = "Strategy")
+tgtMult   = input.float(1.5, "Target = N x IB range beyond break", minval = 0.25, step = 0.25, group = "Strategy")
+stopMode  = input.string("Full IB (opposite extreme)", "Stop", options = ["Full IB (opposite extreme)", "Half IB"], group = "Strategy",
+     tooltip = "Full IB tested best; Half IB gets whipsawed (many breaks reverse before extending).")
+useBE     = input.bool(false, "Breakeven at +1R", group = "Strategy")
+qty       = input.float(1, "Contracts", minval = 1, group = "Strategy")
+cutH      = input.int(15, "Entry cutoff hour",   0, 23, group = "Time")
+cutM      = input.int(0,  "Entry cutoff minute", 0, 59, group = "Time")
+flatH     = input.int(16, "Flatten hour",   0, 23, group = "Time")
+flatM     = input.int(0,  "Flatten minute", 0, 59, group = "Time")
+
+grpRR     = "Risk / Reward tool"
+showRR    = input.bool(true, "Show risk/reward box at the break", group = grpRR)
+ptVal     = input.float(2.0, "$ per point per contract", group = grpRR, tooltip = "MNQ=2, NQ=20, MES=5, ES=50.")
+rrBars    = input.int(24, "R/R box width (bars)", 1, 300, group = grpRR)
+
+// ---------------------------------------------------------------- Session / IB tracking
+inSess     = not na(time(timeframe.period, sess, tz))
+newSession = inSess and not inSess[1]
+inIB       = not na(time(timeframe.period, ibSess, tz))
+ibDone     = not inIB and inIB[1]
+
+var float ibH = na
+var float ibL = na
+var int   dir = 0
+var float rng = na
+var float entryLvl = na
+var float zstop = na
+var float curTP = na
+var float curStop = na
+var bool  beDone = false
+var bool  placed = false
+var bool  broke = false
+var bool  wasIn = false
+var bool  done = false
+
+if newSession
+    ibH := na
+    ibL := na
+    dir := 0
+    rng := na
+    entryLvl := na
+    zstop := na
+    curTP := na
+    curStop := na
+    beDone := false
+    placed := false
+    broke := false
+    wasIn := false
+    done := false
+if inIB
+    ibH := na(ibH) ? high : math.max(ibH, high)
+    ibL := na(ibL) ? low  : math.min(ibL, low)
+
+// resolve bias at 10:30
+if ibDone and not na(ibH) and ibH > ibL
+    rng := ibH - ibL
+    pos = (close[1] - ibL) / rng
+    upThr = biasZone == "Quartile (25%)" ? 0.75 : 0.5
+    dnThr = biasZone == "Quartile (25%)" ? 0.25 : 0.5
+    if allowLong and pos >= upThr
+        dir := 1
+        entryLvl := ibH
+        zstop := stopMode == "Half IB" ? ibH - 0.5*rng : ibL
+        curTP := ibH + tgtMult*rng
+    else if allowShort and pos <= dnThr
+        dir := -1
+        entryLvl := ibL
+        zstop := stopMode == "Half IB" ? ibL + 0.5*rng : ibH
+        curTP := ibL - tgtMult*rng
+
+// ---------------------------------------------------------------- Time gates
+tod      = hour(time, tz) * 60 + minute(time, tz)
+inWindow = inSess and tod <= (cutH*60 + cutM)
+flatten  = tod >= (flatH*60 + flatM)
+
+// ---------------------------------------------------------------- Entry: stop-order breakout of the IB level
+if dir != 0 and not placed and not done and inWindow and not flatten
+    if dir == 1
+        strategy.entry("L", strategy.long, qty = qty, stop = entryLvl)
+    else
+        strategy.entry("S", strategy.short, qty = qty, stop = entryLvl)
+    placed := true
+
+// detect the break (for the R/R box + BE reference)
+if dir == 1 and high >= entryLvl
+    broke := true
+if dir == -1 and low <= entryLvl
+    broke := true
+
+// ---------------------------------------------------------------- Manage: stop / target / breakeven
+curStop := na(curStop) ? zstop : curStop
+if useBE and not beDone and strategy.position_size != 0 and not na(entryLvl)
+    R = math.abs(entryLvl - zstop)
+    if dir == 1 and high >= entryLvl + R
+        curStop := math.max(curStop, entryLvl)
+        beDone := true
+    if dir == -1 and low <= entryLvl - R
+        curStop := math.min(curStop, entryLvl)
+        beDone := true
+
+if strategy.position_size != 0
+    strategy.exit("Lx", from_entry = "L", stop = curStop, limit = curTP)
+    strategy.exit("Sx", from_entry = "S", stop = curStop, limit = curTP)
+
+wasIn := wasIn or strategy.position_size != 0
+if strategy.position_size == 0 and wasIn
+    done := true
+if done or flatten or not inWindow
+    strategy.cancel("L")
+    strategy.cancel("S")
+if flatten
+    strategy.close_all(comment = "EOD flat")
+
+// ---------------------------------------------------------------- Risk/Reward box (drawn at the break)
+if showRR and dir != 0 and broke and not broke[1] and not na(entryLvl) and not na(zstop)
+    x1 = bar_index
+    x2 = bar_index + rrBars
+    riskUsd = math.abs(entryLvl - zstop) * ptVal * qty
+    rewUsd  = math.abs(curTP - entryLvl) * ptVal * qty
+    rrr = riskUsd > 0 ? rewUsd / riskUsd : na
+    rewTop = dir == 1 ? curTP : entryLvl
+    rewBot = dir == 1 ? entryLvl : curTP
+    rskTop = dir == 1 ? entryLvl : zstop
+    rskBot = dir == 1 ? zstop : entryLvl
+    box.new(x1, rewTop, x2, rewBot, xloc = xloc.bar_index, border_color = color.new(color.green, 0), border_width = 1, bgcolor = color.new(color.green, 82))
+    box.new(x1, rskTop, x2, rskBot, xloc = xloc.bar_index, border_color = color.new(color.red, 0),   border_width = 1, bgcolor = color.new(color.red, 82))
+    label.new(x2, entryLvl, "Risk $" + str.tostring(riskUsd, "#") + " | Reward $" + str.tostring(rewUsd, "#") + " (" + str.tostring(rrr, "#.##") + "R, " + str.tostring(qty, "#.#") + "x)", xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.gray, 15), textcolor = color.white, size = size.small)
+
+// ---------------------------------------------------------------- Visuals
+plot(not na(ibH) ? ibH : na, "IB High", color = color.new(color.teal, 0), style = plot.style_linebr)
+plot(not na(ibL) ? ibL : na, "IB Low",  color = color.new(color.red, 0),  style = plot.style_linebr)
+plot(dir != 0 and not na(curTP) ? curTP : na, "Target", color = color.new(color.green, 0), style = plot.style_linebr)
