@@ -41,6 +41,8 @@ orbBreak  = input.string("Wick (touch)", "  ORB break type", options = ["Wick (t
 orbAvg    = input.bool(true,  "  ORB average down (2nd unit at 50%)", group = gORB)
 orbTpL    = input.string("Range level", "  ORB TP long",  options = ["Range level", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gORB)
 orbTpS    = input.string("Ext 30%",     "  ORB TP short", options = ["Range level", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gORB)
+orbDeepSL = input.string("75% line", "  ORB 50%-entry stop", options = ["75% line", "100% (range extreme)"], group = gORB,
+     tooltip = "Stop for the DEEPER (50% entry) zone. Shallow (25% entry) always stops at the range extreme (100%). Test 75% vs 100% here.")
 orbBE     = input.bool(false, "  ORB breakeven on range reclaim", group = gORB)
 orbQty    = input.float(1, "  ORB contracts per unit", minval = 1, group = gORB)
 orbCutH   = input.int(15, "  ORB entry cutoff hour",   0, 23, group = gORB, tooltip = "Only used if IB is OFF; when IB is ON the ORB deadline is the IB formation time.")
@@ -56,6 +58,8 @@ ibBreak   = input.string("Wick (touch)", "  IB break type", options = ["Wick (to
 ibAvg     = input.bool(true,  "  IB average down (2nd unit at 50%)", group = gIB)
 ibTpL     = input.string("Range level", "  IB TP long",  options = ["Range level", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gIB)
 ibTpS     = input.string("Ext 30%",     "  IB TP short", options = ["Range level", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gIB)
+ibDeepSL  = input.string("75% line", "  IB 50%-entry stop", options = ["75% line", "100% (range extreme)"], group = gIB,
+     tooltip = "Stop for the DEEPER (50% entry) zone. Shallow (25% entry) always stops at the range extreme (100%). Test 75% vs 100% here.")
 ibBE      = input.bool(false, "  IB breakeven on range reclaim", group = gIB)
 ibQty     = input.float(1, "  IB contracts per unit", minval = 1, group = gIB)
 ibCutH    = input.int(15, "  IB entry cutoff hour",   0, 23, group = gIB)
@@ -167,13 +171,13 @@ if or_rDone and not na(or_rH) and or_rH > or_rL
         or_shallow := or_pos >= 0.75
         or_e1 := or_shallow ? or_rL + 0.75*or_rng : or_rL + 0.5*or_rng
         or_e2 := or_rL + 0.5*or_rng
-        or_zstop := or_shallow ? or_rL : or_rL + 0.25*or_rng
+        or_zstop := or_shallow ? or_rL : (orbDeepSL == "75% line" ? or_rL + 0.25*or_rng : or_rL)
     else if orbShort and (not or_lf) and or_pos <= 0.5
         or_dir := -1
         or_shallow := or_pos <= 0.25
         or_e1 := or_shallow ? or_rL + 0.25*or_rng : or_rL + 0.5*or_rng
         or_e2 := or_rL + 0.5*or_rng
-        or_zstop := or_shallow ? or_rH : or_rL + 0.75*or_rng
+        or_zstop := or_shallow ? or_rH : (orbDeepSL == "75% line" ? or_rL + 0.75*or_rng : or_rH)
 or_useAdd = orbAvg and or_shallow and not na(or_e2)
 // break by selected type
 or_brk = orbBreak == "Wick (touch)" ? ((or_dir == 1 and high >= or_rH) or (or_dir == -1 and low <= or_rL)) : ((or_dir == 1 and close > or_rH) or (or_dir == -1 and close < or_rL))
@@ -295,13 +299,13 @@ if ib_rDone and not na(ib_rH) and ib_rH > ib_rL
         ib_shallow := ib_pos >= 0.75
         ib_e1 := ib_shallow ? ib_rL + 0.75*ib_rng : ib_rL + 0.5*ib_rng
         ib_e2 := ib_rL + 0.5*ib_rng
-        ib_zstop := ib_shallow ? ib_rL : ib_rL + 0.25*ib_rng
+        ib_zstop := ib_shallow ? ib_rL : (ibDeepSL == "75% line" ? ib_rL + 0.25*ib_rng : ib_rL)
     else if ibShort and (not ib_lf) and ib_pos <= 0.5
         ib_dir := -1
         ib_shallow := ib_pos <= 0.25
         ib_e1 := ib_shallow ? ib_rL + 0.25*ib_rng : ib_rL + 0.5*ib_rng
         ib_e2 := ib_rL + 0.5*ib_rng
-        ib_zstop := ib_shallow ? ib_rH : ib_rL + 0.75*ib_rng
+        ib_zstop := ib_shallow ? ib_rH : (ibDeepSL == "75% line" ? ib_rL + 0.75*ib_rng : ib_rH)
 // INTERACTION: on IB formation, resolve ORB vs IB
 if ib_rDone and runIB and runORB
     or_open = (or_f1 or or_f2) and not or_closed
