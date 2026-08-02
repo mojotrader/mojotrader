@@ -1,62 +1,82 @@
 //@version=6
-// Break-then-pullback strategy (run on a 5m chart). Runs IB (1-hour) and/or ORB (15-min) TOGETHER.
-//   Tick "Run IB" and/or "Run ORB". With both on, the tester shows the MERGED performance of both.
-//   For each enabled range:
-//     1) At the range close: bias = low-before-high (long) / high-before-low (short), AND the range close in the
-//        top half (long) / bottom half (short) of the range.
-//     2) The trade ARMS only AFTER the range level breaks (high>range high for longs / low<range low for shorts).
-//     3) A LIMIT rests at the fib pullback line: shallow(0-25%)->25% line, deeper(25-50%)->50% line.
-//     4) AVERAGE DOWN (optional): shallow setup (first fill at 25%) -> a 2nd same-size unit at the 50% line.
-//     Stop (best in tests): shallow -> range extreme (100%) ; deeper -> 75% line. Optional breakeven on reclaim.
-//     TP long default = range level ; TP short default = +30% ext. One setup/day per range, EOD flatten.
+// Break-then-pullback strategy (run on a 5m chart). Runs ORB (15-min) FIRST, then IB (1-hour).
 //
-// IMPORTANT LIMITATION: a Pine strategy nets all orders into ONE position (no hedging). If IB and ORB take
-//   OPPOSITE directions at the same time, the second entry offsets the first instead of running as its own
-//   position, so those overlap days won't merge as two truly independent accounts. Same-direction days, and
-//   days where ORB has already exited before IB triggers, merge faithfully. Enable one at a time for a clean
-//   single-strategy curve, or both for the combined view (with this caveat in mind).
-strategy("Break-then-Pullback (IB + ORB)", overlay = true, pyramiding = 4, max_boxes_count = 40, max_labels_count = 80,
+// PRIORITY / INTERACTION (when both are enabled):
+//   - ORB may enter only BEFORE the IB forms (i.e. before 10:30). Its resting limit is cancelled at 10:30 if unfilled.
+//   - If ORB never traded by the time the IB forms -> ORB is abandoned for the day, only IB plays.
+//   - If an ORB position is OPEN when the IB forms and the IB is the OPPOSITE direction -> the ORB position is
+//     closed first, then the IB setup is armed. (Same direction -> ORB is left to run and IB arms independently.)
+//
+// PER SETUP (each range, independently configurable below):
+//   1) At the range close: bias = low-before-high (long) / high-before-low (short) AND the range close in the
+//      top half (long) / bottom half (short) of the range.
+//   2) The trade ARMS only AFTER the range level BREAKS. Break type is selectable: "Wick (touch)" or "Close beyond".
+//   3) A LIMIT rests at the fib pullback: shallow(0-25%)->25% line, deeper(25-50%)->50% line.
+//   4) AVERAGE DOWN (optional): shallow setup -> a 2nd same-size unit at the 50% line.
+//   Stop: shallow -> range extreme (100%) ; deeper -> 75% line. Optional breakeven when the range level is reclaimed.
+//   TP long/short selectable: range level / +10% / +30% / +50% / HOD-LOD. One setup/day per range, EOD flatten.
+//
+// LIMITATION: a Pine strategy nets all orders into ONE position (no hedging). Same-direction overlaps merge fine;
+//   the interaction rules above are what handle the opposite-direction ORB/IB case (ORB is closed, not hedged).
+strategy("Break-then-Pullback (ORB + IB)", overlay = true, pyramiding = 6, max_boxes_count = 40, max_labels_count = 80,
      initial_capital = 1000000, margin_long = 0, margin_short = 0,
      default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
      commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
 
-// ---------------------------------------------------------------- Inputs
-runIB     = input.bool(true,  "Run IB (first hour, 09:30-10:30)", group = "Strategies")
-runORB    = input.bool(true,  "Run ORB (first 15 min, 09:30-09:45)", group = "Strategies")
-tz        = input.string("America/New_York", "Timezone", group = "Session")
-sess      = input.session("0930-1600", "RTH session", group = "Session")
-ibSess    = input.session("0930-1030", "IB window", group = "Session")
-orbSess   = input.session("0930-0945", "ORB window", group = "Session")
-allowLong = input.bool(true, "Take longs", group = "Rules")
-allowShort= input.bool(true, "Take shorts (weak on IB)", group = "Rules")
-avgDown   = input.bool(true, "Average down: add 2nd unit at 50% (shallow setups)", group = "Rules")
-tpLong    = input.string("Range level", "TP long",  options = ["Range level", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = "Rules",
-     tooltip = "Best EV in tests: 'Range level' (return to the broken level). Stops: shallow->range extreme (100%), deeper->75% line.")
-tpShort   = input.string("Ext 30%",     "TP short", options = ["Range level", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = "Rules",
-     tooltip = "Best EV in tests: '+30% extension'. ('Range level' had a higher PF but on ~zero losers — a fat-tail red flag.)")
-useBE     = input.bool(false, "Breakeven when price reclaims the range level", group = "Rules")
-qty       = input.float(1, "Contracts per unit", minval = 1, group = "Rules")
-cutH      = input.int(15, "Entry cutoff hour",   0, 23, group = "Time")
-cutM      = input.int(0,  "Entry cutoff minute", 0, 59, group = "Time")
-flatH     = input.int(16, "Flatten hour",   0, 23, group = "Time")
-flatM     = input.int(0,  "Flatten minute", 0, 59, group = "Time")
+// ---------------------------------------------------------------- Global session inputs
+tz     = input.string("America/New_York", "Timezone", group = "Session")
+sess   = input.session("0930-1600", "RTH session", group = "Session")
+orbSess= input.session("0930-0945", "ORB window", group = "Session")
+ibSess = input.session("0930-1030", "IB window", group = "Session")
+flatH  = input.int(16, "Flatten hour",   0, 23, group = "Session")
+flatM  = input.int(0,  "Flatten minute", 0, 59, group = "Session")
 
-// ---- Automation (PickMyTrade webhook -> Tradovate)
+// ---------------------------------------------------------------- ORB settings (under the ORB toggle)
+gORB      = "ORB settings"
+runORB    = input.bool(true,  "Run ORB", group = gORB)
+orbLong   = input.bool(true,  "  ORB take longs",  group = gORB)
+orbShort  = input.bool(true,  "  ORB take shorts", group = gORB)
+orbBreak  = input.string("Wick (touch)", "  ORB break type", options = ["Wick (touch)", "Close beyond"], group = gORB,
+     tooltip = "Wick = the high/low tags the level. Close = the bar must CLOSE beyond the level (stricter, fewer signals).")
+orbAvg    = input.bool(true,  "  ORB average down (2nd unit at 50%)", group = gORB)
+orbTpL    = input.string("Range level", "  ORB TP long",  options = ["Range level", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gORB)
+orbTpS    = input.string("Ext 30%",     "  ORB TP short", options = ["Range level", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gORB)
+orbBE     = input.bool(false, "  ORB breakeven on range reclaim", group = gORB)
+orbQty    = input.float(1, "  ORB contracts per unit", minval = 1, group = gORB)
+orbCutH   = input.int(15, "  ORB entry cutoff hour",   0, 23, group = gORB, tooltip = "Only used if IB is OFF; when IB is ON the ORB deadline is the IB formation time.")
+orbCutM   = input.int(0,  "  ORB entry cutoff minute", 0, 59, group = gORB)
+
+// ---------------------------------------------------------------- IB settings (under the IB toggle)
+gIB       = "IB settings"
+runIB     = input.bool(true,  "Run IB", group = gIB)
+ibLong    = input.bool(true,  "  IB take longs",  group = gIB)
+ibShort   = input.bool(false, "  IB take shorts (weak in tests)", group = gIB)
+ibBreak   = input.string("Wick (touch)", "  IB break type", options = ["Wick (touch)", "Close beyond"], group = gIB,
+     tooltip = "Wick = the high/low tags the level. Close = the bar must CLOSE beyond the level (stricter, fewer signals).")
+ibAvg     = input.bool(true,  "  IB average down (2nd unit at 50%)", group = gIB)
+ibTpL     = input.string("Range level", "  IB TP long",  options = ["Range level", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gIB)
+ibTpS     = input.string("Ext 30%",     "  IB TP short", options = ["Range level", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gIB)
+ibBE      = input.bool(false, "  IB breakeven on range reclaim", group = gIB)
+ibQty     = input.float(1, "  IB contracts per unit", minval = 1, group = gIB)
+ibCutH    = input.int(15, "  IB entry cutoff hour",   0, 23, group = gIB)
+ibCutM    = input.int(0,  "  IB entry cutoff minute", 0, 59, group = gIB)
+
+// ---------------------------------------------------------------- Automation (PickMyTrade webhook -> Tradovate)
 grpA      = "Automation - PickMyTrade"
 autoOn    = input.bool(false, "Enable webhook alerts", group = grpA,
-     tooltip = "Turn ON, then create ONE alert with condition 'alert() function calls only' and paste PickMyTrade's webhook URL. Verify the JSON fields below match PickMyTrade's current template. WARNING: alerts fire on the NET position, so for live automation enable only ONE of IB/ORB at a time — running both live nets into one account and the JSON no longer maps to a single strategy.")
+     tooltip = "Create ONE alert with condition 'alert() function calls only' and paste PickMyTrade's webhook URL. Verify the JSON fields match PickMyTrade's template. WARNING: alerts fire on the NET position, so for live automation enable only ONE of ORB/IB at a time.")
 pmtToken  = input.string("", "PickMyTrade token", group = grpA)
 pmtAcct   = input.string("", "Tradovate account id", group = grpA)
 pmtSym    = input.string("MNQ1!", "Broker symbol", group = grpA)
 pmtType   = input.string("market", "Order type", options = ["market", "limit"], group = grpA)
 
-// ---- Risk/Reward tool
+// ---------------------------------------------------------------- Risk/Reward tool
 grpRR     = "Risk / Reward tool"
 showRR    = input.bool(true, "Show risk/reward box at the break", group = grpRR)
-ptVal     = input.float(2.0, "$ per point per contract", group = grpRR, tooltip = "MNQ=2, NQ=20, MES=5, ES=50. Risk/reward $ = points x this x contracts.")
+ptVal     = input.float(2.0, "$ per point per contract", group = grpRR, tooltip = "MNQ=2, NQ=20, MES=5, ES=50.")
 rrBars    = input.int(24, "R/R box width (bars)", 1, 300, group = grpRR)
 
-// ---------------------------------------------------------------- Shared session tracking
+// ---------------------------------------------------------------- Shared tracking
 inSess     = not na(time(timeframe.period, sess, tz))
 newSession = inSess and not inSess[1]
 var float dHigh = na
@@ -67,150 +87,24 @@ if newSession
 else if inSess
     dHigh := math.max(dHigh, high)
     dLow  := math.min(dLow, low)
+tod     = hour(time, tz) * 60 + minute(time, tz)
+flatten = tod >= (flatH*60 + flatM)
 
-tod      = hour(time, tz) * 60 + minute(time, tz)
-inWindow = inSess and tod <= (cutH*60 + cutM)
-flatten  = tod >= (flatH*60 + flatM)
-
-// ---------------------------------------------------------------- Pure helpers
-f_setup(float rH, float rL, int rHbar, int rLbar, float pClose, bool aLong, bool aShort) =>
-    float rng = rH - rL
-    bool  lowFirst = rLbar < rHbar
-    float pos = (pClose - rL) / rng
-    int   d = 0
-    bool  sh = false
-    float e1 = na
-    float e2 = na
-    float zs = na
-    if aLong and lowFirst and pos >= 0.5
-        d := 1
-        sh := pos >= 0.75
-        e1 := sh ? rL + 0.75*rng : rL + 0.5*rng
-        e2 := rL + 0.5*rng
-        zs := sh ? rL : rL + 0.25*rng
-    else if aShort and (not lowFirst) and pos <= 0.5
-        d := -1
-        sh := pos <= 0.25
-        e1 := sh ? rL + 0.25*rng : rL + 0.5*rng
-        e2 := rL + 0.5*rng
-        zs := sh ? rH : rL + 0.75*rng
-    [d, sh, e1, e2, zs, rng]
-
-f_tp(int d, float rH, float rL, float rng, float dHi, float dLo, string tpL, string tpS) =>
-    d == 1 ? (tpL == "HOD/LOD" ? dHi : tpL == "Ext 10%" ? rH + 0.10*rng : tpL == "Ext 30%" ? rH + 0.30*rng : tpL == "Ext 50%" ? rH + 0.50*rng : rH) : (tpS == "HOD/LOD" ? dLo : tpS == "Ext 10%" ? rL - 0.10*rng : tpS == "Ext 30%" ? rL - 0.30*rng : tpS == "Ext 50%" ? rL - 0.50*rng : rL)
-
-// ================================================================ IB state machine
-var float ib_rH = na
-var float ib_rL = na
-var int   ib_rHbar = na
-var int   ib_rLbar = na
-var int   ib_dir = 0
-var bool  ib_shallow = false
-var float ib_e1 = na
-var float ib_e2 = na
-var float ib_zstop = na
-var float ib_rng = na
-var bool  ib_broke = false
-var bool  ib_placed = false
-var bool  ib_f1 = false
-var bool  ib_f2 = false
-var bool  ib_done = false
-var float ib_curStop = na
-var float ib_curTP = na
-var float ib_avgPx = na
-var bool  ib_beDone = false
-
+or_inR   = not na(time(timeframe.period, orbSess, tz))
+or_rDone = not or_inR and or_inR[1]
 ib_inR   = not na(time(timeframe.period, ibSess, tz))
 ib_rDone = not ib_inR and ib_inR[1]
+var bool ibFormed = false
 if newSession
-    ib_rH := na
-    ib_rL := na
-    ib_dir := 0
-    ib_shallow := false
-    ib_e1 := na
-    ib_e2 := na
-    ib_zstop := na
-    ib_broke := false
-    ib_placed := false
-    ib_f1 := false
-    ib_f2 := false
-    ib_done := false
-    ib_curStop := na
-    ib_curTP := na
-    ib_avgPx := na
-    ib_beDone := false
-if ib_inR
-    if na(ib_rH) or high > ib_rH
-        ib_rH := high
-        ib_rHbar := bar_index
-    if na(ib_rL) or low < ib_rL
-        ib_rL := low
-        ib_rLbar := bar_index
-if ib_rDone and not na(ib_rH) and ib_rH > ib_rL
-    [d, sh, e1, e2, zs, rg] = f_setup(ib_rH, ib_rL, ib_rHbar, ib_rLbar, close[1], allowLong, allowShort)
-    ib_dir := d
-    ib_shallow := sh
-    ib_e1 := e1
-    ib_e2 := e2
-    ib_zstop := zs
-    ib_rng := rg
-ib_useAdd = avgDown and ib_shallow and not na(ib_e2)
-if ib_dir == 1 and high >= ib_rH
-    ib_broke := true
-if ib_dir == -1 and low <= ib_rL
-    ib_broke := true
-if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_done and inWindow and not flatten
-    if ib_dir == 1
-        strategy.entry("IBL", strategy.long, qty = qty, limit = ib_e1)
-        if ib_useAdd
-            strategy.entry("IBL2", strategy.long, qty = qty, limit = ib_e2)
-    else
-        strategy.entry("IBS", strategy.short, qty = qty, limit = ib_e1)
-        if ib_useAdd
-            strategy.entry("IBS2", strategy.short, qty = qty, limit = ib_e2)
-    ib_placed := true
-// track fills for this strategy
-if ib_placed and not ib_done
-    if ib_dir == 1
-        if not ib_f1 and low <= ib_e1
-            ib_f1 := true
-        if ib_useAdd and not ib_f2 and low <= ib_e2
-            ib_f2 := true
-    if ib_dir == -1
-        if not ib_f1 and high >= ib_e1
-            ib_f1 := true
-        if ib_useAdd and not ib_f2 and high >= ib_e2
-            ib_f2 := true
-ib_firstFill = (ib_f1 or ib_f2) and not (ib_f1[1] or ib_f2[1])
-if ib_f1 or ib_f2
-    ib_avgPx := ib_f1 and ib_f2 ? (ib_e1 + ib_e2) / 2 : ib_f1 ? ib_e1 : ib_e2
-if ib_firstFill
-    ib_curStop := ib_zstop
-    ib_curTP := f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, tpLong, tpShort)
-    ib_beDone := false
-if useBE and not ib_beDone and (ib_f1 or ib_f2) and not ib_done
-    if ib_dir == 1 and high >= ib_rH
-        ib_curStop := math.max(ib_curStop, ib_avgPx)
-        ib_beDone := true
-    if ib_dir == -1 and low <= ib_rL
-        ib_curStop := math.min(ib_curStop, ib_avgPx)
-        ib_beDone := true
-if not na(ib_curStop)
-    strategy.exit("IBLx",  from_entry = "IBL",  stop = ib_curStop, limit = ib_curTP)
-    strategy.exit("IBL2x", from_entry = "IBL2", stop = ib_curStop, limit = ib_curTP)
-    strategy.exit("IBSx",  from_entry = "IBS",  stop = ib_curStop, limit = ib_curTP)
-    strategy.exit("IBS2x", from_entry = "IBS2", stop = ib_curStop, limit = ib_curTP)
-if (ib_f1 or ib_f2) and not ib_done and not na(ib_curStop)
-    ib_hit = ib_dir == 1 ? (low <= ib_curStop or high >= ib_curTP) : (high >= ib_curStop or low <= ib_curTP)
-    if ib_hit
-        ib_done := true
-if ib_done or flatten or not inWindow or not runIB
-    strategy.cancel("IBL")
-    strategy.cancel("IBL2")
-    strategy.cancel("IBS")
-    strategy.cancel("IBS2")
+    ibFormed := false
+if ib_rDone
+    ibFormed := true
 
-// ================================================================ ORB state machine
+// TP resolver
+f_tp(int d, float rH, float rL, float rg, float dHi, float dLo, string tpL, string tpS) =>
+    d == 1 ? (tpL == "HOD/LOD" ? dHi : tpL == "Ext 10%" ? rH + 0.10*rg : tpL == "Ext 30%" ? rH + 0.30*rg : tpL == "Ext 50%" ? rH + 0.50*rg : rH) : (tpS == "HOD/LOD" ? dLo : tpS == "Ext 10%" ? rL - 0.10*rg : tpS == "Ext 30%" ? rL - 0.30*rg : tpS == "Ext 50%" ? rL - 0.50*rg : rL)
+
+// ================================================================ ORB ENGINE (runs first)
 var float or_rH = na
 var float or_rL = na
 var int   or_rHbar = na
@@ -225,14 +119,12 @@ var bool  or_broke = false
 var bool  or_placed = false
 var bool  or_f1 = false
 var bool  or_f2 = false
-var bool  or_done = false
+var float or_avgPx = na
 var float or_curStop = na
 var float or_curTP = na
-var float or_avgPx = na
 var bool  or_beDone = false
+var bool  or_closed = false
 
-or_inR   = not na(time(timeframe.period, orbSess, tz))
-or_rDone = not or_inR and or_inR[1]
 if newSession
     or_rH := na
     or_rL := na
@@ -241,15 +133,16 @@ if newSession
     or_e1 := na
     or_e2 := na
     or_zstop := na
+    or_rng := na
     or_broke := false
     or_placed := false
     or_f1 := false
     or_f2 := false
-    or_done := false
+    or_avgPx := na
     or_curStop := na
     or_curTP := na
-    or_avgPx := na
     or_beDone := false
+    or_closed := false
 if or_inR
     if na(or_rH) or high > or_rH
         or_rH := high
@@ -258,29 +151,39 @@ if or_inR
         or_rL := low
         or_rLbar := bar_index
 if or_rDone and not na(or_rH) and or_rH > or_rL
-    [d, sh, e1, e2, zs, rg] = f_setup(or_rH, or_rL, or_rHbar, or_rLbar, close[1], allowLong, allowShort)
-    or_dir := d
-    or_shallow := sh
-    or_e1 := e1
-    or_e2 := e2
-    or_zstop := zs
-    or_rng := rg
-or_useAdd = avgDown and or_shallow and not na(or_e2)
-if or_dir == 1 and high >= or_rH
+    or_rng := or_rH - or_rL
+    or_lf = or_rLbar < or_rHbar
+    or_pos = (close[1] - or_rL) / or_rng
+    if orbLong and or_lf and or_pos >= 0.5
+        or_dir := 1
+        or_shallow := or_pos >= 0.75
+        or_e1 := or_shallow ? or_rL + 0.75*or_rng : or_rL + 0.5*or_rng
+        or_e2 := or_rL + 0.5*or_rng
+        or_zstop := or_shallow ? or_rL : or_rL + 0.25*or_rng
+    else if orbShort and (not or_lf) and or_pos <= 0.5
+        or_dir := -1
+        or_shallow := or_pos <= 0.25
+        or_e1 := or_shallow ? or_rL + 0.25*or_rng : or_rL + 0.5*or_rng
+        or_e2 := or_rL + 0.5*or_rng
+        or_zstop := or_shallow ? or_rH : or_rL + 0.75*or_rng
+or_useAdd = orbAvg and or_shallow and not na(or_e2)
+// break by selected type
+or_brk = orbBreak == "Wick (touch)" ? ((or_dir == 1 and high >= or_rH) or (or_dir == -1 and low <= or_rL)) : ((or_dir == 1 and close > or_rH) or (or_dir == -1 and close < or_rL))
+if or_dir != 0 and or_brk
     or_broke := true
-if or_dir == -1 and low <= or_rL
-    or_broke := true
-if runORB and or_dir != 0 and or_broke and not or_placed and not or_done and inWindow and not flatten
+// entry window: before IB forms (when IB is on), within ORB cutoff otherwise
+orbWin = inSess and tod <= (orbCutH*60 + orbCutM) and (not runIB or not ibFormed)
+if runORB and or_dir != 0 and or_broke and not or_placed and not or_closed and orbWin and not flatten
     if or_dir == 1
-        strategy.entry("ORL", strategy.long, qty = qty, limit = or_e1)
+        strategy.entry("ORL", strategy.long, qty = orbQty, limit = or_e1)
         if or_useAdd
-            strategy.entry("ORL2", strategy.long, qty = qty, limit = or_e2)
+            strategy.entry("ORL2", strategy.long, qty = orbQty, limit = or_e2)
     else
-        strategy.entry("ORS", strategy.short, qty = qty, limit = or_e1)
+        strategy.entry("ORS", strategy.short, qty = orbQty, limit = or_e1)
         if or_useAdd
-            strategy.entry("ORS2", strategy.short, qty = qty, limit = or_e2)
+            strategy.entry("ORS2", strategy.short, qty = orbQty, limit = or_e2)
     or_placed := true
-if or_placed and not or_done
+if or_placed and not or_closed
     if or_dir == 1
         if not or_f1 and low <= or_e1
             or_f1 := true
@@ -296,9 +199,9 @@ if or_f1 or or_f2
     or_avgPx := or_f1 and or_f2 ? (or_e1 + or_e2) / 2 : or_f1 ? or_e1 : or_e2
 if or_firstFill
     or_curStop := or_zstop
-    or_curTP := f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, tpLong, tpShort)
+    or_curTP := f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
     or_beDone := false
-if useBE and not or_beDone and (or_f1 or or_f2) and not or_done
+if orbBE and not or_beDone and (or_f1 or or_f2) and not or_closed
     if or_dir == 1 and high >= or_rH
         or_curStop := math.max(or_curStop, or_avgPx)
         or_beDone := true
@@ -310,78 +213,190 @@ if not na(or_curStop)
     strategy.exit("ORL2x", from_entry = "ORL2", stop = or_curStop, limit = or_curTP)
     strategy.exit("ORSx",  from_entry = "ORS",  stop = or_curStop, limit = or_curTP)
     strategy.exit("ORS2x", from_entry = "ORS2", stop = or_curStop, limit = or_curTP)
-if (or_f1 or or_f2) and not or_done and not na(or_curStop)
-    or_hit = or_dir == 1 ? (low <= or_curStop or high >= or_curTP) : (high >= or_curStop or low <= or_curTP)
-    if or_hit
-        or_done := true
-if or_done or flatten or not inWindow or not runORB
+if (or_f1 or or_f2) and not or_closed and not na(or_curStop)
+    if or_dir == 1 and (low <= or_curStop or high >= or_curTP)
+        or_closed := true
+    if or_dir == -1 and (high >= or_curStop or low <= or_curTP)
+        or_closed := true
+// cancel resting ORB entries once the window closes unfilled, or done/flat/off
+if or_closed or flatten or not runORB or ((not orbWin) and not (or_f1 or or_f2))
     strategy.cancel("ORL")
     strategy.cancel("ORL2")
     strategy.cancel("ORS")
     strategy.cancel("ORS2")
 
-// ---------------------------------------------------------------- EOD flatten (both)
+// ================================================================ IB ENGINE
+var float ib_rH = na
+var float ib_rL = na
+var int   ib_rHbar = na
+var int   ib_rLbar = na
+var int   ib_dir = 0
+var bool  ib_shallow = false
+var float ib_e1 = na
+var float ib_e2 = na
+var float ib_zstop = na
+var float ib_rng = na
+var bool  ib_broke = false
+var bool  ib_placed = false
+var bool  ib_f1 = false
+var bool  ib_f2 = false
+var float ib_avgPx = na
+var float ib_curStop = na
+var float ib_curTP = na
+var bool  ib_beDone = false
+var bool  ib_closed = false
+
+if newSession
+    ib_rH := na
+    ib_rL := na
+    ib_dir := 0
+    ib_shallow := false
+    ib_e1 := na
+    ib_e2 := na
+    ib_zstop := na
+    ib_rng := na
+    ib_broke := false
+    ib_placed := false
+    ib_f1 := false
+    ib_f2 := false
+    ib_avgPx := na
+    ib_curStop := na
+    ib_curTP := na
+    ib_beDone := false
+    ib_closed := false
+if ib_inR
+    if na(ib_rH) or high > ib_rH
+        ib_rH := high
+        ib_rHbar := bar_index
+    if na(ib_rL) or low < ib_rL
+        ib_rL := low
+        ib_rLbar := bar_index
+if ib_rDone and not na(ib_rH) and ib_rH > ib_rL
+    ib_rng := ib_rH - ib_rL
+    ib_lf = ib_rLbar < ib_rHbar
+    ib_pos = (close[1] - ib_rL) / ib_rng
+    if ibLong and ib_lf and ib_pos >= 0.5
+        ib_dir := 1
+        ib_shallow := ib_pos >= 0.75
+        ib_e1 := ib_shallow ? ib_rL + 0.75*ib_rng : ib_rL + 0.5*ib_rng
+        ib_e2 := ib_rL + 0.5*ib_rng
+        ib_zstop := ib_shallow ? ib_rL : ib_rL + 0.25*ib_rng
+    else if ibShort and (not ib_lf) and ib_pos <= 0.5
+        ib_dir := -1
+        ib_shallow := ib_pos <= 0.25
+        ib_e1 := ib_shallow ? ib_rL + 0.25*ib_rng : ib_rL + 0.5*ib_rng
+        ib_e2 := ib_rL + 0.5*ib_rng
+        ib_zstop := ib_shallow ? ib_rH : ib_rL + 0.75*ib_rng
+// INTERACTION: on IB formation, resolve ORB vs IB
+if ib_rDone and runIB and runORB
+    or_open = (or_f1 or or_f2) and not or_closed
+    if or_open and ib_dir != 0 and ib_dir == -or_dir
+        strategy.close("ORL",  comment = "ORB->IB flip")
+        strategy.close("ORL2", comment = "ORB->IB flip")
+        strategy.close("ORS",  comment = "ORB->IB flip")
+        strategy.close("ORS2", comment = "ORB->IB flip")
+        or_closed := true
+ib_useAdd = ibAvg and ib_shallow and not na(ib_e2)
+ib_brk = ibBreak == "Wick (touch)" ? ((ib_dir == 1 and high >= ib_rH) or (ib_dir == -1 and low <= ib_rL)) : ((ib_dir == 1 and close > ib_rH) or (ib_dir == -1 and close < ib_rL))
+if ib_dir != 0 and ib_brk
+    ib_broke := true
+ibWin = inSess and tod <= (ibCutH*60 + ibCutM)
+if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and ibWin and not flatten
+    if ib_dir == 1
+        strategy.entry("IBL", strategy.long, qty = ibQty, limit = ib_e1)
+        if ib_useAdd
+            strategy.entry("IBL2", strategy.long, qty = ibQty, limit = ib_e2)
+    else
+        strategy.entry("IBS", strategy.short, qty = ibQty, limit = ib_e1)
+        if ib_useAdd
+            strategy.entry("IBS2", strategy.short, qty = ibQty, limit = ib_e2)
+    ib_placed := true
+if ib_placed and not ib_closed
+    if ib_dir == 1
+        if not ib_f1 and low <= ib_e1
+            ib_f1 := true
+        if ib_useAdd and not ib_f2 and low <= ib_e2
+            ib_f2 := true
+    if ib_dir == -1
+        if not ib_f1 and high >= ib_e1
+            ib_f1 := true
+        if ib_useAdd and not ib_f2 and high >= ib_e2
+            ib_f2 := true
+ib_firstFill = (ib_f1 or ib_f2) and not (ib_f1[1] or ib_f2[1])
+if ib_f1 or ib_f2
+    ib_avgPx := ib_f1 and ib_f2 ? (ib_e1 + ib_e2) / 2 : ib_f1 ? ib_e1 : ib_e2
+if ib_firstFill
+    ib_curStop := ib_zstop
+    ib_curTP := f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
+    ib_beDone := false
+if ibBE and not ib_beDone and (ib_f1 or ib_f2) and not ib_closed
+    if ib_dir == 1 and high >= ib_rH
+        ib_curStop := math.max(ib_curStop, ib_avgPx)
+        ib_beDone := true
+    if ib_dir == -1 and low <= ib_rL
+        ib_curStop := math.min(ib_curStop, ib_avgPx)
+        ib_beDone := true
+if not na(ib_curStop)
+    strategy.exit("IBLx",  from_entry = "IBL",  stop = ib_curStop, limit = ib_curTP)
+    strategy.exit("IBL2x", from_entry = "IBL2", stop = ib_curStop, limit = ib_curTP)
+    strategy.exit("IBSx",  from_entry = "IBS",  stop = ib_curStop, limit = ib_curTP)
+    strategy.exit("IBS2x", from_entry = "IBS2", stop = ib_curStop, limit = ib_curTP)
+if (ib_f1 or ib_f2) and not ib_closed and not na(ib_curStop)
+    if ib_dir == 1 and (low <= ib_curStop or high >= ib_curTP)
+        ib_closed := true
+    if ib_dir == -1 and (high >= ib_curStop or low <= ib_curTP)
+        ib_closed := true
+if ib_closed or flatten or not runIB or ((not ibWin) and not (ib_f1 or ib_f2))
+    strategy.cancel("IBL")
+    strategy.cancel("IBL2")
+    strategy.cancel("IBS")
+    strategy.cancel("IBS2")
+
+// ---------------------------------------------------------------- EOD flatten
 if flatten
     strategy.close_all(comment = "EOD flat")
 
 // ---------------------------------------------------------------- Automation: PickMyTrade webhook JSON (net position)
-// VERIFY these field names against PickMyTrade's current alert template. For live use enable only ONE strategy.
 f_pmt(string act, float q, float slp, float tpp) =>
     '{"token":"' + pmtToken + '","account_id":"' + pmtAcct + '","symbol":"' + pmtSym +
       '","action":"' + act + '","quantity":' + str.tostring(q) +
       ',"order_type":"' + pmtType +
       '","sl":' + str.tostring(math.round_to_mintick(slp)) +
       ',"tp":' + str.tostring(math.round_to_mintick(tpp)) + '}'
-
-// use whichever side is live for the SL/TP payload (single-strategy live use)
-autoStop = not na(ib_curStop) ? ib_curStop : or_curStop
-autoTP   = not na(ib_curStop) ? ib_curTP  : or_curTP
+liveORB  = (or_f1 or or_f2) and not or_closed
+autoStop = liveORB ? or_curStop : ib_curStop
+autoTP   = liveORB ? or_curTP  : ib_curTP
+autoQty  = liveORB ? orbQty : ibQty
 buyNow   = strategy.position_size > 0 and (strategy.position_size[1] <= 0 or strategy.position_size > strategy.position_size[1])
 sellNow  = strategy.position_size < 0 and (strategy.position_size[1] >= 0 or strategy.position_size < strategy.position_size[1])
 closeNow = flatten and strategy.position_size[1] != 0
 if autoOn and buyNow
-    alert(f_pmt("buy",  qty, autoStop, autoTP), alert.freq_once_per_bar)
+    alert(f_pmt("buy",  autoQty, autoStop, autoTP), alert.freq_once_per_bar)
 if autoOn and sellNow
-    alert(f_pmt("sell", qty, autoStop, autoTP), alert.freq_once_per_bar)
+    alert(f_pmt("sell", autoQty, autoStop, autoTP), alert.freq_once_per_bar)
 if autoOn and closeNow
     alert(f_pmt("close", 0, 0.0, 0.0), alert.freq_once_per_bar)
 
 // ---------------------------------------------------------------- Risk/Reward tool
-var box   ib_rrRisk = na
-var box   ib_rrRew  = na
-var label ib_rrLbl  = na
 var box   or_rrRisk = na
 var box   or_rrRew  = na
 var label or_rrLbl  = na
+var box   ib_rrRisk = na
+var box   ib_rrRew  = na
+var label ib_rrLbl  = na
 if newSession
-    box.delete(ib_rrRisk)
-    box.delete(ib_rrRew)
-    label.delete(ib_rrLbl)
     box.delete(or_rrRisk)
     box.delete(or_rrRew)
     label.delete(or_rrLbl)
-// IB break box
-if showRR and runIB and ib_dir != 0 and ib_broke and not ib_broke[1] and not na(ib_e1) and not na(ib_zstop)
-    ptp = f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, tpLong, tpShort)
-    x1 = bar_index
-    x2 = bar_index + rrBars
-    riskUsd = math.abs(ib_e1 - ib_zstop) * ptVal * qty
-    rewUsd  = math.abs(ptp - ib_e1) * ptVal * qty
-    rrr = riskUsd > 0 ? rewUsd / riskUsd : na
-    if ib_dir == 1
-        ib_rrRew  := box.new(x1, ptp,   x2, ib_e1,   xloc = xloc.bar_index, border_color = color.new(color.green, 100), bgcolor = color.new(color.green, 82))
-        ib_rrRisk := box.new(x1, ib_e1, x2, ib_zstop, xloc = xloc.bar_index, border_color = color.new(color.red, 100),   bgcolor = color.new(color.red, 82))
-    else
-        ib_rrRew  := box.new(x1, ib_e1,   x2, ptp,   xloc = xloc.bar_index, border_color = color.new(color.green, 100), bgcolor = color.new(color.green, 82))
-        ib_rrRisk := box.new(x1, ib_zstop, x2, ib_e1, xloc = xloc.bar_index, border_color = color.new(color.red, 100),   bgcolor = color.new(color.red, 82))
-    ib_rrLbl := label.new(x2, ib_e1, "IB  Risk $" + str.tostring(riskUsd, "#") + " | Reward $" + str.tostring(rewUsd, "#") + " (" + str.tostring(rrr, "#.##") + "R, " + str.tostring(qty, "#.#") + "x)", xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.gray, 15), textcolor = color.white, size = size.small)
-// ORB break box
+    box.delete(ib_rrRisk)
+    box.delete(ib_rrRew)
+    label.delete(ib_rrLbl)
 if showRR and runORB and or_dir != 0 and or_broke and not or_broke[1] and not na(or_e1) and not na(or_zstop)
-    ptp = f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, tpLong, tpShort)
+    ptp = f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
     x1 = bar_index
     x2 = bar_index + rrBars
-    riskUsd = math.abs(or_e1 - or_zstop) * ptVal * qty
-    rewUsd  = math.abs(ptp - or_e1) * ptVal * qty
+    riskUsd = math.abs(or_e1 - or_zstop) * ptVal * orbQty
+    rewUsd  = math.abs(ptp - or_e1) * ptVal * orbQty
     rrr = riskUsd > 0 ? rewUsd / riskUsd : na
     if or_dir == 1
         or_rrRew  := box.new(x1, ptp,   x2, or_e1,   xloc = xloc.bar_index, border_color = color.new(color.green, 100), bgcolor = color.new(color.green, 82))
@@ -389,10 +404,26 @@ if showRR and runORB and or_dir != 0 and or_broke and not or_broke[1] and not na
     else
         or_rrRew  := box.new(x1, or_e1,   x2, ptp,   xloc = xloc.bar_index, border_color = color.new(color.green, 100), bgcolor = color.new(color.green, 82))
         or_rrRisk := box.new(x1, or_zstop, x2, or_e1, xloc = xloc.bar_index, border_color = color.new(color.red, 100),   bgcolor = color.new(color.red, 82))
-    or_rrLbl := label.new(x2, or_e1, "ORB  Risk $" + str.tostring(riskUsd, "#") + " | Reward $" + str.tostring(rewUsd, "#") + " (" + str.tostring(rrr, "#.##") + "R, " + str.tostring(qty, "#.#") + "x)", xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.gray, 15), textcolor = color.white, size = size.small)
+    or_rrLbl := label.new(x2, or_e1, "ORB  Risk $" + str.tostring(riskUsd, "#") + " | Reward $" + str.tostring(rewUsd, "#") + " (" + str.tostring(rrr, "#.##") + "R, " + str.tostring(orbQty, "#.#") + "x)", xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.gray, 15), textcolor = color.white, size = size.small)
+if showRR and runIB and ib_dir != 0 and ib_broke and not ib_broke[1] and not na(ib_e1) and not na(ib_zstop)
+    ptp = f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
+    x1 = bar_index
+    x2 = bar_index + rrBars
+    riskUsd = math.abs(ib_e1 - ib_zstop) * ptVal * ibQty
+    rewUsd  = math.abs(ptp - ib_e1) * ptVal * ibQty
+    rrr = riskUsd > 0 ? rewUsd / riskUsd : na
+    if ib_dir == 1
+        ib_rrRew  := box.new(x1, ptp,   x2, ib_e1,   xloc = xloc.bar_index, border_color = color.new(color.green, 100), bgcolor = color.new(color.green, 82))
+        ib_rrRisk := box.new(x1, ib_e1, x2, ib_zstop, xloc = xloc.bar_index, border_color = color.new(color.red, 100),   bgcolor = color.new(color.red, 82))
+    else
+        ib_rrRew  := box.new(x1, ib_e1,   x2, ptp,   xloc = xloc.bar_index, border_color = color.new(color.green, 100), bgcolor = color.new(color.green, 82))
+        ib_rrRisk := box.new(x1, ib_zstop, x2, ib_e1, xloc = xloc.bar_index, border_color = color.new(color.red, 100),   bgcolor = color.new(color.red, 82))
+    ib_rrLbl := label.new(x2, ib_e1, "IB  Risk $" + str.tostring(riskUsd, "#") + " | Reward $" + str.tostring(rewUsd, "#") + " (" + str.tostring(rrr, "#.##") + "R, " + str.tostring(ibQty, "#.#") + "x)", xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.gray, 15), textcolor = color.white, size = size.small)
 
 // ---------------------------------------------------------------- Visuals
-plot(runIB and not na(ib_rH) ? ib_rH : na, "IB High", color = color.new(color.teal, 0), style = plot.style_linebr)
-plot(runIB and not na(ib_rL) ? ib_rL : na, "IB Low",  color = color.new(color.teal, 40), style = plot.style_linebr)
-plot(runORB and not na(or_rH) ? or_rH : na, "ORB High", color = color.new(color.orange, 0), style = plot.style_linebr)
-plot(runORB and not na(or_rL) ? or_rL : na, "ORB Low",  color = color.new(color.orange, 40), style = plot.style_linebr)
+plot(runORB and not na(or_rH) ? or_rH : na, "ORB High", color = color.new(color.orange, 0),  style = plot.style_linebr)
+plot(runORB and not na(or_rL) ? or_rL : na, "ORB Low",  color = color.new(color.orange, 45), style = plot.style_linebr)
+plot(runORB and or_dir != 0 and not na(or_e1) ? or_e1 : na, "ORB Entry", color = color.new(color.yellow, 0), style = plot.style_linebr)
+plot(runIB and not na(ib_rH) ? ib_rH : na, "IB High", color = color.new(color.teal, 0),  style = plot.style_linebr)
+plot(runIB and not na(ib_rL) ? ib_rL : na, "IB Low",  color = color.new(color.teal, 45), style = plot.style_linebr)
+plot(runIB and ib_dir != 0 and not na(ib_e1) ? ib_e1 : na, "IB Entry", color = color.new(color.aqua, 0), style = plot.style_linebr)
