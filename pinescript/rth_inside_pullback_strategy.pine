@@ -2,8 +2,8 @@
 // RTH Inside-Range Break-then-PULLBACK (nqstats "RTH breaks" study) — run on a 5m chart.
 //   Setup day: the 09:30 RTH open is INSIDE the prior day's RTH range (pRTH low < open < pRTH high).
 //   BREAK  : the first prior-day extreme to be breached (>1 tick) sets the direction (high=long, low=short).
-//   ENTRY  : AFTER the break, a LIMIT rests at a fib pullback of the prior-day range (25% / 50% / 75%).
-//            25% = pRTH low + 0.25*range ... 75% = pRTH low + 0.75*range  (same level for both directions).
+//   ENTRY  : AFTER the break, a LIMIT rests at a pullback measured FROM the broken level (direction-relative):
+//            25% = shallow ... 75% = deep.  long: entry = pRTH high - depth*range ; short: entry = pRTH low + depth*range.
 //   STOP   : the opposite prior-day extreme (unchanged from the breakout version).
 //   TARGET : selectable -> pRTH level (the broken extreme) / HOD-LOD / +10% / +30% / +50% extension of the range.
 //   One trade/day, EOD flatten.  Tested ~1yr MNQ 5m: the 25% pullback is best across targets (PF ~1.5-2.0), but
@@ -19,8 +19,8 @@ tz        = input.string("America/New_York", "Timezone", group = "Session")
 sess      = input.session("0930-1600", "RTH session", group = "Session")
 allowLong = input.bool(true, "Take longs (break pRTH high)",  group = "Strategy")
 allowShort= input.bool(true, "Take shorts (break pRTH low)",  group = "Strategy")
-pbSel     = input.string("25%", "Pullback level (of pRTH range)", options = ["25%", "50%", "75%"], group = "Strategy",
-     tooltip = "Limit entry level, measured from pRTH low. 25% tested best across targets (but small sample).")
+pbSel     = input.string("25%", "Pullback depth (25% shallow - 75% deep)", options = ["25%", "50%", "75%"], group = "Strategy",
+     tooltip = "Retrace depth measured FROM the broken level (direction-relative): 25% = shallow, 75% = deep. long entry = pRTH high - depth*range ; short entry = pRTH low + depth*range. 25% shallow tested best (most fills, ~75% win to pRTH level).")
 tgtSel    = input.string("pRTH level", "Target", options = ["pRTH level", "HOD/LOD", "Ext 10%", "Ext 30%", "Ext 50%"], group = "Strategy",
      tooltip = "pRTH level = return to the broken extreme (highest win rate). Extensions = beyond the broken level. HOD/LOD = the day's extreme at entry.")
 breachTk  = input.int(1, "Breach ticks beyond level", 0, 20, group = "Strategy")
@@ -101,7 +101,7 @@ if insideDay and not broke and not done and inSess and not na(rng) and rng > 0
         dir := -1
         broke := true
     if broke
-        entL := pL + fib*rng
+        entL := dir == 1 ? pH - fib*rng : pL + fib*rng   // direction-relative: 25%=shallow, 75%=deep
         zstop := dir == 1 ? pL : pH
 
 // ---------------------------------------------------------------- Arm the resting pullback LIMIT (once)
