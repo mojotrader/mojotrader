@@ -1,0 +1,70 @@
+//@version=6
+// 3-bar swing ZigZag.
+//   Swing HIGH  = a 3-candle formation where the MIDDLE candle's high is above the high of the candle before
+//                 AND the candle after it.
+//   Swing LOW   = mirror: the MIDDLE candle's low is below the low of the candle before and the candle after.
+//   Pivots are confirmed on the close of the 3rd candle (non-repainting) and sit on the middle candle
+//   (bar_index - 1). The zigzag connects alternating swing highs and lows; when two same-type swings occur in a
+//   row, the more extreme one extends the current leg.
+indicator("3-Bar Swing ZigZag", overlay = true, max_lines_count = 500, max_labels_count = 500)
+
+// ---------------------------------------------------------------- Inputs
+upCol   = input.color(color.teal, "Up leg (to swing high)")
+dnCol   = input.color(color.red,  "Down leg (to swing low)")
+lw      = input.int(2, "Line width", 1, 5)
+showLbl = input.bool(true, "Mark swing points (H / L)")
+
+// ---------------------------------------------------------------- State
+var float lastPrice = na       // price of the current zigzag tip
+var int   lastBar   = na       // bar_index of the current tip
+var int   lastDir   = 0        // 1 = tip is a swing high, -1 = tip is a swing low
+var line  curLine   = na       // the leg currently being drawn/extended
+var label tipLbl    = na       // label on the current tip
+
+// ---------------------------------------------------------------- 3-bar pivots (middle candle = [1])
+phRaw = high[1] > high[2] and high[1] > high
+plRaw = low[1]  < low[2]  and low[1]  < low
+both  = phRaw and plRaw
+// on an ambiguous outside bar, resolve toward the direction that keeps the zigzag alternating
+ph = phRaw and (not both or lastDir == -1)
+pl = plRaw and (not both or lastDir == 1)
+
+// ---------------------------------------------------------------- Swing HIGH
+if ph
+    b = bar_index - 1
+    v = high[1]
+    if lastDir != 1
+        if not na(lastPrice)
+            curLine := line.new(lastBar, lastPrice, b, v, xloc = xloc.bar_index, color = upCol, width = lw)
+        lastDir := 1
+        lastBar := b
+        lastPrice := v
+        if showLbl
+            tipLbl := label.new(b, v, "H", xloc = xloc.bar_index, style = label.style_label_down, color = color.new(upCol, 30), textcolor = color.white, size = size.tiny)
+    else if v > lastPrice
+        lastBar := b
+        lastPrice := v
+        if not na(curLine)
+            line.set_xy2(curLine, b, v)
+        if showLbl and not na(tipLbl)
+            label.set_xy(tipLbl, b, v)
+
+// ---------------------------------------------------------------- Swing LOW (mirror)
+if pl
+    b = bar_index - 1
+    v = low[1]
+    if lastDir != -1
+        if not na(lastPrice)
+            curLine := line.new(lastBar, lastPrice, b, v, xloc = xloc.bar_index, color = dnCol, width = lw)
+        lastDir := -1
+        lastBar := b
+        lastPrice := v
+        if showLbl
+            tipLbl := label.new(b, v, "L", xloc = xloc.bar_index, style = label.style_label_up, color = color.new(dnCol, 30), textcolor = color.white, size = size.tiny)
+    else if v < lastPrice
+        lastBar := b
+        lastPrice := v
+        if not na(curLine)
+            line.set_xy2(curLine, b, v)
+        if showLbl and not na(tipLbl)
+            label.set_xy(tipLbl, b, v)
