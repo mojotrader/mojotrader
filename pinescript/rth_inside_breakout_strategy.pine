@@ -1,0 +1,162 @@
+//@version=6
+// RTH Inside-Range Breakout (nqstats "RTH breaks" study) — run on a 5m chart.
+//   Setup day: the 09:30 RTH open is INSIDE the prior day's RTH range (pRTH low < open < pRTH high).
+//     (~59% of days open inside; gap-up/gap-down days are skipped — continuation tested unprofitable there.)
+//   ENTRY: a stop-order breakout of whichever prior-day extreme breaks first (> breach ticks beyond):
+//          long on pRTH high, short on pRTH low. The opposite resting order is cancelled (OCO).
+//   STOP : the opposite prior-day extreme (full prior-day range). Tight stops were not tested here; the edge
+//          comes from range-expansion / trend days carrying to the close.
+//   TARGET: hold to the 16:00 close (default), or an optional N x R measured move.
+//   One trade/day, EOD flatten. Tested ~1yr MNQ 5m: PF ~1.6, 62% win, holds in both out-of-sample halves.
+//   Leverage/capital limits removed. NOTE: one-year sample — validate on more data before sizing up.
+strategy("RTH Inside-Range Breakout (nqstats)", overlay = true, pyramiding = 1, max_boxes_count = 200, max_labels_count = 200,
+     initial_capital = 1000000, margin_long = 0, margin_short = 0,
+     default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
+
+// ---------------------------------------------------------------- Inputs
+tz        = input.string("America/New_York", "Timezone", group = "Session")
+sess      = input.session("0930-1600", "RTH session", group = "Session")
+allowLong = input.bool(true, "Take longs (break pRTH high)",  group = "Strategy")
+allowShort= input.bool(true, "Take shorts (break pRTH low)",  group = "Strategy")
+breachTk  = input.int(1, "Breach ticks beyond level", 0, 20, group = "Strategy", tooltip = "A breach = a wick more than this many ticks beyond the prior-day level (study uses 1 tick).")
+tgtMode   = input.string("Hold to close", "Target", options = ["Hold to close", "1R", "2R", "3R"], group = "Strategy",
+     tooltip = "R = distance from entry to the opposite-extreme stop (the full prior-day range). With such a wide R, the R-targets are rarely reached, so results are close to Hold-to-close.")
+useBE     = input.bool(false, "Breakeven at +1R", group = "Strategy")
+qty       = input.float(1, "Contracts", minval = 1, group = "Strategy")
+cutH      = input.int(16, "Entry cutoff hour",   0, 23, group = "Time", tooltip = "Latest time a breakout may be entered. 16:00 = allow entries all session (matches the test).")
+cutM      = input.int(0,  "Entry cutoff minute", 0, 59, group = "Time")
+flatH     = input.int(16, "Flatten hour",   0, 23, group = "Time")
+flatM     = input.int(0,  "Flatten minute", 0, 59, group = "Time")
+
+grpRR     = "Risk / Reward tool"
+showRR    = input.bool(true, "Show risk/reward box at the break", group = grpRR)
+ptVal     = input.float(2.0, "$ per point per contract", group = grpRR, tooltip = "MNQ=2, NQ=20, MES=5, ES=50.")
+rrBars    = input.int(24, "R/R box width (bars)", 1, 300, group = grpRR)
+
+// ---------------------------------------------------------------- Prior-day RTH range
+inSess     = not na(time(timeframe.period, sess, tz))
+newSession = inSess and not inSess[1]
+
+var float curH = na       // current RTH session high/low
+var float curL = na
+var float pH   = na       // prior RTH session high/low
+var float pL   = na
+var float openTdy = na    // today's 09:30 open
+if newSession
+    pH := curH
+    pL := curL
+    curH := high
+    curL := low
+    openTdy := open
+else if inSess
+    curH := math.max(curH, high)
+    curL := math.min(curL, low)
+
+// ---------------------------------------------------------------- Setup + state (resolved at the RTH open)
+tk       = breachTk * syminfo.mintick
+inside   = not na(pH) and not na(pL) and openTdy < pH and openTdy > pL
+longLvl  = pH + tk
+shortLvl = pL - tk
+
+var int   dir = 0
+var float ent = na
+var float zstop = na
+var float curTP = na
+var bool  beDone = false
+var bool  placed = false
+var bool  broke = false
+var bool  wasIn = false
+var bool  done = false
+if newSession
+    dir := 0
+    ent := na
+    zstop := na
+    curTP := na
+    beDone := false
+    placed := false
+    broke := false
+    wasIn := false
+    done := false
+
+// ---------------------------------------------------------------- Time gates
+tod      = hour(time, tz) * 60 + minute(time, tz)
+inWindow = inSess and tod <= (cutH*60 + cutM)
+flatten  = tod >= (flatH*60 + flatM)
+
+// ---------------------------------------------------------------- Arm OCO stop-order breakouts
+armable = inside and inWindow and not flatten and not done and strategy.position_size == 0
+if armable
+    if allowLong
+        strategy.entry("L", strategy.long,  qty = qty, stop = longLvl)
+    if allowShort
+        strategy.entry("S", strategy.short, qty = qty, stop = shortLvl)
+
+// ---------------------------------------------------------------- On fill: set direction, stop, target; cancel the OCO twin
+if strategy.position_size > 0 and dir <= 0
+    dir := 1
+    ent := longLvl
+    zstop := pL
+    rlong = ent - zstop
+    curTP := tgtMode == "1R" ? ent + rlong : tgtMode == "2R" ? ent + 2*rlong : tgtMode == "3R" ? ent + 3*rlong : na
+    beDone := false
+    broke := true
+    strategy.cancel("S")
+if strategy.position_size < 0 and dir >= 0
+    dir := -1
+    ent := shortLvl
+    zstop := pH
+    rshort = zstop - ent
+    curTP := tgtMode == "1R" ? ent - rshort : tgtMode == "2R" ? ent - 2*rshort : tgtMode == "3R" ? ent - 3*rshort : na
+    beDone := false
+    broke := true
+    strategy.cancel("L")
+
+// ---------------------------------------------------------------- Breakeven at +1R
+var float mgStop = na
+if dir != 0
+    mgStop := na(mgStop) ? zstop : mgStop
+if useBE and not beDone and strategy.position_size != 0 and not na(ent)
+    R = math.abs(ent - zstop)
+    if dir == 1 and high >= ent + R
+        mgStop := math.max(mgStop, ent)
+        beDone := true
+    if dir == -1 and low <= ent - R
+        mgStop := math.min(mgStop, ent)
+        beDone := true
+
+// ---------------------------------------------------------------- Exits
+if strategy.position_size != 0
+    strategy.exit("Lx", from_entry = "L", stop = mgStop, limit = curTP)
+    strategy.exit("Sx", from_entry = "S", stop = mgStop, limit = curTP)
+
+wasIn := wasIn or strategy.position_size != 0
+if strategy.position_size == 0 and wasIn
+    done := true
+if done or flatten or not inWindow
+    strategy.cancel("L")
+    strategy.cancel("S")
+if flatten
+    strategy.close_all(comment = "EOD flat")
+
+// ---------------------------------------------------------------- Risk/Reward box (drawn at the break)
+if showRR and broke and not broke[1] and not na(ent) and not na(zstop)
+    x1 = bar_index
+    x2 = bar_index + rrBars
+    ptp = na(curTP) ? (dir == 1 ? ent + (ent - zstop) : ent - (zstop - ent)) : curTP  // show 1R box when holding to close
+    riskUsd = math.abs(ent - zstop) * ptVal * qty
+    rewUsd  = math.abs(ptp - ent) * ptVal * qty
+    rrr = riskUsd > 0 ? rewUsd / riskUsd : na
+    rewTop = dir == 1 ? ptp : ent
+    rewBot = dir == 1 ? ent : ptp
+    rskTop = dir == 1 ? ent : zstop
+    rskBot = dir == 1 ? zstop : ent
+    box.new(x1, rewTop, x2, rewBot, xloc = xloc.bar_index, border_color = color.new(color.green, 0), border_width = 1, bgcolor = color.new(color.green, 82))
+    box.new(x1, rskTop, x2, rskBot, xloc = xloc.bar_index, border_color = color.new(color.red, 0),   border_width = 1, bgcolor = color.new(color.red, 82))
+    lbltxt = "Risk $" + str.tostring(riskUsd, "#") + (na(curTP) ? "  (stop = opposite extreme, hold to close)" : "  | Reward $" + str.tostring(rewUsd, "#") + " (" + str.tostring(rrr, "#.##") + "R)")
+    label.new(x2, ent, lbltxt, xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.gray, 15), textcolor = color.white, size = size.small)
+
+// ---------------------------------------------------------------- Visuals
+plot(not na(pH) ? pH : na, "pRTH High", color = color.new(color.teal, 0), style = plot.style_linebr)
+plot(not na(pL) ? pL : na, "pRTH Low",  color = color.new(color.red, 0),  style = plot.style_linebr)
+bgcolor(inside and newSession ? color.new(color.blue, 90) : na, title = "Inside-open day")
