@@ -18,7 +18,7 @@
 //
 // LIMITATION: a Pine strategy nets all orders into ONE position (no hedging). Same-direction overlaps merge fine;
 //   the interaction rules above are what handle the opposite-direction ORB/IB case (ORB is closed, not hedged).
-strategy("Break-then-Pullback (ORB + IB)", overlay = true, pyramiding = 6, max_boxes_count = 500, max_labels_count = 500,
+strategy("Break-then-Pullback (ORB + IB)", overlay = true, pyramiding = 6, max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500,
      initial_capital = 1000000, margin_long = 0, margin_short = 0,
      default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
      commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
@@ -73,6 +73,7 @@ pmtType   = input.string("market", "Order type", options = ["market", "limit"], 
 // ---------------------------------------------------------------- Risk/Reward tool
 grpRR     = "Risk / Reward tool"
 showRR    = input.bool(true, "Show risk/reward box at the break", group = grpRR)
+showFibs  = input.bool(true, "Show fib retracement lines (25/50/75)", group = grpRR, tooltip = "Labels flip by direction: long -> 25% near the top, short -> 25% near the bottom.")
 ptVal     = input.float(2.0, "$ per point per contract", group = grpRR, tooltip = "MNQ=2, NQ=20, MES=5, ES=50.")
 rrBars    = input.int(24, "R/R box width (bars)", 1, 300, group = grpRR)
 
@@ -377,26 +378,55 @@ if autoOn and sellNow
 if autoOn and closeNow
     alert(f_pmt("close", 0, 0.0, 0.0), alert.freq_once_per_bar)
 
-// ---------------------------------------------------------------- Risk/Reward tool
-// Boxes are drawn once per setup at the break and PERSIST (oldest evicted at the 500-box limit), so every
-// ORB and IB markup stays on the chart. Border colour identifies the setup: orange = ORB, teal = IB.
-f_drawRR(int d, float e1, float zstop, float ptp, float q, color sigCol, string tag) =>
-    x1 = bar_index
-    x2 = bar_index + rrBars
-    riskUsd = math.abs(e1 - zstop) * ptVal * q
-    rewUsd  = math.abs(ptp - e1) * ptVal * q
+// ---------------------------------------------------------------- Risk/Reward + fib tool
+// Drawn once per setup at the break and PERSIST (oldest evicted at the 500 limit), so every ORB and IB markup
+// stays on the chart. Border/line colour identifies the setup: orange = ORB, teal = IB. A 2nd (offset) R/R box
+// is added for the average-down unit when it is armed. Fib lines flip labels by direction.
+f_drawRR(int d, float ent, float zstop, float ptp, float q, color sigCol, string tag, int xoff) =>
+    x1 = bar_index + xoff
+    x2 = x1 + rrBars
+    riskUsd = math.abs(ent - zstop) * ptVal * q
+    rewUsd  = math.abs(ptp - ent) * ptVal * q
     rrr = riskUsd > 0 ? rewUsd / riskUsd : na
-    rewTop = d == 1 ? ptp : e1
-    rewBot = d == 1 ? e1  : ptp
-    rskTop = d == 1 ? e1  : zstop
-    rskBot = d == 1 ? zstop : e1
+    rewTop = d == 1 ? ptp : ent
+    rewBot = d == 1 ? ent : ptp
+    rskTop = d == 1 ? ent : zstop
+    rskBot = d == 1 ? zstop : ent
     box.new(x1, rewTop, x2, rewBot, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.green, 82))
     box.new(x1, rskTop, x2, rskBot, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.red, 82))
-    label.new(x2, e1, tag + "  Risk $" + str.tostring(riskUsd, "#") + " | Reward $" + str.tostring(rewUsd, "#") + " (" + str.tostring(rrr, "#.##") + "R, " + str.tostring(q, "#.#") + "x)", xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.gray, 15), textcolor = color.white, size = size.small)
-if showRR and runORB and or_dir != 0 and or_broke and not or_broke[1] and not na(or_e1) and not na(or_zstop)
-    f_drawRR(or_dir, or_e1, or_zstop, f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS), orbQty, color.new(color.orange, 0), "ORB")
-if showRR and runIB and ib_dir != 0 and ib_broke and not ib_broke[1] and not na(ib_e1) and not na(ib_zstop)
-    f_drawRR(ib_dir, ib_e1, ib_zstop, f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS), ibQty, color.new(color.teal, 0), "IB")
+    label.new(x2, ent, tag + "  Risk $" + str.tostring(riskUsd, "#") + " | Reward $" + str.tostring(rewUsd, "#") + " (" + str.tostring(rrr, "#.##") + "R, " + str.tostring(q, "#.#") + "x)", xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.gray, 15), textcolor = color.white, size = size.small)
+
+f_drawFibs(float rL, float rg, int d, color sigCol, string tag) =>
+    x1 = bar_index
+    x2 = bar_index + rrBars
+    l25 = rL + 0.25*rg
+    l50 = rL + 0.50*rg
+    l75 = rL + 0.75*rg
+    lab75 = d == 1 ? "25%" : "75%"     // long -> 25% retr. near the top ; short -> 25% near the bottom
+    lab25 = d == 1 ? "75%" : "25%"
+    line.new(x1, l25, x2, l25, xloc = xloc.bar_index, color = color.new(sigCol, 35), style = line.style_dotted, width = 1)
+    line.new(x1, l50, x2, l50, xloc = xloc.bar_index, color = color.new(sigCol, 35), style = line.style_dotted, width = 1)
+    line.new(x1, l75, x2, l75, xloc = xloc.bar_index, color = color.new(sigCol, 35), style = line.style_dotted, width = 1)
+    label.new(x1, l25, tag + " " + lab25, xloc = xloc.bar_index, style = label.style_label_right, color = color.new(color.gray, 40), textcolor = color.white, size = size.tiny)
+    label.new(x1, l50, tag + " 50%",      xloc = xloc.bar_index, style = label.style_label_right, color = color.new(color.gray, 40), textcolor = color.white, size = size.tiny)
+    label.new(x1, l75, tag + " " + lab75, xloc = xloc.bar_index, style = label.style_label_right, color = color.new(color.gray, 40), textcolor = color.white, size = size.tiny)
+
+if runORB and or_dir != 0 and or_broke and not or_broke[1] and not na(or_e1) and not na(or_zstop)
+    orTP = f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
+    if showFibs
+        f_drawFibs(or_rL, or_rng, or_dir, color.new(color.orange, 0), "ORB")
+    if showRR
+        f_drawRR(or_dir, or_e1, or_zstop, orTP, orbQty, color.new(color.orange, 0), "ORB", 0)
+        if or_useAdd
+            f_drawRR(or_dir, or_e2, or_zstop, orTP, orbQty, color.new(color.orange, 0), "ORB avg #2", rrBars)
+if runIB and ib_dir != 0 and ib_broke and not ib_broke[1] and not na(ib_e1) and not na(ib_zstop)
+    ibTP = f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
+    if showFibs
+        f_drawFibs(ib_rL, ib_rng, ib_dir, color.new(color.teal, 0), "IB")
+    if showRR
+        f_drawRR(ib_dir, ib_e1, ib_zstop, ibTP, ibQty, color.new(color.teal, 0), "IB", 0)
+        if ib_useAdd
+            f_drawRR(ib_dir, ib_e2, ib_zstop, ibTP, ibQty, color.new(color.teal, 0), "IB avg #2", rrBars)
 
 // ---------------------------------------------------------------- Visuals
 plot(runORB and not na(or_rH) ? or_rH : na, "ORB High", color = color.new(color.orange, 0),  style = plot.style_linebr)
