@@ -18,7 +18,7 @@
 //
 // LIMITATION: a Pine strategy nets all orders into ONE position (no hedging). Same-direction overlaps merge fine;
 //   the interaction rules above are what handle the opposite-direction ORB/IB case (ORB is closed, not hedged).
-strategy("Break-then-Pullback (ORB + IB)", overlay = true, pyramiding = 6, max_boxes_count = 40, max_labels_count = 80,
+strategy("Break-then-Pullback (ORB + IB)", overlay = true, pyramiding = 6, max_boxes_count = 500, max_labels_count = 500,
      initial_capital = 1000000, margin_long = 0, margin_short = 0,
      default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
      commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
@@ -378,47 +378,25 @@ if autoOn and closeNow
     alert(f_pmt("close", 0, 0.0, 0.0), alert.freq_once_per_bar)
 
 // ---------------------------------------------------------------- Risk/Reward tool
-var box   or_rrRisk = na
-var box   or_rrRew  = na
-var label or_rrLbl  = na
-var box   ib_rrRisk = na
-var box   ib_rrRew  = na
-var label ib_rrLbl  = na
-if newSession
-    box.delete(or_rrRisk)
-    box.delete(or_rrRew)
-    label.delete(or_rrLbl)
-    box.delete(ib_rrRisk)
-    box.delete(ib_rrRew)
-    label.delete(ib_rrLbl)
+// Boxes are drawn once per setup at the break and PERSIST (oldest evicted at the 500-box limit), so every
+// ORB and IB markup stays on the chart. Border colour identifies the setup: orange = ORB, teal = IB.
+f_drawRR(int d, float e1, float zstop, float ptp, float q, color sigCol, string tag) =>
+    x1 = bar_index
+    x2 = bar_index + rrBars
+    riskUsd = math.abs(e1 - zstop) * ptVal * q
+    rewUsd  = math.abs(ptp - e1) * ptVal * q
+    rrr = riskUsd > 0 ? rewUsd / riskUsd : na
+    rewTop = d == 1 ? ptp : e1
+    rewBot = d == 1 ? e1  : ptp
+    rskTop = d == 1 ? e1  : zstop
+    rskBot = d == 1 ? zstop : e1
+    box.new(x1, rewTop, x2, rewBot, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.green, 82))
+    box.new(x1, rskTop, x2, rskBot, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.red, 82))
+    label.new(x2, e1, tag + "  Risk $" + str.tostring(riskUsd, "#") + " | Reward $" + str.tostring(rewUsd, "#") + " (" + str.tostring(rrr, "#.##") + "R, " + str.tostring(q, "#.#") + "x)", xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.gray, 15), textcolor = color.white, size = size.small)
 if showRR and runORB and or_dir != 0 and or_broke and not or_broke[1] and not na(or_e1) and not na(or_zstop)
-    ptp = f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
-    x1 = bar_index
-    x2 = bar_index + rrBars
-    riskUsd = math.abs(or_e1 - or_zstop) * ptVal * orbQty
-    rewUsd  = math.abs(ptp - or_e1) * ptVal * orbQty
-    rrr = riskUsd > 0 ? rewUsd / riskUsd : na
-    if or_dir == 1
-        or_rrRew  := box.new(x1, ptp,   x2, or_e1,   xloc = xloc.bar_index, border_color = color.new(color.green, 100), bgcolor = color.new(color.green, 82))
-        or_rrRisk := box.new(x1, or_e1, x2, or_zstop, xloc = xloc.bar_index, border_color = color.new(color.red, 100),   bgcolor = color.new(color.red, 82))
-    else
-        or_rrRew  := box.new(x1, or_e1,   x2, ptp,   xloc = xloc.bar_index, border_color = color.new(color.green, 100), bgcolor = color.new(color.green, 82))
-        or_rrRisk := box.new(x1, or_zstop, x2, or_e1, xloc = xloc.bar_index, border_color = color.new(color.red, 100),   bgcolor = color.new(color.red, 82))
-    or_rrLbl := label.new(x2, or_e1, "ORB  Risk $" + str.tostring(riskUsd, "#") + " | Reward $" + str.tostring(rewUsd, "#") + " (" + str.tostring(rrr, "#.##") + "R, " + str.tostring(orbQty, "#.#") + "x)", xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.gray, 15), textcolor = color.white, size = size.small)
+    f_drawRR(or_dir, or_e1, or_zstop, f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS), orbQty, color.new(color.orange, 0), "ORB")
 if showRR and runIB and ib_dir != 0 and ib_broke and not ib_broke[1] and not na(ib_e1) and not na(ib_zstop)
-    ptp = f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
-    x1 = bar_index
-    x2 = bar_index + rrBars
-    riskUsd = math.abs(ib_e1 - ib_zstop) * ptVal * ibQty
-    rewUsd  = math.abs(ptp - ib_e1) * ptVal * ibQty
-    rrr = riskUsd > 0 ? rewUsd / riskUsd : na
-    if ib_dir == 1
-        ib_rrRew  := box.new(x1, ptp,   x2, ib_e1,   xloc = xloc.bar_index, border_color = color.new(color.green, 100), bgcolor = color.new(color.green, 82))
-        ib_rrRisk := box.new(x1, ib_e1, x2, ib_zstop, xloc = xloc.bar_index, border_color = color.new(color.red, 100),   bgcolor = color.new(color.red, 82))
-    else
-        ib_rrRew  := box.new(x1, ib_e1,   x2, ptp,   xloc = xloc.bar_index, border_color = color.new(color.green, 100), bgcolor = color.new(color.green, 82))
-        ib_rrRisk := box.new(x1, ib_zstop, x2, ib_e1, xloc = xloc.bar_index, border_color = color.new(color.red, 100),   bgcolor = color.new(color.red, 82))
-    ib_rrLbl := label.new(x2, ib_e1, "IB  Risk $" + str.tostring(riskUsd, "#") + " | Reward $" + str.tostring(rewUsd, "#") + " (" + str.tostring(rrr, "#.##") + "R, " + str.tostring(ibQty, "#.#") + "x)", xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.gray, 15), textcolor = color.white, size = size.small)
+    f_drawRR(ib_dir, ib_e1, ib_zstop, f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS), ibQty, color.new(color.teal, 0), "IB")
 
 // ---------------------------------------------------------------- Visuals
 plot(runORB and not na(or_rH) ? or_rH : na, "ORB High", color = color.new(color.orange, 0),  style = plot.style_linebr)
