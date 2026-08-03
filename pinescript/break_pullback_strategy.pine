@@ -24,46 +24,40 @@ strategy("Break-then-Pullback (ORB + IB)", overlay = true, pyramiding = 6, max_b
      commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
 
 // ---------------------------------------------------------------- Global session inputs
-tz     = input.string("America/New_York", "Timezone", group = "Session")
-sess   = input.session("0930-1600", "RTH session", group = "Session")
-orbSess= input.session("0930-0945", "ORB window", group = "Session")
-ibSess = input.session("0930-1030", "IB window", group = "Session")
-flatH  = input.int(16, "Flatten hour",   0, 23, group = "Session")
-flatM  = input.int(0,  "Flatten minute", 0, 59, group = "Session")
-
-// ---------------------------------------------------------------- ORB settings (under the ORB toggle)
-gORB      = "ORB settings"
-runORB    = input.bool(true,  "Run ORB", group = gORB)
-orbLong   = input.bool(true,  "  ORB take longs",  group = gORB)
-orbShort  = input.bool(true,  "  ORB take shorts", group = gORB)
-orbBreak  = input.string("Wick (touch)", "  ORB break type", options = ["Wick (touch)", "Close beyond"], group = gORB,
-     tooltip = "Wick = the high/low tags the level. Close = the bar must CLOSE beyond the level (stricter, fewer signals).")
-orbAvg    = input.bool(true,  "  ORB average down (2nd unit at 50%)", group = gORB)
-orbTpL    = input.string("Range level", "  ORB TP long",  options = ["Range level", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gORB)
-orbTpS    = input.string("Ext 30%",     "  ORB TP short", options = ["Range level", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gORB)
-orbDeepSL = input.string("75% line", "  ORB 50%-entry stop", options = ["75% line", "100% (range extreme)"], group = gORB,
-     tooltip = "Stop for the DEEPER (50% entry) zone. Shallow (25% entry) always stops at the range extreme (100%). Test 75% vs 100% here.")
-orbBE     = input.bool(false, "  ORB breakeven on range reclaim", group = gORB)
-orbQty    = input.float(1, "  ORB contracts per unit", minval = 1, group = gORB)
-orbCutH   = input.int(15, "  ORB entry cutoff hour",   0, 23, group = gORB, tooltip = "Only used if IB is OFF; when IB is ON the ORB deadline is the IB formation time.")
-orbCutM   = input.int(0,  "  ORB entry cutoff minute", 0, 59, group = gORB)
-
-// ---------------------------------------------------------------- IB settings (under the IB toggle)
-gIB       = "IB settings"
-runIB     = input.bool(true,  "Run IB", group = gIB)
-ibLong    = input.bool(true,  "  IB take longs",  group = gIB)
-ibShort   = input.bool(false, "  IB take shorts (weak in tests)", group = gIB)
-ibBreak   = input.string("Wick (touch)", "  IB break type", options = ["Wick (touch)", "Close beyond"], group = gIB,
-     tooltip = "Wick = the high/low tags the level. Close = the bar must CLOSE beyond the level (stricter, fewer signals).")
-ibAvg     = input.bool(true,  "  IB average down (2nd unit at 50%)", group = gIB)
-ibTpL     = input.string("Range level", "  IB TP long",  options = ["Range level", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gIB)
-ibTpS     = input.string("Ext 30%",     "  IB TP short", options = ["Range level", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gIB)
-ibDeepSL  = input.string("75% line", "  IB 50%-entry stop", options = ["75% line", "100% (range extreme)"], group = gIB,
-     tooltip = "Stop for the DEEPER (50% entry) zone. Shallow (25% entry) always stops at the range extreme (100%). Test 75% vs 100% here.")
-ibBE      = input.bool(false, "  IB breakeven on range reclaim", group = gIB)
-ibQty     = input.float(1, "  IB contracts per unit", minval = 1, group = gIB)
-ibCutH    = input.int(15, "  IB entry cutoff hour",   0, 23, group = gIB)
-ibCutM    = input.int(0,  "  IB entry cutoff minute", 0, 59, group = gIB)
+// ===== HARDCODED CONFIG (locked to the chosen setup — edit the values here, no inputs shown) =====
+// Session
+tz      = "America/New_York"
+sess    = "0930-1600"
+orbSess = "0930-0945"
+ibSess  = "0930-1030"
+flatH   = 15
+flatM   = 30
+// ORB settings
+runORB    = true
+orbLong   = true
+orbShort  = true
+orbBreak  = "Close beyond"
+orbAvg    = true
+orbTpL    = "Ext 10%"
+orbTpS    = "Ext 30%"
+orbDeepSL = "75% line"
+orbBE     = false
+orbQty    = 2.0
+orbCutH   = 15
+orbCutM   = 0
+// IB settings
+runIB     = true
+ibLong    = true
+ibShort   = true
+ibBreak   = "Wick (touch)"
+ibAvg     = true
+ibTpL     = "Ext 30%"
+ibTpS     = "Ext 30%"
+ibDeepSL  = "75% line"
+ibBE      = false
+ibQty     = 1.0
+ibCutH    = 14
+ibCutM    = 0
 
 // ---------------------------------------------------------------- Filters
 gFilt     = "Filters"
