@@ -79,6 +79,11 @@ pmtAcct   = input.string("", "Tradovate account id", group = grpA)
 pmtSym    = input.string("MNQ1!", "Broker symbol", group = grpA)
 pmtType   = input.string("market", "Order type", options = ["market", "limit"], group = grpA)
 
+// ---------------------------------------------------------------- Break alerts (manual trading)
+grpBA     = "Break alerts (manual)"
+brkAlerts = input.bool(true, "Alert when ORB / IB level breaks", group = grpBA,
+     tooltip = "Fires a notification the moment the ORB or IB range breaks, with the direction and the planned entry/stop/target so you can place the trade yourself. Create ONE alert on this strategy with condition 'alert() function calls only'. (Independent of the PickMyTrade automation above.)")
+
 // ---------------------------------------------------------------- Risk/Reward tool
 grpRR     = "Risk / Reward tool"
 showRR    = input.bool(true, "Show risk/reward box at the break", group = grpRR)
@@ -399,6 +404,22 @@ if autoOn and sellNow
     alert(f_pmt("sell", autoQty, autoStop, autoTP), alert.freq_once_per_bar)
 if autoOn and closeNow
     alert(f_pmt("close", 0, 0.0, 0.0), alert.freq_once_per_bar)
+
+// ---------------------------------------------------------------- Break alerts (fire once when each range breaks)
+if brkAlerts and runORB and or_dir != 0 and or_broke and not or_broke[1]
+    orTPa = f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
+    alert("ORB BREAK  " + (or_dir == 1 ? "LONG" : "SHORT") +
+         "  | broke " + str.tostring(math.round_to_mintick(or_dir == 1 ? or_rH : or_rL)) +
+         "  | pullback entry " + str.tostring(math.round_to_mintick(or_e1)) +
+         "  | stop " + str.tostring(math.round_to_mintick(or_zstop)) +
+         "  | target " + str.tostring(math.round_to_mintick(orTPa)), alert.freq_once_per_bar)
+if brkAlerts and runIB and ib_dir != 0 and ib_broke and not ib_broke[1]
+    ibTPa = f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
+    alert("IB BREAK  " + (ib_dir == 1 ? "LONG" : "SHORT") +
+         "  | broke " + str.tostring(math.round_to_mintick(ib_dir == 1 ? ib_rH : ib_rL)) +
+         "  | pullback entry " + str.tostring(math.round_to_mintick(ib_e1)) +
+         "  | stop " + str.tostring(math.round_to_mintick(ib_zstop)) +
+         "  | target " + str.tostring(math.round_to_mintick(ibTPa)), alert.freq_once_per_bar)
 
 // ---------------------------------------------------------------- Risk/Reward + fib tool
 // Drawn once per setup at the break and PERSIST (oldest evicted at the 500 limit), so every ORB and IB markup
