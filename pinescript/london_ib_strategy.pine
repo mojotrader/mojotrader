@@ -37,7 +37,7 @@ qty       = input.float(1, "Contracts per unit", minval = 1, group = gS)
 
 gES       = "Entry / Stop"
 entrySel  = input.string("25%",  "Entry (retr from break)", options = ["0%", "25%", "50%"], group = gES,
-     tooltip = "Where the limit rests, as a retracement from the IB break level. 0% = at the broken level (shallowest), 50% = halfway back into the range.")
+     tooltip = "0% = enter ON the breakout (stop order, fills as price breaks/overshoots the level - no pullback needed). 25% / 50% = wait for a pullback LIMIT to that retracement of the range.")
 stopSel   = input.string("100%", "Stop (retr from break)",  options = ["25%", "50%", "75%", "100%"], group = gES,
      tooltip = "Stop as a retracement from the IB break level. Must be DEEPER than the entry. 100% = the far side of the range.")
 
@@ -151,6 +151,7 @@ if not na(rng) and dir == 0
         e2 := rL + 0.5*rng
         zstop := rL + sp*rng
 useAdd = useAvg and f_entPct(entrySel) < 0.5 and f_stopPct(stopSel) > 0.5 and not na(e2)
+isBreakout = entrySel == "0%"   // 0% -> enter on the breakout (stop order) ; else pullback limit
 // opposite side breaks after direction is set (for the double-break filter)
 if dir == 1 and low < rL
     oppBroke := true
@@ -159,22 +160,28 @@ if dir == -1 and high > rH
 win = inSess and entriesOpen
 if dir != 0 and broke and not placed and not closed and win and not flatten and (not noDbl or not oppBroke)
     if dir == 1
-        strategy.entry("L", strategy.long, qty = qty, limit = e1)
+        if isBreakout
+            strategy.entry("L", strategy.long, qty = qty, stop = e1)
+        else
+            strategy.entry("L", strategy.long, qty = qty, limit = e1)
         if useAdd
             strategy.entry("L2", strategy.long, qty = qty, limit = e2)
     else
-        strategy.entry("S", strategy.short, qty = qty, limit = e1)
+        if isBreakout
+            strategy.entry("S", strategy.short, qty = qty, stop = e1)
+        else
+            strategy.entry("S", strategy.short, qty = qty, limit = e1)
         if useAdd
             strategy.entry("S2", strategy.short, qty = qty, limit = e2)
     placed := true
 if placed and not closed
     if dir == 1
-        if not f1 and low <= e1
+        if not f1 and (isBreakout ? high >= e1 : low <= e1)
             f1 := true
         if useAdd and not f2 and low <= e2
             f2 := true
     if dir == -1
-        if not f1 and high >= e1
+        if not f1 and (isBreakout ? low <= e1 : high >= e1)
             f1 := true
         if useAdd and not f2 and high >= e2
             f2 := true
