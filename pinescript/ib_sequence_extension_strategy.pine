@@ -26,6 +26,8 @@ allowShort= input.bool(true, "Shorts (high made first)", group = "Strategy")
 entryMode = input.string("Zone pullback limit", "Entry mode", options = ["Immediate (10:30)", "Zone pullback limit"], group = "Strategy",
      tooltip = "Immediate = market at the IB close. Zone pullback = a limit at the 25/50/75 line chosen by where the 10:30 close sits.")
 tpSel     = input.string("Ext 30%", "Target (extension)", options = ["Ext 10%", "Ext 20%", "Ext 30%", "Ext 50%"], group = "Strategy")
+slSel     = input.string("100% (far edge)", "Stop loss", options = ["100% (far edge)", "75% line", "50% line"], group = "Strategy",
+     tooltip = "Stop as a fib line. 100% = far edge (IB low for longs / high for shorts). Tighter stops improve R:R but must sit BEYOND the entry, else the day is skipped.")
 useBE     = input.bool(false, "Breakeven at +1R", group = "Strategy")
 qty       = input.float(1, "Contracts", minval = 1, group = "Strategy")
 cutH      = input.int(15, "Stop new entries after - hour",   0, 23, group = "Time")
@@ -103,7 +105,6 @@ if ibDone and not na(rH) and rH > rL and rHbar != rLbar
     else if allowShort and (not lowFirst)
         dir := -1
     if dir != 0
-        stopLvl := dir == 1 ? rL : rH                                   // 100% far edge
         tpLvl := dir == 1 ? rH + ext*rng : rL - ext*rng                 // extension target
         if entryMode == "Immediate (10:30)"
             isMkt := true
@@ -115,6 +116,12 @@ if ibDone and not na(rH) and rH > rL and rHbar != rLbar
                 entryLvl := pos <= 0.25 ? rL + 0.25*rng : pos <= 0.5 ? rL + 0.5*rng : pos <= 0.75 ? rL + 0.75*rng : na
             if na(entryLvl)
                 dir := 0                                                // close too deep -> no valid zone -> skip
+        if dir != 0
+            slFrac = slSel == "100% (far edge)" ? 1.0 : slSel == "75% line" ? 0.75 : 0.5
+            stopLvl := dir == 1 ? rL + (1.0 - slFrac)*rng : rH - (1.0 - slFrac)*rng
+            entRef = isMkt ? close[1] : entryLvl
+            if (dir == 1 and stopLvl >= entRef) or (dir == -1 and stopLvl <= entRef)
+                dir := 0                                                // stop not beyond the entry -> skip
 
 // ---------------------------------------------------------------- Time gates
 tod      = hour(time, tz) * 60 + minute(time, tz)
@@ -134,6 +141,21 @@ if dir != 0 and not placed and not done and inWindow and not flatten
         else
             strategy.entry("S", strategy.short, qty = qty, limit = entryLvl)
     placed := true
+
+// ---------------------------------------------------------------- Target-first: skip a PULLBACK trade if the IB
+// target side breaks BEFORE we fill (we only want to be positioned before the first break).
+var bool tgtBroke = false
+var bool everFilled = false
+if newSession
+    tgtBroke := false
+    everFilled := false
+everFilled := everFilled or strategy.position_size != 0
+if dir == 1 and high > rH
+    tgtBroke := true
+if dir == -1 and low < rL
+    tgtBroke := true
+if tgtBroke and not everFilled and dir != 0 and not isMkt
+    done := true                                                        // cancel below, take no trade today
 
 // ---------------------------------------------------------------- Manage
 var float mgStop = na
