@@ -1,0 +1,210 @@
+//@version=6
+// IB Sequence-Extension (run on a 5m chart). Initial Balance = first hour (09:30-10:30 ET).
+//   PREMISE: if the IB LOW is made before the IB HIGH -> the high tends to extend (+10% ~76%, +30% ~57% on 1yr).
+//            Mirror for HIGH-first -> the low extends. Sequence sets the direction (low-first=long, high-first=short).
+//
+//   ENTRY (selectable mode):
+//     - "Immediate (10:30)"      : market entry at the IB close, in the sequence direction.
+//     - "Zone pullback limit"    : a LIMIT chosen by where the 10:30 close sits (as a pullback from the extreme):
+//          close in shallow 0-25% zone -> limit at the 25% line ; 25-50% zone -> 50% line ; 50-75% zone -> 75% line ;
+//          deeper than 75% (very weak close) -> no trade.
+//   TARGET : +10% / +20% / +30% / +50% extension of the IB range beyond the broken side.
+//   STOP   : the 100% far edge of the IB (IB low for longs, IB high for shorts).
+//   One trade/day, EOD flatten. NOTE: touch-rate premise validated on 1yr; real EV depends on the far stop -
+//   backtest before trusting, and longs tested stronger than shorts.
+strategy("IB Sequence-Extension", overlay = true, pyramiding = 1, max_boxes_count = 200, max_labels_count = 200,
+     initial_capital = 1000000, margin_long = 0, margin_short = 0,
+     default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
+
+// ---------------------------------------------------------------- Inputs
+tz        = input.string("America/New_York", "Timezone", group = "Session")
+sess      = input.session("0930-1600", "RTH session", group = "Session")
+ibSess    = input.session("0930-1030", "Initial Balance window", group = "Session")
+allowLong = input.bool(true, "Longs (low made first)",  group = "Strategy")
+allowShort= input.bool(true, "Shorts (high made first)", group = "Strategy")
+entryMode = input.string("Zone pullback limit", "Entry mode", options = ["Immediate (10:30)", "Zone pullback limit"], group = "Strategy",
+     tooltip = "Immediate = market at the IB close. Zone pullback = a limit at the 25/50/75 line chosen by where the 10:30 close sits.")
+tpSel     = input.string("Ext 30%", "Target (extension)", options = ["Ext 10%", "Ext 20%", "Ext 30%", "Ext 50%"], group = "Strategy")
+useBE     = input.bool(false, "Breakeven at +1R", group = "Strategy")
+qty       = input.float(1, "Contracts", minval = 1, group = "Strategy")
+cutH      = input.int(15, "Stop new entries after - hour",   0, 23, group = "Time")
+cutM      = input.int(0,  "Stop new entries after - minute", 0, 59, group = "Time")
+flatH     = input.int(16, "Force-close all trades - hour",   0, 23, group = "Time")
+flatM     = input.int(0,  "Force-close all trades - minute", 0, 59, group = "Time")
+
+grpA      = "Automation - PickMyTrade"
+autoOn    = input.bool(false, "Enable webhook alerts", group = grpA,
+     tooltip = "One alert, 'alert() function calls only'. Verify the JSON matches PickMyTrade's template.")
+pmtToken  = input.string("", "PickMyTrade token", group = grpA)
+pmtAcct   = input.string("", "Tradovate account id", group = grpA)
+pmtSym    = input.string("MNQ1!", "Broker symbol", group = grpA)
+pmtType   = input.string("market", "Order type", options = ["market", "limit"], group = grpA)
+
+grpBA     = "Break alert (manual)"
+brkAlerts = input.bool(true, "Alert at the IB-close setup", group = grpBA)
+
+grpRR     = "Risk / Reward tool"
+showRR    = input.bool(true, "Show risk/reward box", group = grpRR)
+ptVal     = input.float(2.0, "$ per point per contract", group = grpRR, tooltip = "MNQ=2, NQ=20, MES=5, ES=50.")
+rrBars    = input.int(24, "R/R box width (bars)", 1, 300, group = grpRR)
+
+ext = tpSel == "Ext 10%" ? 0.10 : tpSel == "Ext 20%" ? 0.20 : tpSel == "Ext 30%" ? 0.30 : 0.50
+
+// ---------------------------------------------------------------- Session / IB tracking
+inSess     = not na(time(timeframe.period, sess, tz))
+newSession = inSess and not inSess[1]
+inIB       = not na(time(timeframe.period, ibSess, tz))
+ibDone     = not inIB and inIB[1]
+
+var float rH = na
+var float rL = na
+var int   rHbar = na
+var int   rLbar = na
+var int   dir = 0
+var float rng = na
+var float entryLvl = na
+var float stopLvl = na
+var float tpLvl = na
+var bool  isMkt = false
+var bool  placed = false
+var bool  beDone = false
+var bool  wasIn = false
+var bool  done = false
+
+if newSession
+    rH := na
+    rL := na
+    dir := 0
+    rng := na
+    entryLvl := na
+    stopLvl := na
+    tpLvl := na
+    isMkt := false
+    placed := false
+    beDone := false
+    wasIn := false
+    done := false
+if inIB
+    if na(rH) or high > rH
+        rH := high
+        rHbar := bar_index
+    if na(rL) or low < rL
+        rL := low
+        rLbar := bar_index
+
+// resolve at 10:30
+if ibDone and not na(rH) and rH > rL and rHbar != rLbar
+    rng := rH - rL
+    lowFirst = rLbar < rHbar
+    pos = (close[1] - rL) / rng
+    if allowLong and lowFirst
+        dir := 1
+    else if allowShort and (not lowFirst)
+        dir := -1
+    if dir != 0
+        stopLvl := dir == 1 ? rL : rH                                   // 100% far edge
+        tpLvl := dir == 1 ? rH + ext*rng : rL - ext*rng                 // extension target
+        if entryMode == "Immediate (10:30)"
+            isMkt := true
+        else
+            // zone pullback limit from the 10:30 close position
+            if dir == 1
+                entryLvl := pos >= 0.75 ? rL + 0.75*rng : pos >= 0.5 ? rL + 0.5*rng : pos >= 0.25 ? rL + 0.25*rng : na
+            else
+                entryLvl := pos <= 0.25 ? rL + 0.25*rng : pos <= 0.5 ? rL + 0.5*rng : pos <= 0.75 ? rL + 0.75*rng : na
+            if na(entryLvl)
+                dir := 0                                                // close too deep -> no valid zone -> skip
+
+// ---------------------------------------------------------------- Time gates
+tod      = hour(time, tz) * 60 + minute(time, tz)
+inWindow = inSess and tod <= (cutH*60 + cutM)
+flatten  = tod >= (flatH*60 + flatM)
+
+// ---------------------------------------------------------------- Arm entry (once)
+if dir != 0 and not placed and not done and inWindow and not flatten
+    if dir == 1
+        if isMkt
+            strategy.entry("L", strategy.long, qty = qty)
+        else
+            strategy.entry("L", strategy.long, qty = qty, limit = entryLvl)
+    else
+        if isMkt
+            strategy.entry("S", strategy.short, qty = qty)
+        else
+            strategy.entry("S", strategy.short, qty = qty, limit = entryLvl)
+    placed := true
+
+// ---------------------------------------------------------------- Manage
+var float mgStop = na
+opened = strategy.position_size != 0 and strategy.position_size[1] == 0
+if opened
+    mgStop := stopLvl
+    beDone := false
+if useBE and not beDone and strategy.position_size != 0 and not na(stopLvl)
+    epx = strategy.position_avg_price
+    R = math.abs(epx - stopLvl)
+    if dir == 1 and high >= epx + R
+        mgStop := math.max(mgStop, epx)
+        beDone := true
+    if dir == -1 and low <= epx - R
+        mgStop := math.min(mgStop, epx)
+        beDone := true
+if strategy.position_size != 0
+    strategy.exit("Lx", from_entry = "L", stop = mgStop, limit = tpLvl)
+    strategy.exit("Sx", from_entry = "S", stop = mgStop, limit = tpLvl)
+
+wasIn := wasIn or strategy.position_size != 0
+if strategy.position_size == 0 and wasIn
+    done := true
+if done or flatten or not inWindow
+    strategy.cancel("L")
+    strategy.cancel("S")
+if flatten
+    strategy.close_all(comment = "Force close")
+
+// ---------------------------------------------------------------- Automation
+f_pmt(string act, float q, float slp, float tpp) =>
+    '{"token":"' + pmtToken + '","account_id":"' + pmtAcct + '","symbol":"' + pmtSym +
+      '","action":"' + act + '","quantity":' + str.tostring(q) +
+      ',"order_type":"' + pmtType +
+      '","sl":' + str.tostring(math.round_to_mintick(slp)) +
+      ',"tp":' + str.tostring(math.round_to_mintick(tpp)) + '}'
+buyNow   = strategy.position_size > 0 and strategy.position_size[1] <= 0
+sellNow  = strategy.position_size < 0 and strategy.position_size[1] >= 0
+closeNow = flatten and strategy.position_size[1] != 0
+if autoOn and buyNow
+    alert(f_pmt("buy",  qty, mgStop, tpLvl), alert.freq_once_per_bar)
+if autoOn and sellNow
+    alert(f_pmt("sell", qty, mgStop, tpLvl), alert.freq_once_per_bar)
+if autoOn and closeNow
+    alert(f_pmt("close", 0, 0.0, 0.0), alert.freq_once_per_bar)
+
+// ---------------------------------------------------------------- Manual alert at the 10:30 setup
+if brkAlerts and ibDone and dir != 0
+    alert("IB SEQ  " + (dir == 1 ? "LONG (low-first)" : "SHORT (high-first)") +
+         "  | " + (isMkt ? "MARKET now" : "limit " + str.tostring(math.round_to_mintick(entryLvl))) +
+         "  | stop " + str.tostring(math.round_to_mintick(stopLvl)) +
+         "  | target " + str.tostring(math.round_to_mintick(tpLvl)), alert.freq_once_per_bar)
+
+// ---------------------------------------------------------------- R/R box (at the 10:30 setup)
+if showRR and ibDone and dir != 0 and not na(stopLvl) and not na(tpLvl)
+    ent = isMkt ? close : entryLvl
+    x1 = bar_index
+    x2 = bar_index + rrBars
+    riskUsd = math.abs(ent - stopLvl) * ptVal * qty
+    rewUsd  = math.abs(tpLvl - ent) * ptVal * qty
+    rrr = riskUsd > 0 ? rewUsd / riskUsd : na
+    rewTop = dir == 1 ? tpLvl : ent
+    rewBot = dir == 1 ? ent : tpLvl
+    rskTop = dir == 1 ? ent : stopLvl
+    rskBot = dir == 1 ? stopLvl : ent
+    box.new(x1, rewTop, x2, rewBot, xloc = xloc.bar_index, border_color = color.new(color.green, 0), border_width = 1, bgcolor = color.new(color.green, 82))
+    box.new(x1, rskTop, x2, rskBot, xloc = xloc.bar_index, border_color = color.new(color.red, 0),   border_width = 1, bgcolor = color.new(color.red, 82))
+    label.new(x2, ent, "Risk $" + str.tostring(riskUsd, "#") + " | Reward $" + str.tostring(rewUsd, "#") + " (" + str.tostring(rrr, "#.##") + "R)", xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.gray, 15), textcolor = color.white, size = size.small)
+
+// ---------------------------------------------------------------- Visuals
+plot(not na(rH) ? rH : na, "IB High", color = color.new(color.teal, 0), style = plot.style_linebr)
+plot(not na(rL) ? rL : na, "IB Low",  color = color.new(color.red, 0),  style = plot.style_linebr)
+plot(dir != 0 and not isMkt and not na(entryLvl) ? entryLvl : na, "Entry", color = color.new(color.orange, 0), style = plot.style_linebr)
+plot(dir != 0 and not na(tpLvl) ? tpLvl : na, "Target", color = color.new(color.green, 0), style = plot.style_linebr)
