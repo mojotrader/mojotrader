@@ -2,9 +2,9 @@
 // London IB Break-then-Pullback — run on a 5m chart with 24h/electronic data (the London session only exists in
 // overnight/European bars). Single Initial-Balance engine for the LONDON session. Everything is an input.
 //
-//   1) IB window (your London time). At the IB close: bias = low-before-high (long) / high-before-low (short)
-//      AND the close in the top half (long) / bottom half (short) of the IB range.
-//   2) Arms only AFTER the IB level BREAKS (break type Wick / Close).
+//   1) IB window (New York time). After the IB forms, whichever side BREAKS FIRST sets the direction:
+//      high break -> long, low break -> short. No sequence or close-position bias.
+//   2) Break type selectable: Wick (touch) or Close beyond.
 //   3) ENTRY: a LIMIT at your chosen retracement from the broken level (0% = at the break, 25%, or 50%).
 //   4) AVERAGE DOWN (optional): a 2nd unit at the 50% retracement (only when entry is shallower than 50%).
 //   STOP : your chosen retracement (25% / 50% / 75% / 100%); must be deeper than the entry or the setup is skipped.
@@ -16,12 +16,12 @@ strategy("London IB Break-Pullback", overlay = true, pyramiding = 3, max_boxes_c
      commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
 
 // ---------------------------------------------------------------- Session / time
-tz      = input.string("Europe/London", "Timezone", group = "Session", tooltip = "Times below are in this zone. Europe/London keeps the London IB fixed year-round (handles UK DST).")
-daySess = input.session("0800-1630", "Trading day span (reset / HOD-LOD / time gates)", group = "Session", tooltip = "Must cover the IB window through the force-close time.")
-ibSess  = input.session("0800-0900", "London IB window", group = "Session", tooltip = "The Initial Balance range. Search for the best window here.")
-blkH    = input.int(12, "Stop NEW entries after - hour",   0, 23, group = "Time", tooltip = "No new trade is entered after this time.")
+tz      = input.string("America/New_York", "Timezone (New York EST/EDT)", group = "Session", tooltip = "All times below are New York time. London's 08:00 open is ~03:00 New York.")
+daySess = input.session("0300-1200", "Trading day span (reset / HOD-LOD / time gates)", group = "Session", tooltip = "Must cover the IB window through the force-close time. In NY time.")
+ibSess  = input.session("0300-0400", "London IB window (NY time)", group = "Session", tooltip = "The Initial Balance range, in New York time (03:00-04:00 NY ~ London open hour). Search for the best window here.")
+blkH    = input.int(11, "Stop NEW entries after - hour",   0, 23, group = "Time", tooltip = "No new trade is entered after this NY time.")
 blkM    = input.int(0,  "Stop NEW entries after - minute", 0, 59, group = "Time")
-flatH   = input.int(16, "Force-close ALL trades - hour",   0, 23, group = "Time", tooltip = "Any open position is closed and pending orders cancelled at this time.")
+flatH   = input.int(11, "Force-close ALL trades - hour",   0, 23, group = "Time", tooltip = "Any open position is closed and pending orders cancelled at this NY time.")
 flatM   = input.int(30, "Force-close ALL trades - minute", 0, 59, group = "Time")
 
 // ---------------------------------------------------------------- Strategy
@@ -132,24 +132,26 @@ if ib_inR
         rLbar := bar_index
 if ib_rDone and not na(rH) and rH > rL
     rng := rH - rL
-    lf = rLbar < rHbar
-    pos = (close[1] - rL) / rng
+// pure IB breakout: after the IB forms, whichever side breaks FIRST sets the direction (no bias)
+upBrk = not na(rng) and (brkType == "Wick (touch)" ? high >= rH : close > rH)
+dnBrk = not na(rng) and (brkType == "Wick (touch)" ? low <= rL : close < rL)
+if not na(rng) and dir == 0
     ep = f_entPct(entrySel)
     sp = f_stopPct(stopSel)
-    if allowLong and lf and pos >= 0.5 and sp > ep
+    if allowLong and upBrk and sp > ep
         dir := 1
+        broke := true
         e1 := rH - ep*rng
         e2 := rH - 0.5*rng
         zstop := rH - sp*rng
-    else if allowShort and (not lf) and pos <= 0.5 and sp > ep
+    else if allowShort and dnBrk and sp > ep
         dir := -1
+        broke := true
         e1 := rL + ep*rng
         e2 := rL + 0.5*rng
         zstop := rL + sp*rng
 useAdd = useAvg and f_entPct(entrySel) < 0.5 and f_stopPct(stopSel) > 0.5 and not na(e2)
-brk = brkType == "Wick (touch)" ? ((dir == 1 and high >= rH) or (dir == -1 and low <= rL)) : ((dir == 1 and close > rH) or (dir == -1 and close < rL))
-if dir != 0 and brk
-    broke := true
+// opposite side breaks after direction is set (for the double-break filter)
 if dir == 1 and low < rL
     oppBroke := true
 if dir == -1 and high > rH
