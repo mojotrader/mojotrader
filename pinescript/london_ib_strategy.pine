@@ -1,0 +1,274 @@
+//@version=6
+// London IB Break-then-Pullback — run on a 5m chart with 24h/electronic data (the London session only exists in
+// overnight/European bars). Single Initial-Balance engine for the LONDON session. Everything is an input.
+//
+//   1) IB window (your London time). At the IB close: bias = low-before-high (long) / high-before-low (short)
+//      AND the close in the top half (long) / bottom half (short) of the IB range.
+//   2) Arms only AFTER the IB level BREAKS (break type Wick / Close).
+//   3) ENTRY: a LIMIT at your chosen retracement from the broken level (0% = at the break, 25%, or 50%).
+//   4) AVERAGE DOWN (optional): a 2nd unit at the 50% retracement (only when entry is shallower than 50%).
+//   STOP : your chosen retracement (25% / 50% / 75% / 100%); must be deeper than the entry or the setup is skipped.
+//   TARGET: range level / +10/30/50% ext / HOD-LOD (per side). Optional breakeven. Double-break filter.
+//   Global time controls: stop NEW entries after a time, and FORCE-CLOSE all trades at a time. One setup/day.
+strategy("London IB Break-Pullback", overlay = true, pyramiding = 3, max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500,
+     initial_capital = 1000000, margin_long = 0, margin_short = 0,
+     default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
+
+// ---------------------------------------------------------------- Session / time
+tz      = input.string("Europe/London", "Timezone", group = "Session", tooltip = "Times below are in this zone. Europe/London keeps the London IB fixed year-round (handles UK DST).")
+daySess = input.session("0800-1630", "Trading day span (reset / HOD-LOD / time gates)", group = "Session", tooltip = "Must cover the IB window through the force-close time.")
+ibSess  = input.session("0800-0900", "London IB window", group = "Session", tooltip = "The Initial Balance range. Search for the best window here.")
+blkH    = input.int(12, "Stop NEW entries after - hour",   0, 23, group = "Time", tooltip = "No new trade is entered after this time.")
+blkM    = input.int(0,  "Stop NEW entries after - minute", 0, 59, group = "Time")
+flatH   = input.int(16, "Force-close ALL trades - hour",   0, 23, group = "Time", tooltip = "Any open position is closed and pending orders cancelled at this time.")
+flatM   = input.int(30, "Force-close ALL trades - minute", 0, 59, group = "Time")
+
+// ---------------------------------------------------------------- Strategy
+gS       = "Strategy"
+allowLong = input.bool(true, "Take longs",  group = gS)
+allowShort= input.bool(true, "Take shorts", group = gS)
+brkType   = input.string("Wick (touch)", "Break type", options = ["Wick (touch)", "Close beyond"], group = gS)
+useAvg    = input.bool(true, "Average down (2nd unit at 50%)", group = gS)
+tpL       = input.string("Range level", "TP long",  options = ["Range level", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gS)
+tpS       = input.string("Ext 30%",     "TP short", options = ["Range level", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gS)
+useBE     = input.bool(false, "Breakeven when the IB level is reclaimed", group = gS)
+qty       = input.float(1, "Contracts per unit", minval = 1, group = gS)
+
+gES       = "Entry / Stop"
+entrySel  = input.string("25%",  "Entry (retr from break)", options = ["0%", "25%", "50%"], group = gES,
+     tooltip = "Where the limit rests, as a retracement from the IB break level. 0% = at the broken level (shallowest), 50% = halfway back into the range.")
+stopSel   = input.string("100%", "Stop (retr from break)",  options = ["25%", "50%", "75%", "100%"], group = gES,
+     tooltip = "Stop as a retracement from the IB break level. Must be DEEPER than the entry. 100% = the far side of the range.")
+
+gFilt     = "Filters"
+noDbl     = input.bool(true, "Skip double-break days (both sides break)", group = gFilt)
+
+grpA      = "Automation - PickMyTrade"
+autoOn    = input.bool(false, "Enable webhook alerts", group = grpA,
+     tooltip = "One alert, 'alert() function calls only'. Verify the JSON matches PickMyTrade's template.")
+pmtToken  = input.string("", "PickMyTrade token", group = grpA)
+pmtAcct   = input.string("", "Tradovate account id", group = grpA)
+pmtSym    = input.string("MNQ1!", "Broker symbol", group = grpA)
+pmtType   = input.string("market", "Order type", options = ["market", "limit"], group = grpA)
+
+grpBA     = "Break alert (manual)"
+brkAlerts = input.bool(true, "Alert when the London IB breaks", group = grpBA)
+
+grpRR     = "Risk / Reward tool"
+showRR    = input.bool(true, "Show risk/reward box at the break", group = grpRR)
+showFibs  = input.bool(true, "Show fib retracement lines (25/50/75)", group = grpRR)
+ptVal     = input.float(2.0, "$ per point per contract", group = grpRR, tooltip = "MNQ=2, NQ=20, MES=5, ES=50.")
+rrBars    = input.int(24, "R/R box width (bars)", 1, 300, group = grpRR)
+
+// ---------------------------------------------------------------- Shared tracking
+inSess     = not na(time(timeframe.period, daySess, tz))
+newSession = inSess and not inSess[1]
+var float dHigh = na
+var float dLow  = na
+if newSession
+    dHigh := high
+    dLow  := low
+else if inSess
+    dHigh := math.max(dHigh, high)
+    dLow  := math.min(dLow, low)
+tod         = hour(time, tz) * 60 + minute(time, tz)
+entriesOpen = tod <= (blkH*60 + blkM)
+flatten     = tod >= (flatH*60 + flatM)
+
+ib_inR   = not na(time(timeframe.period, ibSess, tz))
+ib_rDone = not ib_inR and ib_inR[1]
+
+f_tp(int d, float rH, float rL, float rg, float dHi, float dLo, string a, string b) =>
+    d == 1 ? (a == "HOD/LOD" ? dHi : a == "Ext 10%" ? rH + 0.10*rg : a == "Ext 30%" ? rH + 0.30*rg : a == "Ext 50%" ? rH + 0.50*rg : rH) : (b == "HOD/LOD" ? dLo : b == "Ext 10%" ? rL - 0.10*rg : b == "Ext 30%" ? rL - 0.30*rg : b == "Ext 50%" ? rL - 0.50*rg : rL)
+f_entPct(string s)  => s == "0%" ? 0.0 : s == "25%" ? 0.25 : 0.5
+f_stopPct(string s) => s == "25%" ? 0.25 : s == "50%" ? 0.5 : s == "75%" ? 0.75 : 1.0
+
+// ================================================================ London IB ENGINE
+var float rH = na
+var float rL = na
+var int   rHbar = na
+var int   rLbar = na
+var int   dir = 0
+var float e1 = na
+var float e2 = na
+var float zstop = na
+var float rng = na
+var bool  broke = false
+var bool  placed = false
+var bool  f1 = false
+var bool  f2 = false
+var float avgPx = na
+var float curStop = na
+var float curTP = na
+var bool  beDone = false
+var bool  closed = false
+var bool  oppBroke = false
+
+if newSession
+    rH := na
+    rL := na
+    dir := 0
+    e1 := na
+    e2 := na
+    zstop := na
+    rng := na
+    broke := false
+    placed := false
+    f1 := false
+    f2 := false
+    avgPx := na
+    curStop := na
+    curTP := na
+    beDone := false
+    closed := false
+    oppBroke := false
+if ib_inR
+    if na(rH) or high > rH
+        rH := high
+        rHbar := bar_index
+    if na(rL) or low < rL
+        rL := low
+        rLbar := bar_index
+if ib_rDone and not na(rH) and rH > rL
+    rng := rH - rL
+    lf = rLbar < rHbar
+    pos = (close[1] - rL) / rng
+    ep = f_entPct(entrySel)
+    sp = f_stopPct(stopSel)
+    if allowLong and lf and pos >= 0.5 and sp > ep
+        dir := 1
+        e1 := rH - ep*rng
+        e2 := rH - 0.5*rng
+        zstop := rH - sp*rng
+    else if allowShort and (not lf) and pos <= 0.5 and sp > ep
+        dir := -1
+        e1 := rL + ep*rng
+        e2 := rL + 0.5*rng
+        zstop := rL + sp*rng
+useAdd = useAvg and f_entPct(entrySel) < 0.5 and f_stopPct(stopSel) > 0.5 and not na(e2)
+brk = brkType == "Wick (touch)" ? ((dir == 1 and high >= rH) or (dir == -1 and low <= rL)) : ((dir == 1 and close > rH) or (dir == -1 and close < rL))
+if dir != 0 and brk
+    broke := true
+if dir == 1 and low < rL
+    oppBroke := true
+if dir == -1 and high > rH
+    oppBroke := true
+win = inSess and entriesOpen
+if dir != 0 and broke and not placed and not closed and win and not flatten and (not noDbl or not oppBroke)
+    if dir == 1
+        strategy.entry("L", strategy.long, qty = qty, limit = e1)
+        if useAdd
+            strategy.entry("L2", strategy.long, qty = qty, limit = e2)
+    else
+        strategy.entry("S", strategy.short, qty = qty, limit = e1)
+        if useAdd
+            strategy.entry("S2", strategy.short, qty = qty, limit = e2)
+    placed := true
+if placed and not closed
+    if dir == 1
+        if not f1 and low <= e1
+            f1 := true
+        if useAdd and not f2 and low <= e2
+            f2 := true
+    if dir == -1
+        if not f1 and high >= e1
+            f1 := true
+        if useAdd and not f2 and high >= e2
+            f2 := true
+firstFill = (f1 or f2) and not (f1[1] or f2[1])
+if f1 or f2
+    avgPx := f1 and f2 ? (e1 + e2) / 2 : f1 ? e1 : e2
+if firstFill
+    curStop := zstop
+    curTP := f_tp(dir, rH, rL, rng, dHigh, dLow, tpL, tpS)
+    beDone := false
+if useBE and not beDone and (f1 or f2) and not closed
+    if dir == 1 and high >= rH
+        curStop := math.max(curStop, avgPx)
+        beDone := true
+    if dir == -1 and low <= rL
+        curStop := math.min(curStop, avgPx)
+        beDone := true
+if not na(curStop)
+    strategy.exit("Lx",  from_entry = "L",  stop = curStop, limit = curTP)
+    strategy.exit("L2x", from_entry = "L2", stop = curStop, limit = curTP)
+    strategy.exit("Sx",  from_entry = "S",  stop = curStop, limit = curTP)
+    strategy.exit("S2x", from_entry = "S2", stop = curStop, limit = curTP)
+if (f1 or f2) and not closed and not na(curStop)
+    if dir == 1 and (low <= curStop or high >= curTP)
+        closed := true
+    if dir == -1 and (high >= curStop or low <= curTP)
+        closed := true
+if closed or flatten or (noDbl and oppBroke) or ((not win) and not (f1 or f2))
+    strategy.cancel("L")
+    strategy.cancel("L2")
+    strategy.cancel("S")
+    strategy.cancel("S2")
+
+if flatten
+    strategy.close_all(comment = "Force close")
+
+// ---------------------------------------------------------------- Automation
+f_pmt(string act, float q, float slp, float tpp) =>
+    '{"token":"' + pmtToken + '","account_id":"' + pmtAcct + '","symbol":"' + pmtSym +
+      '","action":"' + act + '","quantity":' + str.tostring(q) +
+      ',"order_type":"' + pmtType +
+      '","sl":' + str.tostring(math.round_to_mintick(slp)) +
+      ',"tp":' + str.tostring(math.round_to_mintick(tpp)) + '}'
+buyNow   = strategy.position_size > 0 and (strategy.position_size[1] <= 0 or strategy.position_size > strategy.position_size[1])
+sellNow  = strategy.position_size < 0 and (strategy.position_size[1] >= 0 or strategy.position_size < strategy.position_size[1])
+closeNow = flatten and strategy.position_size[1] != 0
+if autoOn and buyNow
+    alert(f_pmt("buy",  qty, curStop, curTP), alert.freq_once_per_bar)
+if autoOn and sellNow
+    alert(f_pmt("sell", qty, curStop, curTP), alert.freq_once_per_bar)
+if autoOn and closeNow
+    alert(f_pmt("close", 0, 0.0, 0.0), alert.freq_once_per_bar)
+
+// ---------------------------------------------------------------- Break alert (manual)
+if brkAlerts and dir != 0 and broke and not broke[1]
+    tpa = f_tp(dir, rH, rL, rng, dHigh, dLow, tpL, tpS)
+    alert("LONDON IB BREAK  " + (dir == 1 ? "LONG" : "SHORT") + "  | broke " + str.tostring(math.round_to_mintick(dir == 1 ? rH : rL)) + "  | entry " + str.tostring(math.round_to_mintick(e1)) + "  | stop " + str.tostring(math.round_to_mintick(zstop)) + "  | target " + str.tostring(math.round_to_mintick(tpa)), alert.freq_once_per_bar)
+
+// ---------------------------------------------------------------- R/R + fib tool
+f_drawRR(int d, float ent, float st, float ptp, float q, color sig, string tag, int xoff) =>
+    x1 = bar_index + xoff
+    x2 = x1 + rrBars
+    riskUsd = math.abs(ent - st) * ptVal * q
+    rewUsd  = math.abs(ptp - ent) * ptVal * q
+    rrr = riskUsd > 0 ? rewUsd / riskUsd : na
+    rewTop = d == 1 ? ptp : ent
+    rewBot = d == 1 ? ent : ptp
+    rskTop = d == 1 ? ent : st
+    rskBot = d == 1 ? st : ent
+    box.new(x1, rewTop, x2, rewBot, xloc = xloc.bar_index, border_color = sig, border_width = 1, bgcolor = color.new(color.green, 82))
+    box.new(x1, rskTop, x2, rskBot, xloc = xloc.bar_index, border_color = sig, border_width = 1, bgcolor = color.new(color.red, 82))
+    label.new(x2, ent, tag + "  Risk $" + str.tostring(riskUsd, "#") + " | Reward $" + str.tostring(rewUsd, "#") + " (" + str.tostring(rrr, "#.##") + "R)", xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.gray, 15), textcolor = color.white, size = size.small)
+f_drawFibs(float lo, float rg, int d, color sig) =>
+    x1 = bar_index
+    x2 = bar_index + rrBars
+    l25 = lo + 0.25*rg
+    l50 = lo + 0.50*rg
+    l75 = lo + 0.75*rg
+    lab75 = d == 1 ? "25%" : "75%"
+    lab25 = d == 1 ? "75%" : "25%"
+    line.new(x1, l25, x2, l25, xloc = xloc.bar_index, color = color.new(sig, 35), style = line.style_dotted, width = 1)
+    line.new(x1, l50, x2, l50, xloc = xloc.bar_index, color = color.new(sig, 35), style = line.style_dotted, width = 1)
+    line.new(x1, l75, x2, l75, xloc = xloc.bar_index, color = color.new(sig, 35), style = line.style_dotted, width = 1)
+    label.new(x1, l25, lab25, xloc = xloc.bar_index, style = label.style_label_right, color = color.new(color.gray, 40), textcolor = color.white, size = size.tiny)
+    label.new(x1, l50, "50%", xloc = xloc.bar_index, style = label.style_label_right, color = color.new(color.gray, 40), textcolor = color.white, size = size.tiny)
+    label.new(x1, l75, lab75, xloc = xloc.bar_index, style = label.style_label_right, color = color.new(color.gray, 40), textcolor = color.white, size = size.tiny)
+if dir != 0 and broke and not broke[1] and not na(e1) and not na(zstop)
+    tpB = f_tp(dir, rH, rL, rng, dHigh, dLow, tpL, tpS)
+    if showFibs
+        f_drawFibs(rL, rng, dir, color.new(color.purple, 0))
+    if showRR
+        f_drawRR(dir, e1, zstop, tpB, qty, color.new(color.purple, 0), "LDN", 0)
+        if useAdd
+            f_drawRR(dir, e2, zstop, tpB, qty, color.new(color.purple, 0), "LDN #2", rrBars)
+
+// ---------------------------------------------------------------- Visuals
+plot(not na(rH) ? rH : na, "IB High", color = color.new(color.purple, 0),  style = plot.style_linebr)
+plot(not na(rL) ? rL : na, "IB Low",  color = color.new(color.purple, 45), style = plot.style_linebr)
+plot(dir != 0 and not na(e1) ? e1 : na, "Entry", color = color.new(color.fuchsia, 0), style = plot.style_linebr)
