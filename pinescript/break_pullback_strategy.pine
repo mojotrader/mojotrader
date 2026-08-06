@@ -31,8 +31,10 @@ tz      = "America/New_York"
 sess    = "0930-1600"
 orbSess = "0930-0945"
 ibSess  = "0930-1030"
-flatH   = input.int(15, "Flatten hour",   0, 23, group = "Time")
-flatM   = input.int(30, "Flatten minute", 0, 59, group = "Time")
+blkH    = input.int(15, "Stop NEW entries after - hour",   0, 23, group = "Time", tooltip = "Global time filter: no new trade is armed/entered after this time (applies to BOTH ORB and IB, on top of each setup's own cutoff).")
+blkM    = input.int(0,  "Stop NEW entries after - minute", 0, 59, group = "Time")
+flatH   = input.int(15, "Force-close ALL trades - hour",   0, 23, group = "Time", tooltip = "Hard time-stop: any open position is closed at this time and pending orders cancelled.")
+flatM   = input.int(30, "Force-close ALL trades - minute", 0, 59, group = "Time")
 // ORB settings
 runORB    = true
 orbLong   = true
@@ -104,8 +106,9 @@ if newSession
 else if inSess
     dHigh := math.max(dHigh, high)
     dLow  := math.min(dLow, low)
-tod     = hour(time, tz) * 60 + minute(time, tz)
-flatten = tod >= (flatH*60 + flatM)
+tod         = hour(time, tz) * 60 + minute(time, tz)
+entriesOpen = tod <= (blkH*60 + blkM)              // global: no new entries after this time
+flatten     = tod >= (flatH*60 + flatM)            // global: force-close everything at this time
 
 or_inR   = not na(time(timeframe.period, orbSess, tz))
 or_rDone = not or_inR and or_inR[1]
@@ -198,7 +201,7 @@ if or_dir == 1 and low < or_rL
 if or_dir == -1 and high > or_rH
     or_oppBroke := true
 // entry window: before IB forms (when IB is on), within ORB cutoff otherwise
-orbWin = inSess and tod <= (orbCutH*60 + orbCutM) and (not runIB or not ibFormed)
+orbWin = inSess and entriesOpen and tod <= (orbCutH*60 + orbCutM) and (not runIB or not ibFormed)
 if runORB and or_dir != 0 and or_broke and not or_placed and not or_closed and orbWin and not flatten and (not noDbl or not or_oppBroke)
     if or_dir == 1
         strategy.entry("ORL", strategy.long, qty = orbQty, limit = or_e1)
@@ -330,7 +333,7 @@ if ib_dir == 1 and low < ib_rL
     ib_oppBroke := true
 if ib_dir == -1 and high > ib_rH
     ib_oppBroke := true
-ibWin = inSess and tod <= (ibCutH*60 + ibCutM)
+ibWin = inSess and entriesOpen and tod <= (ibCutH*60 + ibCutM)
 if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and ibWin and not flatten and (not noDbl or not ib_oppBroke)
     if ib_dir == 1
         strategy.entry("IBL", strategy.long, qty = ibQty, limit = ib_e1)
