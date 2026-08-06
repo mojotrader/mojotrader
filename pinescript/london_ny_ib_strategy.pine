@@ -1,0 +1,427 @@
+//@version=6
+// Break-then-Pullback on TWO configurable IB sessions: LONDON + NEW YORK. Run on a 5m chart with 24h/electronic
+// data (the London session only exists in overnight bars). Everything is an input so you can search for the best
+// combination — including each session's IB time window.
+//
+// PER SESSION (identical engine, independent settings):
+//   1) IB window (your chosen start-end). At the IB close: bias = low-before-high (long) / high-before-low (short)
+//      AND the close in the top half (long) / bottom half (short) of the IB range.
+//   2) Arms only AFTER the IB level BREAKS (break type Wick / Close).
+//   3) LIMIT at the fib pullback: shallow(close 0-25% into range)->25% line, deeper(25-50%)->50% line.
+//   4) AVERAGE DOWN (optional): shallow -> 2nd unit at the 50% line.
+//   Stop: shallow -> range extreme ; deeper -> 75% line (selectable). TP long/short: range level / +10/30/50% / HOD-LOD.
+//   Optional breakeven. Double-break filter. One setup/day per session, EOD flatten.
+//   INTERACTION (optional): London runs first; if NY IB forms OPPOSITE an open London trade, London is closed.
+//
+// LIMITATION: a Pine strategy nets to ONE position (no hedging). Same-direction overlaps merge; the interaction
+//   toggle handles the opposite-direction London/NY case (London closed, not hedged).
+strategy("London + NY IB Break-Pullback", overlay = true, pyramiding = 6, max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500,
+     initial_capital = 1000000, margin_long = 0, margin_short = 0,
+     default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
+
+// ---------------------------------------------------------------- Global
+tz      = input.string("America/New_York", "Timezone", group = "Global")
+daySess = input.session("0300-1600", "Trading day span (reset / HOD-LOD / flatten window)", group = "Global",
+     tooltip = "Must cover both IB windows through the flatten time. Reset & day high/low track over this span.")
+flatH   = input.int(16, "Flatten hour",   0, 23, group = "Global")
+flatM   = input.int(0,  "Flatten minute", 0, 59, group = "Global")
+closeOpp= input.bool(true, "Close London if NY IB forms opposite", group = "Global")
+noDbl   = input.bool(true, "Skip double-break days (both sides break)", group = "Global",
+     tooltip = "If the side opposite the setup direction also breaks, cancel the pending entry and take no trade that day (per session).")
+
+// ---- LONDON session
+gL        = "London IB"
+runL      = input.bool(true,  "Run London", group = gL)
+lSess     = input.session("0300-0400", "  London IB window", group = gL, tooltip = "Times in the Timezone above. Search for the best IB window here.")
+lLong     = input.bool(true,  "  London longs",  group = gL)
+lShort    = input.bool(true,  "  London shorts", group = gL)
+lBreak    = input.string("Wick (touch)", "  London break type", options = ["Wick (touch)", "Close beyond"], group = gL)
+lAvg      = input.bool(true,  "  London average down (2nd at 50%)", group = gL)
+lTpL      = input.string("Range level", "  London TP long",  options = ["Range level", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gL)
+lTpS      = input.string("Ext 30%",     "  London TP short", options = ["Range level", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gL)
+lDeepSL   = input.string("75% line", "  London 50%-zone stop", options = ["75% line", "100% (range extreme)"], group = gL)
+lBE       = input.bool(false, "  London breakeven on reclaim", group = gL)
+lQty      = input.float(1, "  London contracts", minval = 1, group = gL)
+lCutH     = input.int(9,  "  London entry cutoff hour",   0, 23, group = gL)
+lCutM     = input.int(30, "  London entry cutoff minute", 0, 59, group = gL)
+
+// ---- NEW YORK session
+gN        = "New York IB"
+runN      = input.bool(true,  "Run New York", group = gN)
+nSess     = input.session("0930-1030", "  NY IB window", group = gN, tooltip = "Times in the Timezone above. Search for the best IB window here.")
+nLong     = input.bool(true,  "  NY longs",  group = gN)
+nShort    = input.bool(true,  "  NY shorts", group = gN)
+nBreak    = input.string("Wick (touch)", "  NY break type", options = ["Wick (touch)", "Close beyond"], group = gN)
+nAvg      = input.bool(true,  "  NY average down (2nd at 50%)", group = gN)
+nTpL      = input.string("Range level", "  NY TP long",  options = ["Range level", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gN)
+nTpS      = input.string("Ext 30%",     "  NY TP short", options = ["Range level", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gN)
+nDeepSL   = input.string("75% line", "  NY 50%-zone stop", options = ["75% line", "100% (range extreme)"], group = gN)
+nBE       = input.bool(false, "  NY breakeven on reclaim", group = gN)
+nQty      = input.float(1, "  NY contracts", minval = 1, group = gN)
+nCutH     = input.int(15, "  NY entry cutoff hour",   0, 23, group = gN)
+nCutM     = input.int(0,  "  NY entry cutoff minute", 0, 59, group = gN)
+
+// ---- Automation (PickMyTrade webhook)
+grpA      = "Automation - PickMyTrade"
+autoOn    = input.bool(false, "Enable webhook alerts", group = grpA,
+     tooltip = "One alert, 'alert() function calls only'. Fires on the NET position; for live automation run only ONE session at a time.")
+pmtToken  = input.string("", "PickMyTrade token", group = grpA)
+pmtAcct   = input.string("", "Tradovate account id", group = grpA)
+pmtSym    = input.string("MNQ1!", "Broker symbol", group = grpA)
+pmtType   = input.string("market", "Order type", options = ["market", "limit"], group = grpA)
+
+// ---- Break alerts (manual)
+grpBA     = "Break alerts (manual)"
+brkAlerts = input.bool(true, "Alert when London / NY IB breaks", group = grpBA)
+
+// ---- R/R tool
+grpRR     = "Risk / Reward tool"
+showRR    = input.bool(true, "Show risk/reward box at the break", group = grpRR)
+ptVal     = input.float(2.0, "$ per point per contract", group = grpRR, tooltip = "MNQ=2, NQ=20, MES=5, ES=50.")
+rrBars    = input.int(24, "R/R box width (bars)", 1, 300, group = grpRR)
+
+// ---------------------------------------------------------------- Shared tracking
+inSess     = not na(time(timeframe.period, daySess, tz))
+newSession = inSess and not inSess[1]
+var float dHigh = na
+var float dLow  = na
+if newSession
+    dHigh := high
+    dLow  := low
+else if inSess
+    dHigh := math.max(dHigh, high)
+    dLow  := math.min(dLow, low)
+tod     = hour(time, tz) * 60 + minute(time, tz)
+flatten = tod >= (flatH*60 + flatM)
+
+l_inR   = not na(time(timeframe.period, lSess, tz))
+l_rDone = not l_inR and l_inR[1]
+n_inR   = not na(time(timeframe.period, nSess, tz))
+n_rDone = not n_inR and n_inR[1]
+
+f_tp(int d, float rH, float rL, float rg, float dHi, float dLo, string tpL, string tpS) =>
+    d == 1 ? (tpL == "HOD/LOD" ? dHi : tpL == "Ext 10%" ? rH + 0.10*rg : tpL == "Ext 30%" ? rH + 0.30*rg : tpL == "Ext 50%" ? rH + 0.50*rg : rH) : (tpS == "HOD/LOD" ? dLo : tpS == "Ext 10%" ? rL - 0.10*rg : tpS == "Ext 30%" ? rL - 0.30*rg : tpS == "Ext 50%" ? rL - 0.50*rg : rL)
+
+// ================================================================ LONDON ENGINE (runs first)
+var float l_rH = na
+var float l_rL = na
+var int   l_rHbar = na
+var int   l_rLbar = na
+var int   l_dir = 0
+var bool  l_shallow = false
+var float l_e1 = na
+var float l_e2 = na
+var float l_zstop = na
+var float l_rng = na
+var bool  l_broke = false
+var bool  l_placed = false
+var bool  l_f1 = false
+var bool  l_f2 = false
+var float l_avgPx = na
+var float l_curStop = na
+var float l_curTP = na
+var bool  l_beDone = false
+var bool  l_closed = false
+var bool  l_oppBroke = false
+
+if newSession
+    l_rH := na
+    l_rL := na
+    l_dir := 0
+    l_shallow := false
+    l_e1 := na
+    l_e2 := na
+    l_zstop := na
+    l_rng := na
+    l_broke := false
+    l_placed := false
+    l_f1 := false
+    l_f2 := false
+    l_avgPx := na
+    l_curStop := na
+    l_curTP := na
+    l_beDone := false
+    l_closed := false
+    l_oppBroke := false
+if l_inR
+    if na(l_rH) or high > l_rH
+        l_rH := high
+        l_rHbar := bar_index
+    if na(l_rL) or low < l_rL
+        l_rL := low
+        l_rLbar := bar_index
+if l_rDone and not na(l_rH) and l_rH > l_rL
+    l_rng := l_rH - l_rL
+    l_lf = l_rLbar < l_rHbar
+    l_pos = (close[1] - l_rL) / l_rng
+    if lLong and l_lf and l_pos >= 0.5
+        l_dir := 1
+        l_shallow := l_pos >= 0.75
+        l_e1 := l_shallow ? l_rL + 0.75*l_rng : l_rL + 0.5*l_rng
+        l_e2 := l_rL + 0.5*l_rng
+        l_zstop := l_shallow ? l_rL : (lDeepSL == "75% line" ? l_rL + 0.25*l_rng : l_rL)
+    else if lShort and (not l_lf) and l_pos <= 0.5
+        l_dir := -1
+        l_shallow := l_pos <= 0.25
+        l_e1 := l_shallow ? l_rL + 0.25*l_rng : l_rL + 0.5*l_rng
+        l_e2 := l_rL + 0.5*l_rng
+        l_zstop := l_shallow ? l_rH : (lDeepSL == "75% line" ? l_rL + 0.75*l_rng : l_rH)
+l_useAdd = lAvg and l_shallow and not na(l_e2)
+l_brk = lBreak == "Wick (touch)" ? ((l_dir == 1 and high >= l_rH) or (l_dir == -1 and low <= l_rL)) : ((l_dir == 1 and close > l_rH) or (l_dir == -1 and close < l_rL))
+if l_dir != 0 and l_brk
+    l_broke := true
+if l_dir == 1 and low < l_rL
+    l_oppBroke := true
+if l_dir == -1 and high > l_rH
+    l_oppBroke := true
+lWin = inSess and tod <= (lCutH*60 + lCutM)
+if runL and l_dir != 0 and l_broke and not l_placed and not l_closed and lWin and not flatten and (not noDbl or not l_oppBroke)
+    if l_dir == 1
+        strategy.entry("LL", strategy.long, qty = lQty, limit = l_e1)
+        if l_useAdd
+            strategy.entry("LL2", strategy.long, qty = lQty, limit = l_e2)
+    else
+        strategy.entry("LS", strategy.short, qty = lQty, limit = l_e1)
+        if l_useAdd
+            strategy.entry("LS2", strategy.short, qty = lQty, limit = l_e2)
+    l_placed := true
+if l_placed and not l_closed
+    if l_dir == 1
+        if not l_f1 and low <= l_e1
+            l_f1 := true
+        if l_useAdd and not l_f2 and low <= l_e2
+            l_f2 := true
+    if l_dir == -1
+        if not l_f1 and high >= l_e1
+            l_f1 := true
+        if l_useAdd and not l_f2 and high >= l_e2
+            l_f2 := true
+l_firstFill = (l_f1 or l_f2) and not (l_f1[1] or l_f2[1])
+if l_f1 or l_f2
+    l_avgPx := l_f1 and l_f2 ? (l_e1 + l_e2) / 2 : l_f1 ? l_e1 : l_e2
+if l_firstFill
+    l_curStop := l_zstop
+    l_curTP := f_tp(l_dir, l_rH, l_rL, l_rng, dHigh, dLow, lTpL, lTpS)
+    l_beDone := false
+if lBE and not l_beDone and (l_f1 or l_f2) and not l_closed
+    if l_dir == 1 and high >= l_rH
+        l_curStop := math.max(l_curStop, l_avgPx)
+        l_beDone := true
+    if l_dir == -1 and low <= l_rL
+        l_curStop := math.min(l_curStop, l_avgPx)
+        l_beDone := true
+if not na(l_curStop)
+    strategy.exit("LLx",  from_entry = "LL",  stop = l_curStop, limit = l_curTP)
+    strategy.exit("LL2x", from_entry = "LL2", stop = l_curStop, limit = l_curTP)
+    strategy.exit("LSx",  from_entry = "LS",  stop = l_curStop, limit = l_curTP)
+    strategy.exit("LS2x", from_entry = "LS2", stop = l_curStop, limit = l_curTP)
+if (l_f1 or l_f2) and not l_closed and not na(l_curStop)
+    if l_dir == 1 and (low <= l_curStop or high >= l_curTP)
+        l_closed := true
+    if l_dir == -1 and (high >= l_curStop or low <= l_curTP)
+        l_closed := true
+if l_closed or flatten or not runL or (noDbl and l_oppBroke) or ((not lWin) and not (l_f1 or l_f2))
+    strategy.cancel("LL")
+    strategy.cancel("LL2")
+    strategy.cancel("LS")
+    strategy.cancel("LS2")
+
+// ================================================================ NEW YORK ENGINE
+var float n_rH = na
+var float n_rL = na
+var int   n_rHbar = na
+var int   n_rLbar = na
+var int   n_dir = 0
+var bool  n_shallow = false
+var float n_e1 = na
+var float n_e2 = na
+var float n_zstop = na
+var float n_rng = na
+var bool  n_broke = false
+var bool  n_placed = false
+var bool  n_f1 = false
+var bool  n_f2 = false
+var float n_avgPx = na
+var float n_curStop = na
+var float n_curTP = na
+var bool  n_beDone = false
+var bool  n_closed = false
+var bool  n_oppBroke = false
+
+if newSession
+    n_rH := na
+    n_rL := na
+    n_dir := 0
+    n_shallow := false
+    n_e1 := na
+    n_e2 := na
+    n_zstop := na
+    n_rng := na
+    n_broke := false
+    n_placed := false
+    n_f1 := false
+    n_f2 := false
+    n_avgPx := na
+    n_curStop := na
+    n_curTP := na
+    n_beDone := false
+    n_closed := false
+    n_oppBroke := false
+if n_inR
+    if na(n_rH) or high > n_rH
+        n_rH := high
+        n_rHbar := bar_index
+    if na(n_rL) or low < n_rL
+        n_rL := low
+        n_rLbar := bar_index
+if n_rDone and not na(n_rH) and n_rH > n_rL
+    n_rng := n_rH - n_rL
+    n_lf = n_rLbar < n_rHbar
+    n_pos = (close[1] - n_rL) / n_rng
+    if nLong and n_lf and n_pos >= 0.5
+        n_dir := 1
+        n_shallow := n_pos >= 0.75
+        n_e1 := n_shallow ? n_rL + 0.75*n_rng : n_rL + 0.5*n_rng
+        n_e2 := n_rL + 0.5*n_rng
+        n_zstop := n_shallow ? n_rL : (nDeepSL == "75% line" ? n_rL + 0.25*n_rng : n_rL)
+    else if nShort and (not n_lf) and n_pos <= 0.5
+        n_dir := -1
+        n_shallow := n_pos <= 0.25
+        n_e1 := n_shallow ? n_rL + 0.25*n_rng : n_rL + 0.5*n_rng
+        n_e2 := n_rL + 0.5*n_rng
+        n_zstop := n_shallow ? n_rH : (nDeepSL == "75% line" ? n_rL + 0.75*n_rng : n_rH)
+// interaction: on NY IB formation, close an open opposite London trade
+if n_rDone and closeOpp and runL and runN
+    l_open = (l_f1 or l_f2) and not l_closed
+    if l_open and n_dir != 0 and n_dir == -l_dir
+        strategy.close("LL",  comment = "L->NY flip")
+        strategy.close("LL2", comment = "L->NY flip")
+        strategy.close("LS",  comment = "L->NY flip")
+        strategy.close("LS2", comment = "L->NY flip")
+        l_closed := true
+n_useAdd = nAvg and n_shallow and not na(n_e2)
+n_brk = nBreak == "Wick (touch)" ? ((n_dir == 1 and high >= n_rH) or (n_dir == -1 and low <= n_rL)) : ((n_dir == 1 and close > n_rH) or (n_dir == -1 and close < n_rL))
+if n_dir != 0 and n_brk
+    n_broke := true
+if n_dir == 1 and low < n_rL
+    n_oppBroke := true
+if n_dir == -1 and high > n_rH
+    n_oppBroke := true
+nWin = inSess and tod <= (nCutH*60 + nCutM)
+if runN and n_dir != 0 and n_broke and not n_placed and not n_closed and nWin and not flatten and (not noDbl or not n_oppBroke)
+    if n_dir == 1
+        strategy.entry("NL", strategy.long, qty = nQty, limit = n_e1)
+        if n_useAdd
+            strategy.entry("NL2", strategy.long, qty = nQty, limit = n_e2)
+    else
+        strategy.entry("NS", strategy.short, qty = nQty, limit = n_e1)
+        if n_useAdd
+            strategy.entry("NS2", strategy.short, qty = nQty, limit = n_e2)
+    n_placed := true
+if n_placed and not n_closed
+    if n_dir == 1
+        if not n_f1 and low <= n_e1
+            n_f1 := true
+        if n_useAdd and not n_f2 and low <= n_e2
+            n_f2 := true
+    if n_dir == -1
+        if not n_f1 and high >= n_e1
+            n_f1 := true
+        if n_useAdd and not n_f2 and high >= n_e2
+            n_f2 := true
+n_firstFill = (n_f1 or n_f2) and not (n_f1[1] or n_f2[1])
+if n_f1 or n_f2
+    n_avgPx := n_f1 and n_f2 ? (n_e1 + n_e2) / 2 : n_f1 ? n_e1 : n_e2
+if n_firstFill
+    n_curStop := n_zstop
+    n_curTP := f_tp(n_dir, n_rH, n_rL, n_rng, dHigh, dLow, nTpL, nTpS)
+    n_beDone := false
+if nBE and not n_beDone and (n_f1 or n_f2) and not n_closed
+    if n_dir == 1 and high >= n_rH
+        n_curStop := math.max(n_curStop, n_avgPx)
+        n_beDone := true
+    if n_dir == -1 and low <= n_rL
+        n_curStop := math.min(n_curStop, n_avgPx)
+        n_beDone := true
+if not na(n_curStop)
+    strategy.exit("NLx",  from_entry = "NL",  stop = n_curStop, limit = n_curTP)
+    strategy.exit("NL2x", from_entry = "NL2", stop = n_curStop, limit = n_curTP)
+    strategy.exit("NSx",  from_entry = "NS",  stop = n_curStop, limit = n_curTP)
+    strategy.exit("NS2x", from_entry = "NS2", stop = n_curStop, limit = n_curTP)
+if (n_f1 or n_f2) and not n_closed and not na(n_curStop)
+    if n_dir == 1 and (low <= n_curStop or high >= n_curTP)
+        n_closed := true
+    if n_dir == -1 and (high >= n_curStop or low <= n_curTP)
+        n_closed := true
+if n_closed or flatten or not runN or (noDbl and n_oppBroke) or ((not nWin) and not (n_f1 or n_f2))
+    strategy.cancel("NL")
+    strategy.cancel("NL2")
+    strategy.cancel("NS")
+    strategy.cancel("NS2")
+
+// ---------------------------------------------------------------- EOD flatten
+if flatten
+    strategy.close_all(comment = "EOD flat")
+
+// ---------------------------------------------------------------- Automation (net position)
+f_pmt(string act, float q, float slp, float tpp) =>
+    '{"token":"' + pmtToken + '","account_id":"' + pmtAcct + '","symbol":"' + pmtSym +
+      '","action":"' + act + '","quantity":' + str.tostring(q) +
+      ',"order_type":"' + pmtType +
+      '","sl":' + str.tostring(math.round_to_mintick(slp)) +
+      ',"tp":' + str.tostring(math.round_to_mintick(tpp)) + '}'
+liveL    = (l_f1 or l_f2) and not l_closed
+autoStop = liveL ? l_curStop : n_curStop
+autoTP   = liveL ? l_curTP  : n_curTP
+autoQty  = liveL ? lQty : nQty
+buyNow   = strategy.position_size > 0 and (strategy.position_size[1] <= 0 or strategy.position_size > strategy.position_size[1])
+sellNow  = strategy.position_size < 0 and (strategy.position_size[1] >= 0 or strategy.position_size < strategy.position_size[1])
+closeNow = flatten and strategy.position_size[1] != 0
+if autoOn and buyNow
+    alert(f_pmt("buy",  autoQty, autoStop, autoTP), alert.freq_once_per_bar)
+if autoOn and sellNow
+    alert(f_pmt("sell", autoQty, autoStop, autoTP), alert.freq_once_per_bar)
+if autoOn and closeNow
+    alert(f_pmt("close", 0, 0.0, 0.0), alert.freq_once_per_bar)
+
+// ---------------------------------------------------------------- Break alerts (manual)
+if brkAlerts and runL and l_dir != 0 and l_broke and not l_broke[1]
+    lTPa = f_tp(l_dir, l_rH, l_rL, l_rng, dHigh, dLow, lTpL, lTpS)
+    alert("LONDON IB BREAK  " + (l_dir == 1 ? "LONG" : "SHORT") + "  | broke " + str.tostring(math.round_to_mintick(l_dir == 1 ? l_rH : l_rL)) + "  | entry " + str.tostring(math.round_to_mintick(l_e1)) + "  | stop " + str.tostring(math.round_to_mintick(l_zstop)) + "  | target " + str.tostring(math.round_to_mintick(lTPa)), alert.freq_once_per_bar)
+if brkAlerts and runN and n_dir != 0 and n_broke and not n_broke[1]
+    nTPa = f_tp(n_dir, n_rH, n_rL, n_rng, dHigh, dLow, nTpL, nTpS)
+    alert("NY IB BREAK  " + (n_dir == 1 ? "LONG" : "SHORT") + "  | broke " + str.tostring(math.round_to_mintick(n_dir == 1 ? n_rH : n_rL)) + "  | entry " + str.tostring(math.round_to_mintick(n_e1)) + "  | stop " + str.tostring(math.round_to_mintick(n_zstop)) + "  | target " + str.tostring(math.round_to_mintick(nTPa)), alert.freq_once_per_bar)
+
+// ---------------------------------------------------------------- R/R box
+f_drawRR(int d, float ent, float zstop, float ptp, float q, color sig, string tag, int xoff) =>
+    x1 = bar_index + xoff
+    x2 = x1 + rrBars
+    riskUsd = math.abs(ent - zstop) * ptVal * q
+    rewUsd  = math.abs(ptp - ent) * ptVal * q
+    rrr = riskUsd > 0 ? rewUsd / riskUsd : na
+    rewTop = d == 1 ? ptp : ent
+    rewBot = d == 1 ? ent : ptp
+    rskTop = d == 1 ? ent : zstop
+    rskBot = d == 1 ? zstop : ent
+    box.new(x1, rewTop, x2, rewBot, xloc = xloc.bar_index, border_color = sig, border_width = 1, bgcolor = color.new(color.green, 82))
+    box.new(x1, rskTop, x2, rskBot, xloc = xloc.bar_index, border_color = sig, border_width = 1, bgcolor = color.new(color.red, 82))
+    label.new(x2, ent, tag + "  Risk $" + str.tostring(riskUsd, "#") + " | Reward $" + str.tostring(rewUsd, "#") + " (" + str.tostring(rrr, "#.##") + "R)", xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.gray, 15), textcolor = color.white, size = size.small)
+if showRR and runL and l_dir != 0 and l_broke and not l_broke[1] and not na(l_e1) and not na(l_zstop)
+    lTP = f_tp(l_dir, l_rH, l_rL, l_rng, dHigh, dLow, lTpL, lTpS)
+    f_drawRR(l_dir, l_e1, l_zstop, lTP, lQty, color.new(color.purple, 0), "LDN", 0)
+    if l_useAdd
+        f_drawRR(l_dir, l_e2, l_zstop, lTP, lQty, color.new(color.purple, 0), "LDN #2", rrBars)
+if showRR and runN and n_dir != 0 and n_broke and not n_broke[1] and not na(n_e1) and not na(n_zstop)
+    nTP = f_tp(n_dir, n_rH, n_rL, n_rng, dHigh, dLow, nTpL, nTpS)
+    f_drawRR(n_dir, n_e1, n_zstop, nTP, nQty, color.new(color.teal, 0), "NY", 0)
+    if n_useAdd
+        f_drawRR(n_dir, n_e2, n_zstop, nTP, nQty, color.new(color.teal, 0), "NY #2", rrBars)
+
+// ---------------------------------------------------------------- Visuals
+plot(runL and not na(l_rH) ? l_rH : na, "London IB High", color = color.new(color.purple, 0),  style = plot.style_linebr)
+plot(runL and not na(l_rL) ? l_rL : na, "London IB Low",  color = color.new(color.purple, 45), style = plot.style_linebr)
+plot(runL and l_dir != 0 and not na(l_e1) ? l_e1 : na, "London Entry", color = color.new(color.fuchsia, 0), style = plot.style_linebr)
+plot(runN and not na(n_rH) ? n_rH : na, "NY IB High", color = color.new(color.teal, 0),  style = plot.style_linebr)
+plot(runN and not na(n_rL) ? n_rL : na, "NY IB Low",  color = color.new(color.teal, 45), style = plot.style_linebr)
+plot(runN and n_dir != 0 and not na(n_e1) ? n_e1 : na, "NY Entry", color = color.new(color.aqua, 0), style = plot.style_linebr)
