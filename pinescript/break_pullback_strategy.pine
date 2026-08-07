@@ -154,8 +154,8 @@ f_size(float budget, float ptDist, float unitPct) =>
     perC = ptDist * ptVal
     raw  = perC > 0 ? budget / perC : 0.0
     fr   = raw - math.floor(raw)
-    float n = fr > 0.5 ? math.ceil(raw) : math.floor(raw)
-    n := (unitPct >= 0.5 and n < 1) ? 1.0 : n
+    n = fr > 0.5 ? math.ceil(raw) : math.floor(raw)
+    n := (unitPct >= 0.5 and n < 1) ? 1 : n
     n
 
 // TP resolver
