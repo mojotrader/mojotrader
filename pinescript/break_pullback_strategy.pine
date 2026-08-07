@@ -19,9 +19,10 @@
 // LIMITATION: a Pine strategy nets all orders into ONE position (no hedging). Same-direction overlaps merge fine;
 //   the interaction rules above are what handle the opposite-direction ORB/IB case (ORB is closed, not hedged).
 strategy("Break-then-Pullback (ORB + IB)", overlay = true, pyramiding = 6, max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500,
-     initial_capital = 1000000, margin_long = 0, margin_short = 0,
+     initial_capital = 30000, margin_long = 0, margin_short = 0,
      default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
      commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
+// NOTE: set your real account size in Properties -> Initial capital (default 30,000). Sizing compounds off live equity.
 
 // ---------------------------------------------------------------- Strategy toggles (isolate each for backtesting)
 gStrat    = "Strategies (toggle to track each separately)"
@@ -41,6 +42,15 @@ ibTue     = input.bool(true, "IB Tuesday",   group = gDayI)
 ibWed     = input.bool(true, "IB Wednesday", group = gDayI)
 ibThu     = input.bool(true, "IB Thursday",  group = gDayI)
 ibFri     = input.bool(true, "IB Friday",    group = gDayI)
+
+// ---------------------------------------------------------------- Risk sizing (compounding, % of capital)
+gRisk       = "Risk sizing"
+useRiskSize = input.bool(true, "Size by % risk (else fixed contracts below)", group = gRisk,
+     tooltip = "ON: each day, size each entry so its risk = (risk per setup %)/units of the CURRENT account equity. OFF: use the fixed 'contracts per unit' below.")
+riskPct     = input.float(1.0, "Risk per setup (% of capital)", minval = 0.1, step = 0.1, group = gRisk,
+     tooltip = "Total risk for one strategy's setup, split equally between its entry units. 1% on 30k = $300 = $150 per unit (with average-down on).")
+maxDayPct   = input.float(2.0, "Daily max loss (% of capital, 0 = off)", minval = 0, step = 0.5, group = gRisk,
+     tooltip = "Once the day's loss reaches this % of the day's starting equity, open trades are closed and no new trades are taken until the next day.")
 
 // ---------------------------------------------------------------- HARDCODED CONFIG (edit values here)
 // Session
@@ -116,6 +126,13 @@ else if inSess
 tod     = hour(time, tz) * 60 + minute(time, tz)
 flatten = tod >= (flatH*60 + flatM)
 
+// daily capital (recomputed each day -> compounds) + daily max-loss halt
+var float dayCap = na
+if newSession
+    dayCap := strategy.equity                         // account value at the start of today
+dayPnL    = strategy.equity - dayCap                  // today's P&L incl. open
+dailyHalt = maxDayPct > 0 and dayPnL <= -(dayCap * maxDayPct / 100.0)
+
 // day-of-week gates (per strategy)
 dow      = dayofweek(time, tz)
 orbDayOK = (dow == dayofweek.monday and orbMon) or (dow == dayofweek.tuesday and orbTue) or (dow == dayofweek.wednesday and orbWed) or (dow == dayofweek.thursday and orbThu) or (dow == dayofweek.friday and orbFri)
@@ -130,6 +147,16 @@ if newSession
     ibFormed := false
 if ib_rDone
     ibFormed := true
+
+// position sizer: contracts for a given $ budget and stop distance (points).
+// round: fractional <= .5 -> down, > .5 -> up (2.1-2.5 -> 2, >2.5 -> 3). Min 1 when the unit's risk >= 0.5%.
+f_size(float budget, float ptDist, float unitPct) =>
+    perC = ptDist * ptVal
+    raw  = perC > 0 ? budget / perC : 0.0
+    fr   = raw - math.floor(raw)
+    n    = fr > 0.5 ? math.ceil(raw) : math.floor(raw)
+    n := (unitPct >= 0.5 and n < 1) ? 1.0 : n
+    n
 
 // TP resolver
 f_tp(int d, float rH, float rL, float rg, float dHi, float dLo, string tpL, string tpS) =>
@@ -156,6 +183,8 @@ var float or_curTP = na
 var bool  or_beDone = false
 var bool  or_closed = false
 var bool  or_oppBroke = false
+var float orbSz1 = na
+var float orbSz2 = na
 
 if newSession
     or_rH := na
@@ -176,6 +205,8 @@ if newSession
     or_beDone := false
     or_closed := false
     or_oppBroke := false
+    orbSz1 := na
+    orbSz2 := na
 if or_inR
     if na(or_rH) or high > or_rH
         or_rH := high
@@ -199,6 +230,12 @@ if or_rDone and not na(or_rH) and or_rH > or_rL
         or_e1 := or_shallow ? or_rL + 0.25*or_rng : or_rL + 0.5*or_rng
         or_e2 := or_rL + 0.5*or_rng
         or_zstop := or_shallow ? or_rH : (orbDeepSL == "75% line" ? or_rL + 0.75*or_rng : or_rH)
+    if or_dir != 0
+        orbU  = (orbAvg and or_shallow) ? 2 : 1                          // units this setup will use
+        orbBud = dayCap * (riskPct/100.0) / orbU                         // $ risk budget per unit
+        orbUPct = riskPct / orbU
+        orbSz1 := useRiskSize ? f_size(orbBud, math.abs(or_e1 - or_zstop), orbUPct) : orbQty
+        orbSz2 := useRiskSize ? f_size(orbBud, math.abs(or_e2 - or_zstop), orbUPct) : orbQty
 or_useAdd = orbAvg and or_shallow and not na(or_e2)
 // break by selected type
 or_brk = orbBreak == "Wick (touch)" ? ((or_dir == 1 and high >= or_rH) or (or_dir == -1 and low <= or_rL)) : ((or_dir == 1 and close > or_rH) or (or_dir == -1 and close < or_rL))
@@ -210,16 +247,16 @@ if or_dir == 1 and low < or_rL
 if or_dir == -1 and high > or_rH
     or_oppBroke := true
 // entry window: before IB forms (when IB is on), within ORB cutoff otherwise, on an allowed weekday
-orbWin = inSess and orbDayOK and tod <= (orbCutH*60 + orbCutM) and (not runIB or not ibFormed)
-if runORB and or_dir != 0 and or_broke and not or_placed and not or_closed and orbWin and not flatten and (not noDbl or not or_oppBroke)
+orbWin = inSess and orbDayOK and tod <= (orbCutH*60 + orbCutM) and (not runIB or not ibFormed) and not dailyHalt
+if runORB and or_dir != 0 and or_broke and not or_placed and not or_closed and orbWin and not flatten and (not noDbl or not or_oppBroke) and orbSz1 >= 1
     if or_dir == 1
-        strategy.entry("ORL", strategy.long, qty = orbQty, limit = or_e1)
-        if or_useAdd
-            strategy.entry("ORL2", strategy.long, qty = orbQty, limit = or_e2)
+        strategy.entry("ORL", strategy.long, qty = orbSz1, limit = or_e1)
+        if or_useAdd and orbSz2 >= 1
+            strategy.entry("ORL2", strategy.long, qty = orbSz2, limit = or_e2)
     else
-        strategy.entry("ORS", strategy.short, qty = orbQty, limit = or_e1)
-        if or_useAdd
-            strategy.entry("ORS2", strategy.short, qty = orbQty, limit = or_e2)
+        strategy.entry("ORS", strategy.short, qty = orbSz1, limit = or_e1)
+        if or_useAdd and orbSz2 >= 1
+            strategy.entry("ORS2", strategy.short, qty = orbSz2, limit = or_e2)
     or_placed := true
 if or_placed and not or_closed
     if or_dir == 1
@@ -284,6 +321,8 @@ var float ib_curTP = na
 var bool  ib_beDone = false
 var bool  ib_closed = false
 var bool  ib_oppBroke = false
+var float ibSz1 = na
+var float ibSz2 = na
 
 if newSession
     ib_rH := na
@@ -304,6 +343,8 @@ if newSession
     ib_beDone := false
     ib_closed := false
     ib_oppBroke := false
+    ibSz1 := na
+    ibSz2 := na
 if ib_inR
     if na(ib_rH) or high > ib_rH
         ib_rH := high
@@ -327,6 +368,12 @@ if ib_rDone and not na(ib_rH) and ib_rH > ib_rL
         ib_e1 := ib_shallow ? ib_rL + 0.25*ib_rng : ib_rL + 0.5*ib_rng
         ib_e2 := ib_rL + 0.5*ib_rng
         ib_zstop := ib_shallow ? ib_rH : (ibDeepSL == "75% line" ? ib_rL + 0.75*ib_rng : ib_rH)
+    if ib_dir != 0
+        ibU  = (ibAvg and ib_shallow) ? 2 : 1
+        ibBud = dayCap * (riskPct/100.0) / ibU
+        ibUPct = riskPct / ibU
+        ibSz1 := useRiskSize ? f_size(ibBud, math.abs(ib_e1 - ib_zstop), ibUPct) : ibQty
+        ibSz2 := useRiskSize ? f_size(ibBud, math.abs(ib_e2 - ib_zstop), ibUPct) : ibQty
 // INTERACTION: on IB formation, resolve ORB vs IB
 if ib_rDone and runIB and runORB
     or_open = (or_f1 or or_f2) and not or_closed
@@ -344,16 +391,16 @@ if ib_dir == 1 and low < ib_rL
     ib_oppBroke := true
 if ib_dir == -1 and high > ib_rH
     ib_oppBroke := true
-ibWin = inSess and ibDayOK and tod <= (ibCutH*60 + ibCutM)
-if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and ibWin and not flatten and (not noDbl or not ib_oppBroke)
+ibWin = inSess and ibDayOK and tod <= (ibCutH*60 + ibCutM) and not dailyHalt
+if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and ibWin and not flatten and (not noDbl or not ib_oppBroke) and ibSz1 >= 1
     if ib_dir == 1
-        strategy.entry("IBL", strategy.long, qty = ibQty, limit = ib_e1)
-        if ib_useAdd
-            strategy.entry("IBL2", strategy.long, qty = ibQty, limit = ib_e2)
+        strategy.entry("IBL", strategy.long, qty = ibSz1, limit = ib_e1)
+        if ib_useAdd and ibSz2 >= 1
+            strategy.entry("IBL2", strategy.long, qty = ibSz2, limit = ib_e2)
     else
-        strategy.entry("IBS", strategy.short, qty = ibQty, limit = ib_e1)
-        if ib_useAdd
-            strategy.entry("IBS2", strategy.short, qty = ibQty, limit = ib_e2)
+        strategy.entry("IBS", strategy.short, qty = ibSz1, limit = ib_e1)
+        if ib_useAdd and ibSz2 >= 1
+            strategy.entry("IBS2", strategy.short, qty = ibSz2, limit = ib_e2)
     ib_placed := true
 if ib_placed and not ib_closed
     if ib_dir == 1
@@ -396,9 +443,12 @@ if ib_closed or flatten or not runIB or (noDbl and ib_oppBroke) or ((not ibWin) 
     strategy.cancel("IBS")
     strategy.cancel("IBS2")
 
-// ---------------------------------------------------------------- EOD flatten
+// ---------------------------------------------------------------- EOD flatten + daily max-loss halt
 if flatten
     strategy.close_all(comment = "EOD flat")
+if dailyHalt
+    strategy.close_all(comment = "Daily max loss")
+    strategy.cancel_all()
 
 // ---------------------------------------------------------------- Automation: PickMyTrade webhook JSON (net position)
 f_pmt(string act, float q, float slp, float tpp) =>
@@ -410,7 +460,7 @@ f_pmt(string act, float q, float slp, float tpp) =>
 liveORB  = (or_f1 or or_f2) and not or_closed
 autoStop = liveORB ? or_curStop : ib_curStop
 autoTP   = liveORB ? or_curTP  : ib_curTP
-autoQty  = liveORB ? orbQty : ibQty
+autoQty  = math.abs(strategy.position_size)   // actual net contracts (respects % sizing)
 buyNow   = strategy.position_size > 0 and (strategy.position_size[1] <= 0 or strategy.position_size > strategy.position_size[1])
 sellNow  = strategy.position_size < 0 and (strategy.position_size[1] >= 0 or strategy.position_size < strategy.position_size[1])
 closeNow = flatten and strategy.position_size[1] != 0
@@ -478,17 +528,17 @@ if runORB and or_dir != 0 and or_broke and not or_broke[1] and not na(or_e1) and
     if showFibs
         f_drawFibs(or_rL, or_rng, or_dir, color.new(color.orange, 0), "ORB")
     if showRR
-        f_drawRR(or_dir, or_e1, or_zstop, orTP, orbQty, color.new(color.orange, 0), "ORB", 0)
+        f_drawRR(or_dir, or_e1, or_zstop, orTP, orbSz1, color.new(color.orange, 0), "ORB", 0)
         if or_useAdd
-            f_drawRR(or_dir, or_e2, or_zstop, orTP, orbQty, color.new(color.orange, 0), "ORB avg #2", rrBars)
+            f_drawRR(or_dir, or_e2, or_zstop, orTP, orbSz2, color.new(color.orange, 0), "ORB avg #2", rrBars)
 if runIB and ib_dir != 0 and ib_broke and not ib_broke[1] and not na(ib_e1) and not na(ib_zstop)
     ibTP = f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
     if showFibs
         f_drawFibs(ib_rL, ib_rng, ib_dir, color.new(color.teal, 0), "IB")
     if showRR
-        f_drawRR(ib_dir, ib_e1, ib_zstop, ibTP, ibQty, color.new(color.teal, 0), "IB", 0)
+        f_drawRR(ib_dir, ib_e1, ib_zstop, ibTP, ibSz1, color.new(color.teal, 0), "IB", 0)
         if ib_useAdd
-            f_drawRR(ib_dir, ib_e2, ib_zstop, ibTP, ibQty, color.new(color.teal, 0), "IB avg #2", rrBars)
+            f_drawRR(ib_dir, ib_e2, ib_zstop, ibTP, ibSz2, color.new(color.teal, 0), "IB avg #2", rrBars)
 
 // ---------------------------------------------------------------- Strategy rules panel (top-right)
 var table info = na
