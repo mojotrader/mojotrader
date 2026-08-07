@@ -22,7 +22,7 @@ strategy("Break-then-Pullback (ORB + IB)", overlay = true, pyramiding = 6, max_b
      initial_capital = 30000, margin_long = 0, margin_short = 0,
      default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
      commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
-// NOTE: set your real account size in Properties -> Initial capital (default 30,000). Sizing compounds off live equity.
+// NOTE: position sizing uses a FIXED account size (see 'Account size $' input) - it does NOT compound with P&L.
 
 // ---------------------------------------------------------------- Strategy toggles (isolate each for backtesting)
 gStrat    = "Strategies (toggle to track each separately)"
@@ -43,10 +43,12 @@ ibWed     = input.bool(true, "IB Wednesday", group = gDayI)
 ibThu     = input.bool(true, "IB Thursday",  group = gDayI)
 ibFri     = input.bool(true, "IB Friday",    group = gDayI)
 
-// ---------------------------------------------------------------- Risk sizing (compounding, % of capital)
+// ---------------------------------------------------------------- Risk sizing (% of a FIXED capital, no compounding)
 gRisk       = "Risk sizing"
 useRiskSize = input.bool(true, "Size by % risk (else fixed contracts below)", group = gRisk,
-     tooltip = "ON: each day, size each entry so its risk = (risk per setup %)/units of the CURRENT account equity. OFF: use the fixed 'contracts per unit' below.")
+     tooltip = "ON: size each entry so its risk = (risk per setup %)/units of the FIXED account size below. OFF: use the fixed 'contracts per unit' in the config.")
+acctSize    = input.float(30000, "Account size $ (fixed - NO compounding)", minval = 1, group = gRisk,
+     tooltip = "Sizing uses this constant capital every day; it does NOT grow/shrink with P&L. So the dollar risk per trade is the same every day (no compounding).")
 riskPct     = input.float(1.0, "Risk per setup (% of capital)", minval = 0.1, step = 0.1, group = gRisk,
      tooltip = "Total risk for one strategy's setup, split equally between its entry units. 1% on 30k = $300 = $150 per unit (with average-down on).")
 maxDayPct   = input.float(2.0, "Daily max loss (% of capital, 0 = off)", minval = 0, step = 0.5, group = gRisk,
@@ -126,12 +128,12 @@ else if inSess
 tod     = hour(time, tz) * 60 + minute(time, tz)
 flatten = tod >= (flatH*60 + flatM)
 
-// daily capital (recomputed each day -> compounds) + daily max-loss halt
-var float dayCap = na
+// fixed-capital sizing (NO compounding) + daily max-loss halt (today's P&L vs today's start equity)
+var float dayStartEq = na
 if newSession
-    dayCap := strategy.equity                         // account value at the start of today
-dayPnL    = strategy.equity - dayCap                  // today's P&L incl. open
-dailyHalt = maxDayPct > 0 and dayPnL <= -(dayCap * maxDayPct / 100.0)
+    dayStartEq := strategy.equity
+dayPnL    = strategy.equity - dayStartEq              // today's P&L incl. open
+dailyHalt = maxDayPct > 0 and dayPnL <= -(acctSize * maxDayPct / 100.0)
 
 // day-of-week gates (per strategy)
 dow      = dayofweek(time, tz)
@@ -232,7 +234,7 @@ if or_rDone and not na(or_rH) and or_rH > or_rL
         or_zstop := or_shallow ? or_rH : (orbDeepSL == "75% line" ? or_rL + 0.75*or_rng : or_rH)
     if or_dir != 0
         orbU  = (orbAvg and or_shallow) ? 2 : 1                          // units this setup will use
-        orbBud = dayCap * (riskPct/100.0) / orbU                         // $ risk budget per unit
+        orbBud = acctSize * (riskPct/100.0) / orbU                         // $ risk budget per unit
         orbUPct = riskPct / orbU
         orbSz1 := useRiskSize ? f_size(orbBud, math.abs(or_e1 - or_zstop), orbUPct) : orbQty
         orbSz2 := useRiskSize ? f_size(orbBud, math.abs(or_e2 - or_zstop), orbUPct) : orbQty
@@ -370,7 +372,7 @@ if ib_rDone and not na(ib_rH) and ib_rH > ib_rL
         ib_zstop := ib_shallow ? ib_rH : (ibDeepSL == "75% line" ? ib_rL + 0.75*ib_rng : ib_rH)
     if ib_dir != 0
         ibU  = (ibAvg and ib_shallow) ? 2 : 1
-        ibBud = dayCap * (riskPct/100.0) / ibU
+        ibBud = acctSize * (riskPct/100.0) / ibU
         ibUPct = riskPct / ibU
         ibSz1 := useRiskSize ? f_size(ibBud, math.abs(ib_e1 - ib_zstop), ibUPct) : ibQty
         ibSz2 := useRiskSize ? f_size(ibBud, math.abs(ib_e2 - ib_zstop), ibUPct) : ibQty
