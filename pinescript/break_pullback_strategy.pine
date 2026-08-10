@@ -4,8 +4,11 @@
 // PRIORITY / INTERACTION (when both are enabled):
 //   - ORB may enter only BEFORE the IB forms (i.e. before 10:30). Its resting limit is cancelled at 10:30 if unfilled.
 //   - If ORB never traded by the time the IB forms -> ORB is abandoned for the day, only IB plays.
-//   - If an ORB position is OPEN when the IB forms and the IB is the OPPOSITE direction -> the ORB position is
-//     closed first, then the IB setup is armed. (Same direction -> ORB is left to run and IB arms independently.)
+//   - An OPEN ORB trade keeps the seat: while it runs, the IB order is HELD BACK - either direction, so the two
+//     never stack risk in one direction and never hedge each other. The ORB is left alone to reach its own target.
+//   - When the ORB closes (target or stop), the IB limit goes in - unless price already traded through the IB
+//     entry level while the IB was held, in which case that pullback was missed and the IB is skipped for the day.
+//   - Net effect: both setups can play on the same day, but strictly one at a time.
 //
 // PER SETUP (each range, independently configurable below):
 //   1) At the range close: bias = low-before-high (long) / high-before-low (short) AND the range close in the
@@ -16,14 +19,16 @@
 //   Stop: shallow -> range extreme (100%) ; deeper -> 75% line. Optional breakeven when the range level is reclaimed.
 //   TP long/short selectable: range level / +10% / +30% / +50% / HOD-LOD. One setup/day per range, EOD flatten.
 //
-// PROBABILITY TABLE (bottom right) - two walk-forward studies of how often price REACHES each level:
-//   - "From FILL" rows: per range-size bucket, measured from the entry fill to the EOD flatten.
-//   - "From PULLBACK" rows: measured from the moment price retraces to the 25% fib (and, separately, the 50% fib)
-//     to the EOD flatten - i.e. "given the pullback got this deep, how often did the TP extension print?".
-//     N is the number of setups that pulled back that far; the bracket is how often that pullback happens at all.
+// PROBABILITY TABLE (bottom right) - how often price REACHES each level from a given starting point, walk-forward:
+//   - "From FILL" rows: from the entry fill to the EOD flatten, per range-size bucket.
+//   - "From 25% PB" / "From 50% PB" rows: from the moment price retraces to that fib. Two different starting
+//     points, two different sets of odds - the deeper pullback is further from the targets, so its numbers move.
+//     N is the sample; "Reach" is how often the setup pulls back that far in the first place.
+//   The same conditional numbers print on the chart: as a second line on every level label at the break, and as a
+//   live label the moment price actually reaches the 25% (and then the 50%) line.
 //
-// LIMITATION: a Pine strategy nets all orders into ONE position (no hedging). Same-direction overlaps merge fine;
-//   the interaction rules above are what handle the opposite-direction ORB/IB case (ORB is closed, not hedged).
+// NOTE: a Pine strategy nets all orders into ONE position (no hedging). The hold-back rule above means ORB and IB
+//   are never open at the same time, so the netting never merges two different setups' positions.
 strategy("Break-then-Pullback (ORB + IB)", overlay = true, pyramiding = 6, max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500,
      initial_capital = 30000, margin_long = 0, margin_short = 0,
      default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
@@ -105,7 +110,7 @@ noDbl     = input.bool(true, "Skip double-break days (both range sides break)", 
 // ---------------------------------------------------------------- Automation (PickMyTrade webhook -> Tradovate)
 grpA      = "Automation - PickMyTrade"
 autoOn    = input.bool(false, "Enable webhook alerts", group = grpA,
-     tooltip = "Create ONE alert with condition 'alert() function calls only' and paste PickMyTrade's webhook URL. Verify the JSON fields match PickMyTrade's template. WARNING: alerts fire on the NET position, so for live automation enable only ONE of ORB/IB at a time.")
+     tooltip = "Create ONE alert with condition 'alert() function calls only' and paste PickMyTrade's webhook URL. Verify the JSON fields match PickMyTrade's template. Alerts fire on the NET position; ORB and IB are never open at the same time, so each alert maps to a single setup.")
 pmtToken  = input.string("", "PickMyTrade token", group = grpA)
 pmtAcct   = input.string("", "Tradovate account id", group = grpA)
 pmtSym    = input.string("MNQ1!", "Broker symbol", group = grpA)
@@ -127,7 +132,7 @@ rrBars    = input.int(24, "R/R box width (bars)", 1, 300, group = grpRR)
 // ---------------------------------------------------------------- Historical probabilities
 grpP      = "Historical probabilities"
 showProb  = input.bool(true, "Show hit-probability labels at levels", group = grpP,
-     tooltip = "At each break, label the SL lines (100% / 75%) and the TP extensions (0 / 10 / 30 / 50%) with the historical probability that price REACHES them. Each TP label carries three numbers: from the FILL, from the 25% pullback, and from the 50% pullback. All are computed over prior days only (walk-forward).")
+     tooltip = "At each break, label the SL lines (100% / 75%) and the TP extensions (0 / 10 / 30 / 50%) with the historical probability that price REACHES them: line 1 from the fill, line 2 from the 25% and from the 50% pullback. Also prints a live label the moment price reaches each pullback level, with the odds of every target from that point on. All computed over prior days only (walk-forward).")
 showTable = input.bool(true, "Show probability table", group = grpP)
 tblPos    = input.string("Bottom right", "Table position", options = ["Top right", "Bottom right", "Bottom left", "Top left"], group = grpP)
 bMode     = input.string("Auto (equal thirds)", "Size buckets", options = ["Auto (equal thirds)", "Manual (%)"], group = grpP,
@@ -198,13 +203,14 @@ f_tp(int d, float rH, float rL, float rg, float dHi, float dLo, string tpL, stri
 //      fill and the EOD flatten? Range is stored as % of price (range / range-low * 100) so the S/M/L buckets stay
 //      comparable as price drifts over the years. These are the "size" rows of the table.
 //
-//   B) PULLBACK -> EOD. One record per ARMED setup (break + all filters passed). It answers: once price has
+//   B) PULLBACK -> EOD. One record per SETUP THAT BROKE its range (whether or not the order was actually placed -
+//      a day where the IB was held back behind an open ORB still tells you what price did). It answers: once price has
 //      retraced to the 25% fib, how often does it go on to tag each TP extension? And the same from the 50% fib.
-//      A level counts only if it is touched on a bar AFTER the bar that reached the pullback, so the pullback is
-//      never "confirmed" by the same candle that also runs to target (conservative - a 5m bar that pulls back and
-//      rips to the extension in one candle is not counted). The 50% line can only be reached through the 25% line,
-//      so the "after 50%" sample is always a subset of the "after 25%" one.
-//      Read a cell as: "of the setups that pulled back this far, X% later traded to that level (before 15:30 ET)".
+//      On the very bar that reaches the pullback, a level counts only if the CLOSE is already beyond it - the last
+//      tick of that bar sits past the level, so it was traded after the retrace. From the next bar on, an ordinary
+//      wick touch counts. That keeps the ordering honest without throwing away the entry candle.
+//      The 50% line can only be reached through the 25% line, so the 50% sample is a subset of the 25% one.
+//      Read a cell as: "of the setups that pulled back this far, X% went on to trade that level (by 15:30 ET)".
 //      SL columns use the same conditioning, so a row shows the reward AND the risk that follow the pullback.
 f_pct(int hit, int n) => n > 0 ? 100.0 * hit / n : na
 f_pctStr(int hit, int n) =>
@@ -267,109 +273,76 @@ f_seg(int s, int bkt, float b1, float b2) =>
     [nn, a0, a1, a2, a3, a4, a5]
 
 // ---- study B: one record per armed setup, conditioned on how deep the pullback went --------------------------
-type PbRec
-    int   strat    = 0
-    float rngPct   = na
-    bool  r25      = false      // price retraced to the 25% fib after the break
-    bool  r50      = false      // ... and to the 50% fib
-    bool  a25sl100 = false      // levels touched AFTER the 25% retrace
-    bool  a25sl75  = false
-    bool  a25tp0   = false
-    bool  a25tp10  = false
-    bool  a25tp30  = false
-    bool  a25tp50  = false
-    bool  a50sl100 = false      // levels touched AFTER the 50% retrace
-    bool  a50sl75  = false
-    bool  a50tp0   = false
-    bool  a50tp10  = false
-    bool  a50tp30  = false
-    bool  a50tp50  = false
+// Level order used everywhere below: 0 TP0, 1 TP10, 2 TP30, 3 TP50, 4 SL75, 5 SL100.
+var pbStrat = array.new_int(0)
+var pbRngP  = array.new_float(0)
+var pbR25   = array.new_int(0)      // did price retrace to the 25% fib
+var pbR50   = array.new_int(0)      // ... and to the 50% fib
+var pb25_0  = array.new_int(0)      // levels reached from the 25% retrace onward
+var pb25_1  = array.new_int(0)
+var pb25_2  = array.new_int(0)
+var pb25_3  = array.new_int(0)
+var pb25_4  = array.new_int(0)
+var pb25_5  = array.new_int(0)
+var pb50_0  = array.new_int(0)      // levels reached from the 50% retrace onward
+var pb50_1  = array.new_int(0)
+var pb50_2  = array.new_int(0)
+var pb50_3  = array.new_int(0)
+var pb50_4  = array.new_int(0)
+var pb50_5  = array.new_int(0)
 
-type PbTrk
-    bool  active = false
-    int   dir    = 0
-    float pb25   = na
-    float pb50   = na
-    float sl100  = na
-    float sl75   = na
-    float tp0    = na
-    float tp10   = na
-    float tp30   = na
-    float tp50   = na
-    PbRec rec    = na
-
-var array<PbRec> pbRecs = array.new<PbRec>()
-
-// arm the tracker at the break (levels are fixed for the rest of the day)
-f_pbArm(PbTrk t, int s, int d, float rH, float rL, float rng) =>
-    t.active := true
-    t.dir    := d
-    t.pb25   := rL + (d == 1 ? 0.75 : 0.25) * rng    // 25% retracement of the range, direction-relative
-    t.pb50   := rL + 0.50 * rng
-    t.sl100  := d == 1 ? rL : rH
-    t.sl75   := rL + (d == 1 ? 0.25 : 0.75) * rng
-    t.tp0    := d == 1 ? rH : rL
-    t.tp10   := d == 1 ? rH + 0.10*rng : rL - 0.10*rng
-    t.tp30   := d == 1 ? rH + 0.30*rng : rL - 0.30*rng
-    t.tp50   := d == 1 ? rH + 0.50*rng : rL - 0.50*rng
-    t.rec    := PbRec.new(strat = s, rngPct = rL > 0 ? rng / rL * 100 : na)
-
-// one bar of tracking. Level touches are evaluated against the retrace flags as they stood BEFORE this bar, so the
-// bar that reaches the pullback cannot also supply the TP hit.
-f_pbTrack(PbTrk t) =>
-    if t.active
-        up = t.dir == 1
-        if t.rec.r25
-            t.rec.a25tp0   := t.rec.a25tp0   or (up ? high >= t.tp0   : low  <= t.tp0)
-            t.rec.a25tp10  := t.rec.a25tp10  or (up ? high >= t.tp10  : low  <= t.tp10)
-            t.rec.a25tp30  := t.rec.a25tp30  or (up ? high >= t.tp30  : low  <= t.tp30)
-            t.rec.a25tp50  := t.rec.a25tp50  or (up ? high >= t.tp50  : low  <= t.tp50)
-            t.rec.a25sl75  := t.rec.a25sl75  or (up ? low  <= t.sl75  : high >= t.sl75)
-            t.rec.a25sl100 := t.rec.a25sl100 or (up ? low  <= t.sl100 : high >= t.sl100)
-        if t.rec.r50
-            t.rec.a50tp0   := t.rec.a50tp0   or (up ? high >= t.tp0   : low  <= t.tp0)
-            t.rec.a50tp10  := t.rec.a50tp10  or (up ? high >= t.tp10  : low  <= t.tp10)
-            t.rec.a50tp30  := t.rec.a50tp30  or (up ? high >= t.tp30  : low  <= t.tp30)
-            t.rec.a50tp50  := t.rec.a50tp50  or (up ? high >= t.tp50  : low  <= t.tp50)
-            t.rec.a50sl75  := t.rec.a50sl75  or (up ? low  <= t.sl75  : high >= t.sl75)
-            t.rec.a50sl100 := t.rec.a50sl100 or (up ? low  <= t.sl100 : high >= t.sl100)
-        if not t.rec.r25 and (up ? low <= t.pb25 : high >= t.pb25)
-            t.rec.r25 := true
-        if not t.rec.r50 and (up ? low <= t.pb50 : high >= t.pb50)
-            t.rec.r50 := true
-
-// file the record at the EOD flatten (once)
-f_pbClose(PbTrk t) =>
-    if t.active
-        array.push(pbRecs, t.rec)
-        t.active := false
+f_pbPush(int s, float rngP, bool r25, bool r50, array<bool> h25, array<bool> h50) =>
+    array.push(pbStrat, s)
+    array.push(pbRngP,  rngP)
+    array.push(pbR25,   r25 ? 1 : 0)
+    array.push(pbR50,   r50 ? 1 : 0)
+    array.push(pb25_0, array.get(h25, 0) ? 1 : 0)
+    array.push(pb25_1, array.get(h25, 1) ? 1 : 0)
+    array.push(pb25_2, array.get(h25, 2) ? 1 : 0)
+    array.push(pb25_3, array.get(h25, 3) ? 1 : 0)
+    array.push(pb25_4, array.get(h25, 4) ? 1 : 0)
+    array.push(pb25_5, array.get(h25, 5) ? 1 : 0)
+    array.push(pb50_0, array.get(h50, 0) ? 1 : 0)
+    array.push(pb50_1, array.get(h50, 1) ? 1 : 0)
+    array.push(pb50_2, array.get(h50, 2) ? 1 : 0)
+    array.push(pb50_3, array.get(h50, 3) ? 1 : 0)
+    array.push(pb50_4, array.get(h50, 4) ? 1 : 0)
+    array.push(pb50_5, array.get(h50, 5) ? 1 : 0)
 
 // counts for one strategy at one pullback depth. depth 0 = reached the 25% fib, 1 = reached the 50% fib.
 // bkt = -1 pools all range sizes; 0/1/2 restricts to the S/M/L bucket defined by b1/b2.
-// Returns [setups in scope, setups that reached the pullback, then SL100, SL75, TP0, TP10, TP30, TP50 counts].
+// Returns [setups armed, setups that reached that pullback, then TP0, TP10, TP30, TP50, SL75, SL100 counts].
 f_pbSeg(int s, int depth, int bkt, float b1, float b2) =>
     nAll = 0
     nn   = 0
-    a0 = 0
-    a1 = 0
-    a2 = 0
-    a3 = 0
-    a4 = 0
-    a5 = 0
-    if array.size(pbRecs) > 0
-        for i = 0 to array.size(pbRecs) - 1
-            r = array.get(pbRecs, i)
-            if r.strat == s and (bkt < 0 or f_bkt(r.rngPct, b1, b2) == bkt)
+    h0 = 0
+    h1 = 0
+    h2 = 0
+    h3 = 0
+    h4 = 0
+    h5 = 0
+    if array.size(pbStrat) > 0
+        for i = 0 to array.size(pbStrat) - 1
+            if array.get(pbStrat, i) == s and (bkt < 0 or f_bkt(array.get(pbRngP, i), b1, b2) == bkt)
                 nAll := nAll + 1
-                if (depth == 0 ? r.r25 : r.r50)
+                if (depth == 0 ? array.get(pbR25, i) : array.get(pbR50, i)) == 1
                     nn := nn + 1
-                    a0 := a0 + ((depth == 0 ? r.a25sl100 : r.a50sl100) ? 1 : 0)
-                    a1 := a1 + ((depth == 0 ? r.a25sl75  : r.a50sl75)  ? 1 : 0)
-                    a2 := a2 + ((depth == 0 ? r.a25tp0   : r.a50tp0)   ? 1 : 0)
-                    a3 := a3 + ((depth == 0 ? r.a25tp10  : r.a50tp10)  ? 1 : 0)
-                    a4 := a4 + ((depth == 0 ? r.a25tp30  : r.a50tp30)  ? 1 : 0)
-                    a5 := a5 + ((depth == 0 ? r.a25tp50  : r.a50tp50)  ? 1 : 0)
-    [nAll, nn, a0, a1, a2, a3, a4, a5]
+                    h0 := h0 + (depth == 0 ? array.get(pb25_0, i) : array.get(pb50_0, i))
+                    h1 := h1 + (depth == 0 ? array.get(pb25_1, i) : array.get(pb50_1, i))
+                    h2 := h2 + (depth == 0 ? array.get(pb25_2, i) : array.get(pb50_2, i))
+                    h3 := h3 + (depth == 0 ? array.get(pb25_3, i) : array.get(pb50_3, i))
+                    h4 := h4 + (depth == 0 ? array.get(pb25_4, i) : array.get(pb50_4, i))
+                    h5 := h5 + (depth == 0 ? array.get(pb25_5, i) : array.get(pb50_5, i))
+    [nAll, nn, h0, h1, h2, h3, h4, h5]
+
+// live label, printed the moment price reaches the 25% (depth 0) or 50% (depth 1) pullback: the historical odds
+// of each level printing from HERE, over prior days of the same strategy.
+f_pbLabel(int s, int depth, float px, string tag, color c) =>
+    [nAll, nn, h0, h1, h2, h3, h4, h5] = f_pbSeg(s, depth, -1, na, na)
+    txt = tag + "  " + (depth == 0 ? "25%" : "50%") + " pullback reached  (sample " + str.tostring(nn) + " of " + str.tostring(nAll) + " setups)" +
+         "\nfrom here:  TP0 " + f_pctStr(h0, nn) + "   TP10 " + f_pctStr(h1, nn) + "   TP30 " + f_pctStr(h2, nn) + "   TP50 " + f_pctStr(h3, nn) +
+         "\n              SL75 " + f_pctStr(h4, nn) + "   SL100 " + f_pctStr(h5, nn)
+    label.new(bar_index, px, txt, xloc = xloc.bar_index, style = depth == 0 ? label.style_label_up : label.style_label_down, color = color.new(c, 12), textcolor = color.white, size = size.small)
 
 // ================================================================ ORB ENGINE (runs first)
 var float or_rH = na
@@ -560,15 +533,64 @@ if or_trk
         f_pushTrade(0, or_rng / or_rL * 100, orR_sl100, orR_sl75, orR_tp0, orR_tp10, orR_tp30, orR_tp50)
         or_trk := false
 
-// ---- ORB study B: armed -> 25%/50% pullback -> TP/SL, filed at the EOD flatten ----
-var PbTrk orPb = PbTrk.new()
+// ---- ORB study B: armed -> 25% / 50% pullback -> which levels print from there, filed at the EOD flatten ----
+var bool  orP_act  = false
+var int   orP_dir  = 0
+var float orP_rngP = na
+var float orP_p25  = na
+var float orP_p50  = na
+var bool  orP_r25  = false
+var bool  orP_r50  = false
+var orP_lv  = array.new_float(6, na)      // 0 TP0, 1 TP10, 2 TP30, 3 TP50, 4 SL75, 5 SL100
+var orP_h25 = array.new_bool(6, false)
+var orP_h50 = array.new_bool(6, false)
 if newSession
-    orPb.active := false
-if or_placed and not or_placed[1] and or_dir != 0 and not na(or_rng)
-    f_pbArm(orPb, 0, or_dir, or_rH, or_rL, or_rng)
-f_pbTrack(orPb)
-if flatten
-    f_pbClose(orPb)
+    orP_act := false
+if or_broke and not or_broke[1] and or_dir != 0 and not na(or_rng) and or_rL > 0
+    orP_act  := true
+    orP_dir  := or_dir
+    orP_rngP := or_rng / or_rL * 100
+    orP_p25  := or_rL + (or_dir == 1 ? 0.75 : 0.25) * or_rng
+    orP_p50  := or_rL + 0.50 * or_rng
+    orP_r25  := false
+    orP_r50  := false
+    array.set(orP_lv, 0, or_dir == 1 ? or_rH : or_rL)
+    array.set(orP_lv, 1, or_dir == 1 ? or_rH + 0.10*or_rng : or_rL - 0.10*or_rng)
+    array.set(orP_lv, 2, or_dir == 1 ? or_rH + 0.30*or_rng : or_rL - 0.30*or_rng)
+    array.set(orP_lv, 3, or_dir == 1 ? or_rH + 0.50*or_rng : or_rL - 0.50*or_rng)
+    array.set(orP_lv, 4, or_rL + (or_dir == 1 ? 0.25 : 0.75) * or_rng)
+    array.set(orP_lv, 5, or_dir == 1 ? or_rL : or_rH)
+    for k = 0 to 5
+        array.set(orP_h25, k, false)
+        array.set(orP_h50, k, false)
+if orP_act
+    up    = orP_dir == 1
+    new25 = false
+    new50 = false
+    if not orP_r25 and (up ? low <= orP_p25 : high >= orP_p25)
+        orP_r25 := true
+        new25    := true
+    if not orP_r50 and (up ? low <= orP_p50 : high >= orP_p50)
+        orP_r50 := true
+        new50    := true
+    // On the bar that REACHES the pullback the touch must be confirmed by the CLOSE: the last tick of that bar is
+    // beyond the level, so it traded there after the retrace low/high. Later bars count an ordinary wick touch.
+    for k = 0 to 5
+        lv   = array.get(orP_lv, k)
+        isTp = k <= 3
+        wick = isTp ? (up ? high >= lv : low <= lv) : (up ? low <= lv : high >= lv)
+        cls  = isTp ? (up ? close >= lv : close <= lv) : (up ? close <= lv : close >= lv)
+        if orP_r25 and (new25 ? cls : wick)
+            array.set(orP_h25, k, true)
+        if orP_r50 and (new50 ? cls : wick)
+            array.set(orP_h50, k, true)
+    if showProb and new25
+        f_pbLabel(0, 0, orP_p25, "ORB", color.orange)
+    if showProb and new50
+        f_pbLabel(0, 1, orP_p50, "ORB", color.orange)
+    if flatten
+        f_pbPush(0, orP_rngP, orP_r25, orP_r50, orP_h25, orP_h50)
+        orP_act := false
 
 // ================================================================ IB ENGINE
 var float ib_rH = na
@@ -591,6 +613,7 @@ var float ib_curTP = na
 var bool  ib_beDone = false
 var bool  ib_closed = false
 var bool  ib_oppBroke = false
+var bool  ib_missed = false      // the IB pullback was reached while an ORB trade held the seat -> skip IB today
 var float ibSz1 = na
 var float ibSz2 = na
 
@@ -613,6 +636,7 @@ if newSession
     ib_beDone := false
     ib_closed := false
     ib_oppBroke := false
+    ib_missed := false
     ibSz1 := na
     ibSz2 := na
 if ib_inR
@@ -644,15 +668,11 @@ if ib_rDone and not na(ib_rH) and ib_rH > ib_rL
         ibUPct = riskPct / ibU
         ibSz1 := useRiskSize ? f_size(ibBud, math.abs(ib_e1 - ib_zstop), ibUPct) : ibQty
         ibSz2 := useRiskSize ? f_size(ibBud, math.abs(ib_e2 - ib_zstop), ibUPct) : ibQty
-// INTERACTION: on IB formation, resolve ORB vs IB
-if ib_rDone and runIB and runORB
-    or_open = (or_f1 or or_f2) and not or_closed
-    if or_open and ib_dir != 0 and ib_dir == -or_dir
-        strategy.close("ORL",  comment = "ORB->IB flip")
-        strategy.close("ORL2", comment = "ORB->IB flip")
-        strategy.close("ORS",  comment = "ORB->IB flip")
-        strategy.close("ORS2", comment = "ORB->IB flip")
-        or_closed := true
+// INTERACTION: an OPEN ORB trade always keeps priority - the IB order is held back (either direction, so the two
+// can never stack risk or hedge each other). The IB is not cancelled, only delayed: the moment the ORB closes
+// (target, stop or the flip of its own exit) the IB limit goes in, provided price has NOT already traded through
+// the IB entry level while it was held. If it has, that pullback was missed and the IB is done for the day.
+orbLive = runORB and (or_f1 or or_f2) and not or_closed
 ib_useAdd = ibAvg and ib_shallow and not na(ib_e2)
 ib_brk = ibBreak == "Wick (touch)" ? ((ib_dir == 1 and high >= ib_rH) or (ib_dir == -1 and low <= ib_rL)) : ((ib_dir == 1 and close > ib_rH) or (ib_dir == -1 and close < ib_rL))
 if ib_dir != 0 and ib_brk
@@ -662,7 +682,11 @@ if ib_dir == 1 and low < ib_rL
 if ib_dir == -1 and high > ib_rH
     ib_oppBroke := true
 ibWin = inSess and ibDayOK and tod <= (ibCutH*60 + ibCutM) and not dailyHalt
-if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and ibWin and not flatten and (not noDbl or not ib_oppBroke) and ibSz1 >= 1
+// hold the IB while an ORB trade is live; if its entry level trades through during the hold, the IB is forfeited
+if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and orbLive and not na(ib_e1)
+    if (ib_dir == 1 and low <= ib_e1) or (ib_dir == -1 and high >= ib_e1)
+        ib_missed := true
+if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and ibWin and not flatten and (not noDbl or not ib_oppBroke) and ibSz1 >= 1 and not orbLive and not ib_missed
     if ib_dir == 1
         strategy.entry("IBL", strategy.long, qty = ibSz1, limit = ib_e1)
         if ib_useAdd and ibSz2 >= 1
@@ -764,15 +788,64 @@ if ib_trk
         f_pushTrade(1, ib_rng / ib_rL * 100, ibR_sl100, ibR_sl75, ibR_tp0, ibR_tp10, ibR_tp30, ibR_tp50)
         ib_trk := false
 
-// ---- IB study B: armed -> 25%/50% pullback -> TP/SL, filed at the EOD flatten ----
-var PbTrk ibPb = PbTrk.new()
+// ---- IB study B: armed -> 25% / 50% pullback -> which levels print from there, filed at the EOD flatten ----
+var bool  ibP_act  = false
+var int   ibP_dir  = 0
+var float ibP_rngP = na
+var float ibP_p25  = na
+var float ibP_p50  = na
+var bool  ibP_r25  = false
+var bool  ibP_r50  = false
+var ibP_lv  = array.new_float(6, na)      // 0 TP0, 1 TP10, 2 TP30, 3 TP50, 4 SL75, 5 SL100
+var ibP_h25 = array.new_bool(6, false)
+var ibP_h50 = array.new_bool(6, false)
 if newSession
-    ibPb.active := false
-if ib_placed and not ib_placed[1] and ib_dir != 0 and not na(ib_rng)
-    f_pbArm(ibPb, 1, ib_dir, ib_rH, ib_rL, ib_rng)
-f_pbTrack(ibPb)
-if flatten
-    f_pbClose(ibPb)
+    ibP_act := false
+if ib_broke and not ib_broke[1] and ib_dir != 0 and not na(ib_rng) and ib_rL > 0
+    ibP_act  := true
+    ibP_dir  := ib_dir
+    ibP_rngP := ib_rng / ib_rL * 100
+    ibP_p25  := ib_rL + (ib_dir == 1 ? 0.75 : 0.25) * ib_rng
+    ibP_p50  := ib_rL + 0.50 * ib_rng
+    ibP_r25  := false
+    ibP_r50  := false
+    array.set(ibP_lv, 0, ib_dir == 1 ? ib_rH : ib_rL)
+    array.set(ibP_lv, 1, ib_dir == 1 ? ib_rH + 0.10*ib_rng : ib_rL - 0.10*ib_rng)
+    array.set(ibP_lv, 2, ib_dir == 1 ? ib_rH + 0.30*ib_rng : ib_rL - 0.30*ib_rng)
+    array.set(ibP_lv, 3, ib_dir == 1 ? ib_rH + 0.50*ib_rng : ib_rL - 0.50*ib_rng)
+    array.set(ibP_lv, 4, ib_rL + (ib_dir == 1 ? 0.25 : 0.75) * ib_rng)
+    array.set(ibP_lv, 5, ib_dir == 1 ? ib_rL : ib_rH)
+    for k = 0 to 5
+        array.set(ibP_h25, k, false)
+        array.set(ibP_h50, k, false)
+if ibP_act
+    up    = ibP_dir == 1
+    new25 = false
+    new50 = false
+    if not ibP_r25 and (up ? low <= ibP_p25 : high >= ibP_p25)
+        ibP_r25 := true
+        new25    := true
+    if not ibP_r50 and (up ? low <= ibP_p50 : high >= ibP_p50)
+        ibP_r50 := true
+        new50    := true
+    // On the bar that REACHES the pullback the touch must be confirmed by the CLOSE: the last tick of that bar is
+    // beyond the level, so it traded there after the retrace low/high. Later bars count an ordinary wick touch.
+    for k = 0 to 5
+        lv   = array.get(ibP_lv, k)
+        isTp = k <= 3
+        wick = isTp ? (up ? high >= lv : low <= lv) : (up ? low <= lv : high >= lv)
+        cls  = isTp ? (up ? close >= lv : close <= lv) : (up ? close <= lv : close >= lv)
+        if ibP_r25 and (new25 ? cls : wick)
+            array.set(ibP_h25, k, true)
+        if ibP_r50 and (new50 ? cls : wick)
+            array.set(ibP_h50, k, true)
+    if showProb and new25
+        f_pbLabel(1, 0, ibP_p25, "IB", color.teal)
+    if showProb and new50
+        f_pbLabel(1, 1, ibP_p50, "IB", color.teal)
+    if flatten
+        f_pbPush(1, ibP_rngP, ibP_r25, ibP_r50, ibP_h25, ibP_h50)
+        ibP_act := false
 
 // ---------------------------------------------------------------- EOD flatten + daily max-loss halt
 if flatten
@@ -884,12 +957,12 @@ f_drawProb(int d, float rH, float rL, float rng, float rngPct, int s, bool auto,
     tp10  = d == 1 ? rH + 0.10*rng : rL - 0.10*rng
     tp30  = d == 1 ? rH + 0.30*rng : rL - 0.30*rng
     tp50  = d == 1 ? rH + 0.50*rng : rL - 0.50*rng
-    label.new(xp, sl100, f_probTxt2("SL100", a0, nn, v0, n25, w0, n50), xloc = xloc.bar_index, style = label.style_label_left, color = color.black, textcolor = color.white, size = size.small)
-    label.new(xp, sl75,  f_probTxt2("SL75",  a1, nn, v1, n25, w1, n50), xloc = xloc.bar_index, style = label.style_label_left, color = color.black, textcolor = color.white, size = size.small)
-    label.new(xp, tp0,   f_probTxt2("TP0",   a2, nn, v2, n25, w2, n50), xloc = xloc.bar_index, style = label.style_label_left, color = color.black, textcolor = color.white, size = size.small)
-    label.new(xp, tp10,  f_probTxt2("TP10",  a3, nn, v3, n25, w3, n50), xloc = xloc.bar_index, style = label.style_label_left, color = color.black, textcolor = color.white, size = size.small)
-    label.new(xp, tp30,  f_probTxt2("TP30",  a4, nn, v4, n25, w4, n50), xloc = xloc.bar_index, style = label.style_label_left, color = color.black, textcolor = color.white, size = size.small)
-    label.new(xp, tp50,  f_probTxt2("TP50",  a5, nn, v5, n25, w5, n50), xloc = xloc.bar_index, style = label.style_label_left, color = color.black, textcolor = color.white, size = size.small)
+    label.new(xp, sl100, f_probTxt2("SL100", a0, nn, v5, n25, w5, n50), xloc = xloc.bar_index, style = label.style_label_left, color = color.black, textcolor = color.white, size = size.small)
+    label.new(xp, sl75,  f_probTxt2("SL75",  a1, nn, v4, n25, w4, n50), xloc = xloc.bar_index, style = label.style_label_left, color = color.black, textcolor = color.white, size = size.small)
+    label.new(xp, tp0,   f_probTxt2("TP0",   a2, nn, v0, n25, w0, n50), xloc = xloc.bar_index, style = label.style_label_left, color = color.black, textcolor = color.white, size = size.small)
+    label.new(xp, tp10,  f_probTxt2("TP10",  a3, nn, v1, n25, w1, n50), xloc = xloc.bar_index, style = label.style_label_left, color = color.black, textcolor = color.white, size = size.small)
+    label.new(xp, tp30,  f_probTxt2("TP30",  a4, nn, v2, n25, w2, n50), xloc = xloc.bar_index, style = label.style_label_left, color = color.black, textcolor = color.white, size = size.small)
+    label.new(xp, tp50,  f_probTxt2("TP50",  a5, nn, v3, n25, w3, n50), xloc = xloc.bar_index, style = label.style_label_left, color = color.black, textcolor = color.white, size = size.small)
 
 if runORB and or_dir != 0 and or_broke and not or_broke[1] and not na(or_e1) and not na(or_zstop)
     orTP = f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
@@ -925,40 +998,42 @@ if showInfo and barstate.islast
     table.cell(info, 0, 6,  "Stop: shallow = range extreme | deeper = 75% line",   text_color = color.white,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 7,  "Target: ORB L +10% / S +30% ; IB +30% extension",    text_color = color.white,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 8,  "Avg-down: 2nd unit @ 50% (shallow setups)",           text_color = color.silver, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 9,  "ORB before 10:30; IB after; ORB closed if IB opp.",   text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 9,  "One at a time: IB waits for an open ORB to close",    text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 10, "Skip double-break days | Flatten 15:30 ET",           text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 11, "Toggle Run ORB/IB + weekdays to isolate results",     text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 12, "Prob table: TP reach % from fill AND from 25/50% PB", text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
 
 // ---------------------------------------------------------------- Probability table
-// Section 1 (size rows)      : of the trades that FILLED in that range-size bucket, how many reached each level
-//                              before the EOD flatten.
-// Section 2 (pullback rows)  : of the setups that RETRACED to the 25% (resp. 50%) fib, how many then reached each
-//                              level. N is the number that pulled back that far; the bracket in the row label is
-//                              that count as a share of all armed setups, i.e. how often the pullback happens at all.
-//                              Both sections count level TOUCHES, so a row can show a TP and an SL for the same day.
+// Columns: N = sample size, Reach = how often that starting point is even reached, then the odds of price trading
+// to each level from that starting point, before the 15:30 flatten.
+//   "From FILL" rows     : start = the entry fill, split by range size. Reach is n/a (the trade filled by definition).
+//   "From 25% PB" rows   : start = the moment price retraces to the 25% fib. Reach = share of armed setups that
+//                          pull back that far. This is the number to read when your limit at the 25% line fills.
+//   "From 50% PB" rows   : same from the 50% fib - a deeper pullback, a different (usually lower) set of odds, and
+//                          a smaller sample since price must pass the 25% line to get there.
 tPos  = tblPos == "Top right" ? position.top_right : tblPos == "Bottom left" ? position.bottom_left : tblPos == "Top left" ? position.top_left : position.bottom_right
 tRows = 8 + (pbSplit ? 12 : 4)
 
 var table probTbl = na
 
-f_tblRow(int row, string lbl, int nn, int a0, int a1, int a2, int a3, int a4, int a5, color txt) =>
-    table.cell(probTbl, 0, row, lbl,              text_color = txt,         bgcolor = color.black, text_size = size.normal, text_halign = text.align_left)
-    table.cell(probTbl, 1, row, str.tostring(nn), text_color = color.white, bgcolor = color.black, text_size = size.normal)
-    table.cell(probTbl, 2, row, f_pctStr(a0, nn), text_color = color.white, bgcolor = color.black, text_size = size.normal)
-    table.cell(probTbl, 3, row, f_pctStr(a1, nn), text_color = color.white, bgcolor = color.black, text_size = size.normal)
-    table.cell(probTbl, 4, row, f_pctStr(a2, nn), text_color = color.white, bgcolor = color.black, text_size = size.normal)
-    table.cell(probTbl, 5, row, f_pctStr(a3, nn), text_color = color.white, bgcolor = color.black, text_size = size.normal)
-    table.cell(probTbl, 6, row, f_pctStr(a4, nn), text_color = color.white, bgcolor = color.black, text_size = size.normal)
-    table.cell(probTbl, 7, row, f_pctStr(a5, nn), text_color = color.white, bgcolor = color.black, text_size = size.normal)
+f_tblRow(int row, string lbl, int nn, string reach, int t0, int t1, int t2, int t3, int q75, int q100, color txt) =>
+    table.cell(probTbl, 0, row, lbl,                text_color = txt,         bgcolor = color.black, text_size = size.normal, text_halign = text.align_left)
+    table.cell(probTbl, 1, row, str.tostring(nn),   text_color = color.white, bgcolor = color.black, text_size = size.normal)
+    table.cell(probTbl, 2, row, reach,              text_color = color.silver, bgcolor = color.black, text_size = size.normal)
+    table.cell(probTbl, 3, row, f_pctStr(t0,  nn),  text_color = color.lime,  bgcolor = color.black, text_size = size.normal)
+    table.cell(probTbl, 4, row, f_pctStr(t1,  nn),  text_color = color.lime,  bgcolor = color.black, text_size = size.normal)
+    table.cell(probTbl, 5, row, f_pctStr(t2,  nn),  text_color = color.lime,  bgcolor = color.black, text_size = size.normal)
+    table.cell(probTbl, 6, row, f_pctStr(t3,  nn),  text_color = color.lime,  bgcolor = color.black, text_size = size.normal)
+    table.cell(probTbl, 7, row, f_pctStr(q75, nn),  text_color = color.red,   bgcolor = color.black, text_size = size.normal)
+    table.cell(probTbl, 8, row, f_pctStr(q100, nn), text_color = color.red,   bgcolor = color.black, text_size = size.normal)
 
 if showTable and barstate.islast
     if na(probTbl)
-        probTbl := table.new(tPos, 8, tRows, bgcolor = color.black, border_color = color.new(color.white, 70), border_width = 1, frame_color = color.white, frame_width = 1)
-    hdr = array.from("From FILL - by range size", "N", "SL100", "SL75", "TP0", "TP10", "TP30", "TP50")
-    for c = 0 to 7
+        probTbl := table.new(tPos, 9, tRows, bgcolor = color.black, border_color = color.new(color.white, 70), border_width = 1, frame_color = color.white, frame_width = 1)
+    hdr = array.from("From FILL - by range size", "N", "Reach", "TP0", "TP10", "TP30", "TP50", "SL75", "SL100")
+    for c = 0 to 8
         table.cell(probTbl, c, 0, array.get(hdr, c), text_color = color.black, bgcolor = color.white, text_size = size.normal, text_halign = c == 0 ? text.align_left : text.align_center)
-    // ---- section 1: fill -> EOD, segmented by range size ----
+    // ---- section 1: from the fill, segmented by range size ----
     for s = 0 to 1
         rr = f_ranges(s)
         b1 = autoMode ? f_b1(rr) : (s == 0 ? orbB1 : ibB1)
@@ -969,10 +1044,10 @@ if showTable and barstate.islast
         for bkt = 0 to 2
             [nn, a0, a1, a2, a3, a4, a5] = f_seg(s, bkt, b1, b2)
             lbl = bkt == 0 ? nm + " S <" + s1 : bkt == 1 ? nm + " M " + s1 + "-" + s2 : nm + " L >=" + s2
-            f_tblRow(s * 3 + bkt + 1, lbl, nn, a0, a1, a2, a3, a4, a5, color.white)
-    // ---- section 2: conditioned on how deep the pullback went ----
-    hdr2 = array.from("From PULLBACK  [% of setups]", "N", "SL100", "SL75", "TP0", "TP10", "TP30", "TP50")
-    for c = 0 to 7
+            f_tblRow(s * 3 + bkt + 1, lbl, nn, "-", a2, a3, a4, a5, a1, a0, color.white)
+    // ---- section 2: from the 25% / 50% pullback ----
+    hdr2 = array.from("From PULLBACK", "N", "Reach", "TP0", "TP10", "TP30", "TP50", "SL75", "SL100")
+    for c = 0 to 8
         table.cell(probTbl, c, 7, array.get(hdr2, c), text_color = color.black, bgcolor = color.new(color.aqua, 20), text_size = size.normal, text_halign = c == 0 ? text.align_left : text.align_center)
     for s = 0 to 1
         rr2 = f_ranges(s)
@@ -982,15 +1057,13 @@ if showTable and barstate.islast
         if pbSplit
             for bkt = 0 to 2
                 for d = 0 to 1
-                    [nAll, nn, a0, a1, a2, a3, a4, a5] = f_pbSeg(s, d, bkt, c1, c2)
+                    [nAll, nn, h0, h1, h2, h3, h4, h5] = f_pbSeg(s, d, bkt, c1, c2)
                     szn = bkt == 0 ? "S" : bkt == 1 ? "M" : "L"
-                    lbl = nm2 + " " + szn + " after " + (d == 0 ? "25%" : "50%") + " PB  [" + f_pctStr(nn, nAll) + " of " + str.tostring(nAll) + "]"
-                    f_tblRow(8 + s * 6 + bkt * 2 + d, lbl, nn, a0, a1, a2, a3, a4, a5, d == 0 ? color.aqua : color.yellow)
+                    f_tblRow(8 + s * 6 + bkt * 2 + d, nm2 + " " + szn + " from " + (d == 0 ? "25%" : "50%") + " PB", nn, f_pctStr(nn, nAll), h0, h1, h2, h3, h4, h5, d == 0 ? color.aqua : color.yellow)
         else
             for d = 0 to 1
-                [nAll, nn, a0, a1, a2, a3, a4, a5] = f_pbSeg(s, d, -1, c1, c2)
-                lbl = nm2 + " after " + (d == 0 ? "25%" : "50%") + " PB  [" + f_pctStr(nn, nAll) + " of " + str.tostring(nAll) + "]"
-                f_tblRow(8 + s * 2 + d, lbl, nn, a0, a1, a2, a3, a4, a5, d == 0 ? color.aqua : color.yellow)
+                [nAll, nn, h0, h1, h2, h3, h4, h5] = f_pbSeg(s, d, -1, c1, c2)
+                f_tblRow(8 + s * 2 + d, nm2 + " from " + (d == 0 ? "25%" : "50%") + " pullback", nn, f_pctStr(nn, nAll), h0, h1, h2, h3, h4, h5, d == 0 ? color.aqua : color.yellow)
 
 // ---------------------------------------------------------------- Visuals
 plot(runORB and not na(or_rH) ? or_rH : na, "ORB High", color = color.new(color.orange, 0),  style = plot.style_linebr)
