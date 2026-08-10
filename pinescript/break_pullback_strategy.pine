@@ -131,6 +131,8 @@ showFibs  = input.bool(true, "Show fib retracement lines (25/50/75)", group = gr
 showInfo  = input.bool(true, "Show strategy rules panel", group = grpRR)
 ptVal     = input.float(2.0, "$ per point per contract", group = grpRR, tooltip = "MNQ=2, NQ=20, MES=5, ES=50.")
 rrBars    = input.int(24, "R/R box width (bars)", 1, 300, group = grpRR)
+keepDraws = input.int(2, "Keep drawings for the last N setups", 1, 100, group = grpRR,
+     tooltip = "Older R/R boxes, fib lines and labels are deleted instead of stacking up over the whole history. 2 keeps the chart to roughly the current day. Raise it if you are reviewing a stretch of past setups.")
 
 // ---------------------------------------------------------------- Historical probabilities
 grpP      = "Historical probabilities"
@@ -879,60 +881,68 @@ if brkAlerts and runIB and ib_dir != 0 and ib_broke and not ib_broke[1]
          "  | target " + str.tostring(math.round_to_mintick(ibTPa)), alert.freq_once_per_bar)
 
 // ---------------------------------------------------------------- Risk/Reward + fib tool
-// Drawn once per setup at the break, only when the setup is actually tradeable today (strategy on, weekday
-// allowed, ORB range big enough) - a filtered-out break draws nothing. Boxes PERSIST; border/line colour is
-// orange = ORB, teal = IB. The label carries the $ risk and $ reward for the contracts you are trading, the
-// per-1-contract numbers, and the whole-setup total when the average-down unit is armed.
-// q = contracts on THIS unit. ent2/q2 describe the average-down unit when there is one (na/0 otherwise) so the
-// first box can also print the whole setup's risk and reward for the contracts actually being traded.
-f_drawRR(int d, float ent, float zstop, float ptp, float q, color sigCol, string tag, int xoff, float ent2, float q2) =>
-    x1 = bar_index + xoff
-    x2 = x1 + rrBars
+// Drawn at the moment the ENTRY ORDER IS ACTUALLY PLACED (or_placed / ib_placed), so a break that any filter
+// rejects - wrong weekday, range too small, past the cutoff, IB already formed, double-break day, daily loss halt,
+// sizing under one contract, or an IB still waiting behind an open ORB - draws nothing at all.
+// Coordinates are bar TIME, not bar index, so a box stays welded to its bars when you scroll or load more history.
+// Only the last "Keep drawings for" setups are kept; older ones are deleted rather than left to pile up.
+var array<box>   dBox = array.new<box>()
+var array<line>  dLin = array.new<line>()
+var array<label> dLab = array.new<label>()
+msBar = timeframe.in_seconds(timeframe.period) * 1000
+
+f_trimDraws() =>
+    while array.size(dBox) > keepDraws * 2
+        box.delete(array.shift(dBox))
+    while array.size(dLin) > keepDraws * 3
+        line.delete(array.shift(dLin))
+    while array.size(dLab) > keepDraws
+        label.delete(array.shift(dLab))
+
+// q = contracts on this entry. ent2/q2 describe the average-down unit when one is armed - it gets no box of its
+// own, its numbers ride along in the label so the chart stays readable.
+f_drawRR(int d, float ent, float zstop, float ptp, float q, color sigCol, string tag, float ent2, float q2) =>
+    x1 = time
+    x2 = time + rrBars * msBar
     riskUsd = math.abs(ent - zstop) * ptVal * q
     rewUsd  = math.abs(ptp - ent) * ptVal * q
     risk1   = math.abs(ent - zstop) * ptVal
     rew1    = math.abs(ptp - ent) * ptVal
     rrr = riskUsd > 0 ? rewUsd / riskUsd : na
-    rewTop = d == 1 ? ptp : ent
-    rewBot = d == 1 ? ent : ptp
-    rskTop = d == 1 ? ent : zstop
-    rskBot = d == 1 ? zstop : ent
-    box.new(x1, rewTop, x2, rewBot, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.green, 82))
-    box.new(x1, rskTop, x2, rskBot, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.red, 82))
+    array.push(dBox, box.new(x1, d == 1 ? ptp : ent, x2, d == 1 ? ent : ptp, xloc = xloc.bar_time, border_color = sigCol, border_width = 1, bgcolor = color.new(color.green, 82)))
+    array.push(dBox, box.new(x1, d == 1 ? ent : zstop, x2, d == 1 ? zstop : ent, xloc = xloc.bar_time, border_color = sigCol, border_width = 1, bgcolor = color.new(color.red, 82)))
     txt = tag + "  " + str.tostring(q, "#.#") + " contract" + (q == 1 ? "" : "s") +
          "  Risk $" + str.tostring(riskUsd, "#") + " | Reward $" + str.tostring(rewUsd, "#") + " (" + str.tostring(rrr, "#.##") + "R)" +
          "\n1 contract: Risk $" + str.tostring(risk1, "#") + " | Reward $" + str.tostring(rew1, "#")
     if not na(ent2) and q2 > 0
-        totQ = q + q2
         totR = riskUsd + math.abs(ent2 - zstop) * ptVal * q2
         totW = rewUsd  + math.abs(ptp - ent2)  * ptVal * q2
-        txt := txt + "\nSetup total " + str.tostring(totQ, "#.#") + " contracts: Risk $" + str.tostring(totR, "#") +
-             " | Reward $" + str.tostring(totW, "#") + " (" + str.tostring(totR > 0 ? totW / totR : na, "#.##") + "R)"
-    label.new(x2, ent, txt, xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.gray, 15), textcolor = color.white, size = size.small)
+        txt := txt + "\n+ avg-down " + str.tostring(q2, "#.#") + " @ " + str.tostring(math.round_to_mintick(ent2)) +
+             "  ->  setup total Risk $" + str.tostring(totR, "#") + " | Reward $" + str.tostring(totW, "#") +
+             " (" + str.tostring(totR > 0 ? totW / totR : na, "#.##") + "R)"
+    array.push(dLab, label.new(x2, ent, txt, xloc = xloc.bar_time, style = label.style_label_left, color = color.new(color.gray, 15), textcolor = color.white, size = size.small))
 
 f_drawFibs(float rL, float rg, color sigCol) =>
-    x1 = bar_index
-    x2 = bar_index + rrBars
-    line.new(x1, rL + 0.25*rg, x2, rL + 0.25*rg, xloc = xloc.bar_index, color = color.new(sigCol, 35), style = line.style_dotted, width = 1)
-    line.new(x1, rL + 0.50*rg, x2, rL + 0.50*rg, xloc = xloc.bar_index, color = color.new(sigCol, 35), style = line.style_dotted, width = 1)
-    line.new(x1, rL + 0.75*rg, x2, rL + 0.75*rg, xloc = xloc.bar_index, color = color.new(sigCol, 35), style = line.style_dotted, width = 1)
+    x1 = time
+    x2 = time + rrBars * msBar
+    for i = 1 to 3
+        y = rL + i * 0.25 * rg
+        array.push(dLin, line.new(x1, y, x2, y, xloc = xloc.bar_time, color = color.new(sigCol, 35), style = line.style_dotted, width = 1))
 
-if runORB and orbDayOK and orbSizeOK and or_dir != 0 and or_broke and not or_broke[1] and not na(or_e1) and not na(or_zstop)
+if runORB and or_placed and not or_placed[1] and not na(or_e1) and not na(or_zstop)
     orTP = f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
     if showFibs
         f_drawFibs(or_rL, or_rng, color.new(color.orange, 0))
     if showRR
-        f_drawRR(or_dir, or_e1, or_zstop, orTP, orbSz1, color.new(color.orange, 0), "ORB", 0, (or_useAdd and orbSz2 >= 1) ? or_e2 : na, or_useAdd ? orbSz2 : 0)
-        if or_useAdd
-            f_drawRR(or_dir, or_e2, or_zstop, orTP, orbSz2, color.new(color.orange, 0), "ORB avg #2", rrBars, na, 0)
-if runIB and ibDayOK and ib_dir != 0 and ib_broke and not ib_broke[1] and not na(ib_e1) and not na(ib_zstop)
+        f_drawRR(or_dir, or_e1, or_zstop, orTP, orbSz1, color.new(color.orange, 0), "ORB", (or_useAdd and orbSz2 >= 1) ? or_e2 : na, or_useAdd ? orbSz2 : 0)
+    f_trimDraws()
+if runIB and ib_placed and not ib_placed[1] and not na(ib_e1) and not na(ib_zstop)
     ibTP = f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
     if showFibs
         f_drawFibs(ib_rL, ib_rng, color.new(color.teal, 0))
     if showRR
-        f_drawRR(ib_dir, ib_e1, ib_zstop, ibTP, ibSz1, color.new(color.teal, 0), "IB", 0, (ib_useAdd and ibSz2 >= 1) ? ib_e2 : na, ib_useAdd ? ibSz2 : 0)
-        if ib_useAdd
-            f_drawRR(ib_dir, ib_e2, ib_zstop, ibTP, ibSz2, color.new(color.teal, 0), "IB avg #2", rrBars, na, 0)
+        f_drawRR(ib_dir, ib_e1, ib_zstop, ibTP, ibSz1, color.new(color.teal, 0), "IB", (ib_useAdd and ibSz2 >= 1) ? ib_e2 : na, ib_useAdd ? ibSz2 : 0)
+    f_trimDraws()
 
 // ---------------------------------------------------------------- Strategy rules panel (top-right)
 var table info = na
