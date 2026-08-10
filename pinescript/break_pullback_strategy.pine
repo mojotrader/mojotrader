@@ -9,6 +9,9 @@
 //   - When the ORB closes (target or stop), the IB limit goes in - unless price already traded through the IB
 //     entry level while the IB was held, in which case that pullback was missed and the IB is skipped for the day.
 //   - Net effect: both setups can play on the same day, but strictly one at a time.
+//   - OPTIONAL (checkbox, off by default): "Carry an unfilled ORB past the IB". Normally an ORB limit that never
+//     filled is cancelled when the IB forms. Armed, it keeps resting - so a pullback that only arrives after 10:30
+//     is still taken - and it gives way the instant the IB breaks its range and arms a setup of its own.
 //
 // PER SETUP (each range, independently configurable below):
 //   1) At the range close: bias = low-before-high (long) / high-before-low (short) AND the range close in the
@@ -40,6 +43,8 @@ strategy("Break-then-Pullback (ORB + IB)", overlay = true, pyramiding = 6, max_b
 gStrat    = "Strategies (toggle to track each separately)"
 runORB    = input.bool(true, "Run ORB strategy", group = gStrat, tooltip = "Turn OFF to backtest the IB strategy alone in the Strategy Tester.")
 runIB     = input.bool(true, "Run IB strategy",  group = gStrat, tooltip = "Turn OFF to backtest the ORB strategy alone.")
+orbCarry  = input.bool(false, "Carry an unfilled ORB past the IB (test idea)", group = gStrat,
+     tooltip = "OFF: an ORB limit that has not filled by the time the IB forms is cancelled - the standard rule. ON: that unfilled limit keeps resting, so a pullback that finally arrives after 10:30 still gets taken. It gives way the moment the IB breaks its own range and arms a setup, and otherwise expires at the ORB cutoff or the EOD flatten. Only ever applies to a setup that broke and armed before the IB formed; it does not let the ORB arm late.")
 
 // ---------------------------------------------------------------- Trade-day filters (see which weekday hurts each)
 gDayO     = "Trade days - ORB"
@@ -473,8 +478,12 @@ if (or_f1 or or_f2) and not or_closed and not na(or_curStop)
         or_closed := true
     if or_dir == -1 and (high >= or_curStop or low <= or_curTP)
         or_closed := true
-// cancel resting ORB entries once the window closes unfilled, or done/flat/off/double-break
-if or_closed or flatten or not runORB or (noDbl and or_oppBroke) or ((not orbWin) and not (or_f1 or or_f2))
+// cancel resting ORB entries once the window closes unfilled, or done/flat/off/double-break.
+// CARRY: with the option armed, an unfilled ORB limit survives the IB forming. It still dies at the ORB cutoff,
+// on a double-break, on the daily halt or at the flatten - and it gives way as soon as the IB arms its own setup,
+// which is handled after the IB engine below (ib_broke is not known this early in the bar).
+orbHold = orbCarry and or_placed and not (or_f1 or or_f2) and inSess and orbDayOK and not dailyHalt and tod <= (orbCutH*60 + orbCutM)
+if or_closed or flatten or not runORB or (noDbl and or_oppBroke) or ((not orbWin) and not (or_f1 or or_f2) and not orbHold)
     strategy.cancel("ORL")
     strategy.cancel("ORL2")
     strategy.cancel("ORS")
@@ -730,6 +739,15 @@ if ib_closed or flatten or not runIB or (noDbl and ib_oppBroke) or ((not ibWin) 
     strategy.cancel("IBL2")
     strategy.cancel("IBS")
     strategy.cancel("IBS2")
+
+// CARRY hand-over: the moment the IB breaks its range and has a valid setup, a carried ORB limit that is still
+// unfilled is dropped - the IB gets the seat. A carried ORB that HAS filled keeps it (see orbLive above).
+if runORB and orbCarry and not or_closed and not (or_f1 or or_f2) and ib_dir != 0 and ib_broke
+    strategy.cancel("ORL")
+    strategy.cancel("ORL2")
+    strategy.cancel("ORS")
+    strategy.cancel("ORS2")
+    or_closed := true
 
 // ---- IB study A: from the fill to EOD, did price touch each level? ----
 var bool  ib_trk    = false
@@ -999,7 +1017,7 @@ if ibGrow
 // ---------------------------------------------------------------- Strategy rules panel (top-right)
 var table info = na
 if showInfo and barstate.islast
-    info := table.new(position.top_right, 1, 13, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
+    info := table.new(position.top_right, 1, 14, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
     table.cell(info, 0, 0,  "BREAK-THEN-PULLBACK  (ORB + IB)",                    text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 1,  "Ranges: ORB 09:30-09:45 | IB 09:30-10:30 (ET)",      text_color = color.white,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 2,  "Direction: low-first = LONG, high-first = SHORT",     text_color = color.white,  text_size = size.small, text_halign = text.align_left)
@@ -1010,6 +1028,7 @@ if showInfo and barstate.islast
     table.cell(info, 0, 7,  "Target: ORB L +10% / S +30% ; IB +30% extension",    text_color = color.white,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 8,  "Avg-down: 2nd unit @ 50% (shallow setups)",           text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 9,  "One at a time: IB waits for an open ORB to close",    text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 13, orbCarry ? "ORB carry ON: unfilled ORB rests past 10:30" : "ORB carry off (unfilled ORB dies at 10:30)", text_color = orbCarry ? color.orange : color.gray, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 10, "Skip double-break days | Flatten 15:30 ET",           text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 11, "Toggle Run ORB/IB + weekdays to isolate results",     text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 12, "Odds live in the table; > marks where price is now",  text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
