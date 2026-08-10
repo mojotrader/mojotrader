@@ -130,8 +130,10 @@ showRR    = input.bool(true, "Show risk/reward box at the break", group = grpRR)
 showFibs  = input.bool(true, "Show fib retracement lines (25/50/75)", group = grpRR, tooltip = "Dotted lines only, no text: the 25/50/75 levels of the range. Which one is the entry is shown by the R/R box.")
 showInfo  = input.bool(true, "Show strategy rules panel", group = grpRR)
 ptVal     = input.float(2.0, "$ per point per contract", group = grpRR, tooltip = "MNQ=2, NQ=20, MES=5, ES=50.")
-keepDraws = input.int(2, "Keep drawings for the last N setups", 1, 100, group = grpRR,
-     tooltip = "Older R/R boxes, fib lines and labels are deleted instead of stacking up over the whole history. 2 keeps the chart to roughly the current day. Raise it if you are reviewing a stretch of past setups.")
+keepBox   = input.int(0, "Keep R/R boxes for the last N setups (0 = all)", 0, 250, group = grpRR,
+     tooltip = "0 keeps every past setup's boxes and fib lines, so you can scroll back and review the risk/reward of each historical setup. Pine caps a script at 500 boxes and 500 lines, so in practice that is the most recent ~250 setups (~166 if the fib lines are on). Set a small number to keep only the newest setups on the chart.")
+keepLab   = input.int(3, "Keep R/R labels for the last N setups (0 = all)", 0, 250, group = grpRR,
+     tooltip = "The boxes are cheap to look at; the text labels are what makes a chart unreadable when they stack up. This keeps the $ risk/reward label on the newest few setups only, while the boxes stay for the whole history. 0 keeps every label.")
 
 // ---------------------------------------------------------------- Historical probabilities
 grpP      = "Historical probabilities"
@@ -886,18 +888,22 @@ if brkAlerts and runIB and ib_dir != 0 and ib_broke and not ib_broke[1]
 // ANCHORING: y is price and x is BAR INDEX, both fixed at creation. The box is one bar wide to begin with and its
 // right edge is extended bar by bar while the setup is live, so it always covers real bars - it never projects
 // into empty space past the last bar and never stretches across a session gap. Nothing moves when you pan or zoom.
-// Only the last "Keep drawings for" setups survive; older boxes, lines and labels are deleted.
+// HISTORY: every valid setup keeps its boxes and fib lines, so you can scroll back and read the risk/reward of
+// any past setup at the price levels it actually had. Only the text labels are capped (newest few by default),
+// since those are what turn a long history into noise. Both limits are inputs; 0 on either means keep everything.
 var array<box>   dBox = array.new<box>()
 var array<line>  dLin = array.new<line>()
 var array<label> dLab = array.new<label>()
 
 f_trimDraws() =>
-    while array.size(dBox) > keepDraws * 2
-        box.delete(array.shift(dBox))
-    while array.size(dLin) > keepDraws * 3
-        line.delete(array.shift(dLin))
-    while array.size(dLab) > keepDraws
-        label.delete(array.shift(dLab))
+    if keepBox > 0
+        while array.size(dBox) > keepBox * 2
+            box.delete(array.shift(dBox))
+        while array.size(dLin) > keepBox * 3
+            line.delete(array.shift(dLin))
+    if keepLab > 0
+        while array.size(dLab) > keepLab
+            label.delete(array.shift(dLab))
 
 // q = contracts on this entry. ent2/q2 describe the average-down unit when one is armed - it gets no box of its
 // own, its numbers ride along in the label so the chart stays readable.
