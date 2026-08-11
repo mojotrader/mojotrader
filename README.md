@@ -32,22 +32,26 @@ it, and only then is it labelled a sweep.
 
 `Sweep confirmed by` chooses which close counts:
 - `15m candle must close back inside` (default) — the strict reading. The setup therefore
-  triggers on the first 1m bar **after** that candle closes, the FVG and MSS having already
-  formed inside it.
+  triggers on the first 1m bar **after** that candle closes, the FVG having already formed
+  inside it.
 - `Any 1m close back inside (live)` — the first 1m close back inside confirms it. Triggers
   earlier, but the 15m close can still go against it.
 
 With `Only look for setups in the 4h direction` on (default), only the sweep matching the 4h
 bias starts a watch.
 
-**3) 1m gives the confirmation, inside that spiking candle**
-- A **Fair Value Gap** in the trade direction — bearish `low[2] > high`, bullish `high[2] < low`.
-- A **Market Structure Shift** — the first 1m **close** below the last swing low (short)
-  or above the last swing high (long). Swings come from a pivot of configurable
-  left/right bars (`1/1` = the classic 3-bar swing).
-- `Required order` can force *FVG then MSS* or *MSS then FVG*; the default accepts either.
-- `Allow 1m confirmation N bars after the sweep candle closes` defaults to `0`, i.e.
-  both must land **inside** the spiking 15m candle. Raise it to let confirmation spill over.
+**3) 1m gives the confirmation**
+Once the sweep candle has closed, a **Fair Value Gap** in the trade direction from inside it is
+enough — bearish `low[2] > high`, bullish `high[2] < low`.
+
+A **Market Structure Shift** (the first 1m **close** below the last swing low for a short, above
+the last swing high for a long) is tracked and drawn as well, but only gates the signal when
+`Also require a market structure shift` is switched on. Swings come from a pivot of configurable
+left/right bars (`1/1` = the classic 3-bar swing), and `Required order` — *FVG then MSS* or
+*MSS then FVG* — applies only when the MSS is required.
+
+`Allow 1m confirmation N bars after the sweep candle closes` defaults to `0`, i.e. the FVG must
+land **inside** the spiking 15m candle. Raise it to let the confirmation form after the close.
 
 Nothing repaints: the trigger bar is fixed the moment it happens, and the 4h bias only ever
 reads fully-closed 4h candles.
@@ -122,22 +126,24 @@ The sweep, the confirmation, the entry and the exit all live inside that one 4h 
 entries stop at 14:00 and everything is flattened at 14:00. One trade per day by default.
 
 **Setup** — identical to the indicator: a 15m candle that takes the previous 15m high/low in the
-bias direction **and closes back inside it**, then a 1m FVG plus a 1m market structure shift
-inside that spiking candle. A poke that closes beyond the level is a break, not a sweep, and is
-skipped. The funnel counts pokes and confirmed sweeps separately, so the gap between the two
-columns shows how often that happens.
+bias direction **and closes back inside it**, then a 1m FVG from inside that candle. A poke that
+closes beyond the level is a break, not a sweep, and is skipped. The market structure shift is
+optional and off by default (`Also require a market structure shift`). The funnel counts pokes
+and confirmed sweeps in separate columns, so the gap between them shows how often a poke closed
+beyond the level instead of rejecting.
 
 **Entry / target / stop**
 - Entry: market on the trigger bar, or a limit inside the 1m FVG (near edge / 50% / far edge).
-- Target: **HOD** for longs, **LOD** for shorts.
+- Target: the **far side of the swept 15m candle** — its **high** for a long, its **low** for a
+  short. So a long sweeps candle 1's low and aims at candle 1's high.
 - Stop: the **same distance** on the other side of the entry — a forced **1:1**. The stop is
   mirrored around the *actual fill*, not the trigger price, so the 1:1 is exact.
 
-Because risk is whatever the distance to the day's extreme happens to be, the point stop can be
-large. Three controls exist for that: `HOD / LOD measured from` (trading day 18:00 / RTH 09:30 /
-the 10:00 4h open — the tighter anchors keep risk smaller), `Minimum` and `Maximum stop distance`,
-and `% of account risked` sizing (fixed capital, no compounding). A setup whose stop is too far to
-afford one contract is skipped rather than taken undersized.
+`Target` can be switched to **HOD / LOD** instead, with `HOD / LOD measured from` choosing the
+anchor (trading day 18:00 / RTH 09:30 / the 10:00 4h open). That target sits much further away
+and, because the stop mirrors it, forces a correspondingly larger stop — `Minimum` and `Maximum
+stop distance` and `% of account risked` sizing (fixed capital, no compounding) are the guards.
+A setup whose stop is too far to afford one contract is skipped rather than taken undersized.
 
-`Let the target follow a new HOD / LOD` is off by default. Turning it on extends the target as the
-day extends while the stop stays put, so the trade is no longer 1:1.
+`Let the target follow a new HOD / LOD` applies only to the HOD/LOD target and is off by default;
+a candle extreme is a fixed level and never trails.

@@ -17,16 +17,15 @@
 //      The candle is aggregated from the 1m bars, so the poke is seen as it happens, but nothing
 //      counts as a sweep until the close confirms it. A candle that pokes and closes BEYOND the
 //      level is a break, not a sweep, and is discarded.
-//   3) CONFIRMATION — inside that spiking 15m candle, on the 1m: a Fair Value Gap in the trade
-//      direction plus a Market Structure Shift (first 1m close through the last swing low/high).
-//      Since the sweep is only confirmed by the 15m close, the trade triggers on the first 1m bar
-//      after that close, the FVG and MSS having already formed inside the candle.
+//   3) CONFIRMATION — once that candle has closed, drop to the 1m: a Fair Value Gap in the trade
+//      direction is enough to trigger. The trade therefore fires on the first 1m bar after the 15m
+//      close, the FVG having formed inside the candle. A Market Structure Shift is tracked and
+//      drawn as well, but only gates the entry if "Also require a market structure shift" is on.
 //
 //   ENTRY : market on the trigger bar (or a limit inside the 1m FVG).
-//   TARGET: HOD for longs, LOD for shorts.
-//   STOP  : the SAME distance on the other side of the fill — a forced 1:1. Risk is therefore set by
-//           how far the day's extreme is, so the point stop can be large. Guard it with the min/max
-//           stop inputs and size with % risk rather than fixed contracts.
+//   TARGET: the FAR side of the swept 15m candle — its HIGH for a long, its LOW for a short.
+//           (HOD / LOD is selectable instead, but sits far away and forces a much bigger stop.)
+//   STOP  : the SAME distance on the other side of the fill — a forced 1:1.
 //   Entries stop at 14:00 ET and everything is flattened at 14:00 ET — the end of that 4h candle.
 //
 //   THIS SETUP IS RARE. The bottom-right panel shows a day-by-day funnel (days -> bias -> sweep ->
@@ -71,16 +70,22 @@ graceBars = input.int(0, "Allow confirmation N bars after the sweep candle close
      tooltip = "0 = the FVG and the MSS must both land inside the spiking 15m candle. Raising this is the single biggest loosener if the setup never completes.")
 
 gL      = "3) 1m confirmation"
+reqMss  = input.bool(false, "Also require a market structure shift", group = gL,
+     tooltip = "Off (default): once the sweep is confirmed, a 1m FVG in the trade direction is enough to trigger. On: the FVG must be joined by a 1m close through the last swing low/high. The MSS is tracked and drawn either way — this only decides whether it gates the entry.")
 swLeft  = input.int(1, "Swing pivot — left bars",  1, 10, group = gL)
 swRight = input.int(1, "Swing pivot — right bars", 1, 10, group = gL)
 mssLook = input.int(20, "Broken swing must be at most N bars old", 1, 200, group = gL)
 swInWin = input.bool(false, "Broken swing must have formed inside the sweep candle", group = gL)
-ordMode = input.string("Any order", "Required order", options = ["Any order", "FVG then MSS", "MSS then FVG"], group = gL)
+ordMode = input.string("Any order", "Required order", options = ["Any order", "FVG then MSS", "MSS then FVG"], group = gL,
+     tooltip = "Only applies when the market structure shift is required.")
 
 gE       = "Entry / exit"
 entMode  = input.string("Market at trigger", "Entry", options = ["Market at trigger", "Limit in the 1m FVG"], group = gE)
 fvgAt    = input.string("50%", "  FVG limit level", options = ["Near edge", "50%", "Far edge"], group = gE)
-hlMode   = input.string("Trading day (18:00 ET start)", "HOD / LOD measured from",
+tpMode   = input.string("Swept 15m candle extreme", "Target",
+     options = ["Swept 15m candle extreme", "HOD / LOD"], group = gE,
+     tooltip = "Swept 15m candle extreme (default): the far side of the candle whose level was swept — its HIGH for a long, its LOW for a short. HOD / LOD: the day's extreme, which sits much further away and so forces a much larger 1:1 stop.")
+hlMode   = input.string("Trading day (18:00 ET start)", "  HOD / LOD measured from",
      options = ["Trading day (18:00 ET start)", "RTH (09:30 ET start)", "The 4h candle open"], group = gE,
      tooltip = "Which high/low the target uses. The trading-day extreme is the literal HOD/LOD but can sit far away, which forces a large 1:1 stop; the tighter anchors keep risk smaller.")
 trailTgt = input.bool(false, "Let the target follow a new HOD / LOD", group = gE,
@@ -235,7 +240,8 @@ var bool  havePrev = false
 // Sweep lifecycle: a POKE through the previous extreme starts a watch; only a CLOSE back inside
 // promotes it to a SWEEP. A candle that pokes and closes beyond the level is a break, not a sweep.
 var int   swpDir     = 0     // -1 = poked the previous 15m high (short), 1 = poked the previous low (long)
-var float swpLvl     = na
+var float swpLvl     = na    // the level that was swept
+var float swpOpp     = na    // the FAR side of that same candle — the target
 var int   swpBar     = na
 var int   swpState   = 0     // 0 = poked, awaiting the close | 1 = confirmed sweep | -1 = failed
 var int   collectEnd = na    // last bar_index that may add an FVG / MSS
@@ -283,6 +289,7 @@ if not busy and havePrev and inWindow and not flatten and dayBias != 0 and nTrad
     if canShort or canLong
         swpDir     := canShort ? -1 : 1
         swpLvl     := canShort ? prevH : prevL
+        swpOpp     := canShort ? prevL : prevH   // long sweeps the low -> target that candle's high
         swpBar     := bar_index
         swpState   := 0
         collectEnd := na
@@ -385,12 +392,12 @@ var bool   pending  = false
 var string lastSkip = "—"
 
 bool trigNow = false
-if triggerOk and not fired and fvgOk and mssOk and inWindow and not flatten and nTrades < maxTrades and strategy.position_size == 0 and not pending
-    orderOk = ordMode == "Any order" ? true : ordMode == "FVG then MSS" ? fvgBar <= mssBar : mssBar <= fvgBar
+if triggerOk and not fired and fvgOk and (not reqMss or mssOk) and inWindow and not flatten and nTrades < maxTrades and strategy.position_size == 0 and not pending
+    orderOk = not reqMss or (ordMode == "Any order" ? true : ordMode == "FVG then MSS" ? fvgBar <= mssBar : mssBar <= fvgBar)
     backOk  = not reqBack or (swpDir == -1 ? close < swpLvl : close > swpLvl)
     if orderOk and backOk
         // target first — the stop mirrors it, so the target decides whether the trade is viable
-        float tgt = swpDir == 1 ? dHigh : dLow
+        float tgt = tpMode == "HOD / LOD" ? (swpDir == 1 ? dHigh : dLow) : swpOpp
         float ent = entMode == "Limit in the 1m FVG" ? f_fvgLvl(swpDir) : close
         float rsk = swpDir == 1 ? tgt - ent : ent - tgt
         float q   = useRiskSize ? f_size(acctSize * riskPct / 100.0, rsk) : qtyFixed
@@ -432,7 +439,8 @@ if inPos and not exitsSet
         exitsSet := true
         pending  := false
 if inPos and exitsSet
-    tgt = trailTgt ? (tDir == 1 ? math.max(tpLvl, dHigh) : math.min(tpLvl, dLow)) : tpLvl
+    // trailing only makes sense against the day's extreme; a candle extreme is a fixed level
+    tgt = trailTgt and tpMode == "HOD / LOD" ? (tDir == 1 ? math.max(tpLvl, dHigh) : math.min(tpLvl, dLow)) : tpLvl
     strategy.exit("MTFLx", from_entry = "MTFL", stop = slLvl, limit = tgt)
     strategy.exit("MTFSx", from_entry = "MTFS", stop = slLvl, limit = tgt)
 if not inPos and inPos[1]
@@ -512,6 +520,13 @@ if showSet and confirmedNow
     label.new(swpBar, swpLvl, swpDir == -1 ? "sweep ▲ prev " + mtfTf + " H" : "sweep ▼ prev " + mtfTf + " L",
          xloc = xloc.bar_index, style = swpDir == -1 ? label.style_label_down : label.style_label_up,
          color = color.new(sigCol, 85), textcolor = sigCol, size = size.tiny)
+    // the far side of the swept candle — where the trade is aiming
+    if tpMode != "HOD / LOD"
+        line.new(swpBar, swpOpp, bar_index + extBars, swpOpp, xloc = xloc.bar_index,
+             color = color.new(sigCol, 25), width = 1, style = line.style_solid)
+        label.new(bar_index + extBars, swpOpp, "target", xloc = xloc.bar_index,
+             style = label.style_label_left, color = color.new(sigCol, 85),
+             textcolor = sigCol, size = size.tiny)
 
 if showSet and fvgNow
     box.new(fvgBar - 2, fvgTop, fvgBar + extBars, fvgBot, xloc = xloc.bar_index,
@@ -558,8 +573,8 @@ if showDiag and barstate.islast
     table.cell(dg, 1, 2, inWindow ? "OPEN" : "closed", text_color = inWindow ? color.yellow : color.gray)
     table.cell(dg, 0, 3, "sweep", text_color = color.white)
     table.cell(dg, 1, 3, swpTxt, text_color = swpDir == 0 ? color.gray : swpState == 1 ? sigCol : color.orange)
-    table.cell(dg, 0, 4, "FVG / MSS", text_color = color.white)
-    table.cell(dg, 1, 4, f_yn(fvgOk and busy) + "  /  " + f_yn(mssOk and busy), text_color = color.white)
+    table.cell(dg, 0, 4, reqMss ? "FVG / MSS" : "FVG / (MSS)", text_color = color.white)
+    table.cell(dg, 1, 4, f_yn(fvgOk and busy) + "  /  " + f_yn(mssOk and busy) + (reqMss ? "" : "  MSS not required"), text_color = color.white)
     table.cell(dg, 0, 5, "position", text_color = color.white)
     table.cell(dg, 1, 5, posTxt, text_color = color.white)
     table.cell(dg, 0, 6, "last skip", text_color = color.white)
