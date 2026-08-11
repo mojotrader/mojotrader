@@ -114,8 +114,8 @@ sitting silent.
 
 **Diagnostics panel** (bottom right, on by default) — the setup is rare, so the panel shows
 today's live state (bias and *why*, window open/closed, sweep, FVG, MSS, position, last skip
-reason) plus a cumulative funnel: days → days with a bias → sweeps armed → FVG → MSS →
-triggers. When nothing fires, the funnel shows the exact step it stops at.
+reason) plus a cumulative funnel: days → days with a bias → **pokes** → **confirmed sweeps** →
+FVG → MSS → triggers. When nothing fires, the funnel shows the exact step it stops at.
 
 **Trade window — 10:00 to 14:00 ET**
 The sweep, the confirmation, the entry and the exit all live inside that one 4h candle. New
