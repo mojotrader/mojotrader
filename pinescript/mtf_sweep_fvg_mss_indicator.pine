@@ -53,6 +53,9 @@ graceBars = input.int(0, "Allow 1m confirmation N bars after the sweep candle cl
 gL       = "3) LTF confirmation (chart timeframe)"
 reqMss   = input.bool(false, "Also require a market structure shift", group = gL,
      tooltip = "Off (default): once the sweep is confirmed, a 1m FVG in the trade direction is enough. On: the FVG must be joined by a 1m close through the last swing low/high. The MSS is tracked and drawn either way — this only decides whether it gates the signal.")
+fvgPick  = input.string("Most recent before the trigger", "Which FVG to use",
+     options = ["Most recent before the trigger", "First one after the sweep"], group = gL,
+     tooltip = "Several FVGs can form inside one sweep candle. Most recent (default): keep updating to the latest, so when a market structure shift gates the signal you get the gap in the displacement leg that broke structure rather than an older one further back. First one: lock onto the earliest and ignore the rest.")
 swLeft   = input.int(1, "Swing pivot — left bars",  1, 10, group = gL)
 swRight  = input.int(1, "Swing pivot — right bars", 1, 10, group = gL,
      tooltip = "1/1 = the classic 3-bar swing, the fastest structure read. Raise for fewer, bigger swings.")
@@ -204,7 +207,7 @@ bearFVG = low[2]  > high
 bullFVG = high[2] < low
 
 bool fvgNow = false
-if collecting and not fvgOk and bar_index >= swpBar
+if collecting and bar_index >= swpBar and (not fvgOk or fvgPick == "Most recent before the trigger")
     if swpDir == -1 and bearFVG
         fvgOk  := true
         fvgBar := bar_index

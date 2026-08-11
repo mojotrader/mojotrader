@@ -50,6 +50,11 @@ the last swing high for a long) is tracked and drawn as well, but only gates the
 left/right bars (`1/1` = the classic 3-bar swing), and `Required order` — *FVG then MSS* or
 *MSS then FVG* — applies only when the MSS is required.
 
+Several FVGs can form inside one sweep candle. `Which FVG to use` decides which one counts:
+`Most recent before the trigger` (default) keeps updating to the latest, so when the MSS is
+gating the entry you get the gap in the **displacement leg that broke structure** rather than an
+older one further back; `First one after the sweep` locks onto the earliest.
+
 `Allow 1m confirmation N bars after the sweep candle closes` defaults to `0`, i.e. the FVG must
 land **inside** the spiking 15m candle. Raise it to let the confirmation form after the close.
 
