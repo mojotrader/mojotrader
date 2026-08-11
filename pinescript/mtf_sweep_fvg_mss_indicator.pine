@@ -3,10 +3,12 @@
 // Run this on a 1-MINUTE chart. It only HIGHLIGHTS the bars where all three criteria line up;
 // it places no orders (a strategy version can follow once the setup reads correctly on the chart).
 //
-//   1) HTF (4h — the "HTF-2" candle) gives DIRECTION.
-//        last CLOSED 4h candle closes ABOVE the one before it -> long bias
-//        last CLOSED 4h candle closes BELOW the one before it -> short bias
-//        (comparison selectable: previous close / previous high-low / previous midpoint)
+//   1) HTF (4h — the "HTF-2" candle) gives DIRECTION, from the last CLOSED 4h candle against the
+//      one before it. Default rule "Break or failed break":
+//        closes ABOVE the previous 4h high -> long      | closes BELOW the previous 4h low -> short
+//        took the previous LOW but failed to close below it -> long   (failed breakdown)
+//        took the previous HIGH but failed to close above it -> short (failed breakout)
+//      (simpler comparisons also selectable: previous close / previous high-low / previous midpoint)
 //   2) MTF (15m) gives the LIQUIDITY SWEEP, in the HTF direction.
 //        short: the 15m candle spikes ABOVE the previous 15m HIGH, then trades back UNDER it
 //        long : the 15m candle spikes BELOW the previous 15m LOW,  then trades back OVER it
@@ -33,9 +35,9 @@ mtfTf = input.timeframe("15",  "MTF — sweep (step 2)", group = gTf,
      tooltip = "The candle that must spike through the previous candle's extreme. Default 15m. The confirmation timeframe (step 3) is the CHART timeframe — put this on a 1m chart.")
 
 gH       = "1) HTF direction"
-htfMode  = input.string("Close vs previous close", "4h bias rule",
-     options = ["Close vs previous close", "Close beyond previous high/low", "Close vs previous midpoint"], group = gH,
-     tooltip = "How the last closed 4h candle is compared with the one before it.")
+htfMode  = input.string("Break or failed break", "4h bias rule",
+     options = ["Break or failed break", "Close vs previous close", "Close beyond previous high/low", "Close vs previous midpoint"], group = gH,
+     tooltip = "Break or failed break: a close beyond the previous 4h candle sets the bias that way; if the candle instead TOOK a side and failed to close beyond it, the bias flips against that side (poked the low, closed back inside -> long).")
 reqAlign = input.bool(true, "Only look for setups in the 4h direction", group = gH)
 
 gM        = "2) MTF sweep"
@@ -70,14 +72,30 @@ liveMode = confMode == "Live (inside the 15m candle)"
 
 // ================================================================ 1) HTF DIRECTION
 // Canonical non-repaint idiom: ask the HTF for values offset by one bar with lookahead_on, so
-// history and realtime both return the last FULLY CLOSED HTF candle. hC1 = that candle's close,
-// hC2 / hH2 / hL2 = the candle before it.
-[hC1, hC2, hH2, hL2] = request.security(syminfo.tickerid, htfTf, [close[1], close[2], high[2], low[2]], lookahead = barmerge.lookahead_on)
+// history and realtime both return the last FULLY CLOSED HTF candle. Suffix 1 = that candle,
+// suffix 2 = the candle before it.
+[hC1, hH1, hL1, hC2, hH2, hL2] = request.security(syminfo.tickerid, htfTf,
+     [close[1], high[1], low[1], close[2], high[2], low[2]], lookahead = barmerge.lookahead_on)
 
-f_bias(float c1, float c2, float h2, float l2) =>
+f_bias(float c1, float h1, float l1, float c2, float h2, float l2) =>
     int b = 0
     if not na(c1) and not na(c2)
-        if htfMode == "Close beyond previous high/low"
+        if htfMode == "Break or failed break"
+            // a close beyond the previous candle is the bias; otherwise a side that was TAKEN but
+            // not closed beyond is a rejection, and the bias points the other way
+            failLow = l1 < l2 and c1 >= l2
+            failHi  = h1 > h2 and c1 <= h2
+            if c1 > h2
+                b := 1
+            else if c1 < l2
+                b := -1
+            else if failLow and failHi
+                b := 0                        // took both sides and closed inside -> undecided
+            else if failLow
+                b := 1
+            else if failHi
+                b := -1
+        else if htfMode == "Close beyond previous high/low"
             b := c1 > h2 ? 1 : c1 < l2 ? -1 : 0
         else if htfMode == "Close vs previous midpoint"
             m2 = (h2 + l2) / 2
@@ -86,7 +104,7 @@ f_bias(float c1, float c2, float h2, float l2) =>
             b := c1 > c2 ? 1 : c1 < c2 ? -1 : 0
     b
 
-htfBias = f_bias(hC1, hC2, hH2, hL2)
+htfBias = f_bias(hC1, hH1, hL1, hC2, hH2, hL2)
 
 // ================================================================ 2) MTF SWEEP
 // The 15m candle is built from the 1m bars instead of being requested, so the DEVELOPING candle

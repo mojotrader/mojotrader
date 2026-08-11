@@ -10,10 +10,15 @@ a 15m liquidity sweep and 1m confirmation all line up. **Run it on a 1-minute ch
 It only draws the setup; it places no orders.
 
 **1) 4h gives direction**
-- Last **closed** 4h candle closes **above** the one before it → long bias.
-- Closes **below** it → short bias.
-- `4h bias rule` selects the comparison: previous **close** (default), previous
-  **high/low** (a close beyond the whole candle — stricter), or previous **midpoint**.
+Judged from the last **closed** 4h candle against the one before it. Default rule,
+`Break or failed break`:
+- Closes **above** the previous 4h **high** → long. Closes **below** the previous **low** → short.
+- Took the previous **low** but **failed to close below** it → long (failed breakdown).
+- Took the previous **high** but **failed to close above** it → short (failed breakout).
+- Took both sides and closed inside, or an inside candle → no bias.
+
+Simpler comparisons are also available in `4h bias rule`: previous close, previous
+high/low, or previous midpoint.
 
 **2) 15m gives the sweep**
 - Short: the 15m candle spikes **above** the previous 15m **high**, then trades back **under** it.
@@ -72,3 +77,47 @@ slower structure. Configurable under the *Higher-timeframe structure* group:
 
 The HTF engine is **non-repainting**: a higher-timeframe bar is only processed
 once it has fully closed.
+
+## Strategies
+
+### `pinescript/mtf_1000_sweep_strategy.pine`
+MTF 10:00 Sweep — the strategy built on the indicator above, narrowed to one shot per day.
+**Run it on a 1-minute chart.**
+
+**Bias — the 4h candle that closes at 10:00 ET**
+On CME futures the 4h candles run 18:00 / 22:00 / 02:00 / 06:00 / 10:00 / 14:00 ET, so the
+10:00 close ends the 06:00–10:00 candle and opens the one being traded. The bias comes from
+that candle against the 4h candle before it, using the break-or-failed-break rule:
+
+| 10:00 candle did this | Bias |
+| --- | --- |
+| closed above the previous 4h high | long |
+| closed below the previous 4h low | short |
+| took the previous low, failed to close below it | long |
+| took the previous high, failed to close above it | short |
+| inside candle, or took both sides and closed inside | no trade (tie-break selectable) |
+
+`Only trade if the last closed 4h candle really closed at that time` (on by default) skips the
+day when the chart's 4h grid is not aligned to 10:00, rather than silently using the wrong candle.
+
+**Trade window — 10:00 to 14:00 ET**
+The sweep, the confirmation, the entry and the exit all live inside that one 4h candle. New
+entries stop at 14:00 and everything is flattened at 14:00. One trade per day by default.
+
+**Setup** — identical to the indicator: a 15m sweep of the previous 15m high/low in the bias
+direction, then a 1m FVG plus a 1m market structure shift inside that spiking candle.
+
+**Entry / target / stop**
+- Entry: market on the trigger bar, or a limit inside the 1m FVG (near edge / 50% / far edge).
+- Target: **HOD** for longs, **LOD** for shorts.
+- Stop: the **same distance** on the other side of the entry — a forced **1:1**. The stop is
+  mirrored around the *actual fill*, not the trigger price, so the 1:1 is exact.
+
+Because risk is whatever the distance to the day's extreme happens to be, the point stop can be
+large. Three controls exist for that: `HOD / LOD measured from` (trading day 18:00 / RTH 09:30 /
+the 10:00 4h open — the tighter anchors keep risk smaller), `Minimum` and `Maximum stop distance`,
+and `% of account risked` sizing (fixed capital, no compounding). A setup whose stop is too far to
+afford one contract is skipped rather than taken undersized.
+
+`Let the target follow a new HOD / LOD` is off by default. Turning it on extends the target as the
+day extends while the stop stays put, so the trade is no longer 1:1.
