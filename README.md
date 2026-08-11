@@ -97,8 +97,20 @@ that candle against the 4h candle before it, using the break-or-failed-break rul
 | took the previous high, failed to close above it | short |
 | inside candle, or took both sides and closed inside | no trade (tie-break selectable) |
 
-`Only trade if the last closed 4h candle really closed at that time` (on by default) skips the
-day when the chart's 4h grid is not aligned to 10:00, rather than silently using the wrong candle.
+Both bias candles are **aggregated from the chart's own bars** over a fixed clock span
+(06:00–10:00 and 02:00–06:00 ET), not requested from the 4h series. TradingView aligns
+intraday higher-timeframe bars to the session start, so a chart whose 4h grid does not land
+on 10:00 — RTH-only, a non-futures symbol, a different session — would otherwise compare the
+wrong two candles or produce no bias at all.
+
+**This needs extended-hours (ETH) data.** The bias candles are built from 02:00–10:00 ET bars,
+which an RTH-only chart does not have. When they are missing the panel says so rather than
+sitting silent.
+
+**Diagnostics panel** (bottom right, on by default) — the setup is rare, so the panel shows
+today's live state (bias and *why*, window open/closed, sweep, FVG, MSS, position, last skip
+reason) plus a cumulative funnel: days → days with a bias → sweeps armed → FVG → MSS →
+triggers. When nothing fires, the funnel shows the exact step it stops at.
 
 **Trade window — 10:00 to 14:00 ET**
 The sweep, the confirmation, the entry and the exit all live inside that one 4h candle. New
