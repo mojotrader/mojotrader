@@ -10,11 +10,17 @@
 //        inside candle -> no trade. Took BOTH sides and closed inside -> tie-break input.
 //      Both candles are AGGREGATED FROM THE CHART BARS around the anchor time, not requested from
 //      the 4h series, so this does not care whether the chart's own 4h grid lands on 10:00.
-//   2) SWEEP — during 10:00-14:00, a 15m candle spikes through the previous 15m high (short) or low
-//      (long) and trades back inside. Aggregated from the 1m bars, so the spike is caught live.
-//      Only the sweep matching the 10:00 bias arms.
+//   2) SWEEP — during 10:00-14:00, in the 10:00 bias direction. A sweep is TWO things, and the
+//      second is what makes it a sweep rather than just a poke:
+//        short: the 15m candle trades ABOVE the previous 15m HIGH *and CLOSES BACK UNDER IT*
+//        long : the 15m candle trades BELOW the previous 15m LOW  *and CLOSES BACK OVER IT*
+//      The candle is aggregated from the 1m bars, so the poke is seen as it happens, but nothing
+//      counts as a sweep until the close confirms it. A candle that pokes and closes BEYOND the
+//      level is a break, not a sweep, and is discarded.
 //   3) CONFIRMATION — inside that spiking 15m candle, on the 1m: a Fair Value Gap in the trade
 //      direction plus a Market Structure Shift (first 1m close through the last swing low/high).
+//      Since the sweep is only confirmed by the 15m close, the trade triggers on the first 1m bar
+//      after that close, the FVG and MSS having already formed inside the candle.
 //
 //   ENTRY : market on the trigger bar (or a limit inside the 1m FVG).
 //   TARGET: HOD for longs, LOD for shorts.
@@ -57,7 +63,10 @@ tieMode    = input.string("No trade", "If the bias candle took BOTH sides and cl
 
 gM        = "2) 15m sweep"
 mtfTf     = input.timeframe("15", "Sweep timeframe", group = gM)
-reqBack   = input.bool(true, "Price must be back inside the swept level at the trigger", group = gM)
+sweepConf = input.string("15m candle must close back inside", "Sweep confirmed by",
+     options = ["15m candle must close back inside", "Any 1m close back inside (live)"], group = gM,
+     tooltip = "Default: the spiking candle has to CLOSE back inside the level before it counts as a sweep, so the setup triggers just after that candle closes. A candle that pokes and closes beyond the level is a break, not a sweep, and is discarded. Live: the first 1m close back inside confirms it, which triggers earlier but can still be undone by the 15m close.")
+reqBack   = input.bool(true, "Price must still be inside the swept level at the trigger", group = gM)
 graceBars = input.int(0, "Allow confirmation N bars after the sweep candle closes", 0, 60, group = gM,
      tooltip = "0 = the FVG and the MSS must both land inside the spiking 15m candle. Raising this is the single biggest loosener if the setup never completes.")
 
@@ -220,28 +229,44 @@ var float curL     = na
 var bool  curValid = false
 var float prevH    = na
 var float prevL    = na
+var float prevC    = na
 var bool  havePrev = false
 
-var int   swpDir  = 0        // -1 = took the previous 15m high (short), 1 = took the previous low (long)
-var float swpLvl  = na
-var int   swpBar  = na
-var int   swpEnd  = na       // last bar_index the window stays open (na while the 15m candle is open)
-var bool  fvgOk   = false
-var int   fvgBar  = na
-var float fvgTop  = na
-var float fvgBot  = na
-var bool  mssOk   = false
-var int   mssBar  = na
-var float mssLvl  = na
-var bool  fired   = false
+// Sweep lifecycle: a POKE through the previous extreme starts a watch; only a CLOSE back inside
+// promotes it to a SWEEP. A candle that pokes and closes beyond the level is a break, not a sweep.
+var int   swpDir     = 0     // -1 = poked the previous 15m high (short), 1 = poked the previous low (long)
+var float swpLvl     = na
+var int   swpBar     = na
+var int   swpState   = 0     // 0 = poked, awaiting the close | 1 = confirmed sweep | -1 = failed
+var int   collectEnd = na    // last bar_index that may add an FVG / MSS
+var int   triggerEnd = na    // last bar_index the setup may trigger on
+var bool  fvgOk      = false
+var int   fvgBar     = na
+var float fvgTop     = na
+var float fvgBot     = na
+var bool  mssOk      = false
+var int   mssBar     = na
+var float mssLvl     = na
+var bool  fired      = false
+
+bool confirmedNow = false
+bool failedNow    = false
 
 if newMtf
     if curValid
         prevH    := curH
         prevL    := curL
+        prevC    := close[1]     // first bar of a new candle -> close[1] is the old candle's close
         havePrev := true
-    if swpDir != 0 and na(swpEnd)
-        swpEnd := bar_index - 1 + graceBars
+    // the spiking candle has closed: did it close back inside the level it poked?
+    if swpDir != 0 and na(collectEnd) and havePrev
+        if swpState == 0
+            back = swpDir == -1 ? prevC < swpLvl : prevC > swpLvl
+            swpState := back ? 1 : -1
+            confirmedNow := back
+            failedNow    := not back
+        collectEnd := bar_index - 1 + graceBars
+        triggerEnd := math.max(bar_index, collectEnd)
     curH     := high
     curL     := low
     curValid := not barstate.isfirst
@@ -249,31 +274,41 @@ else
     curH := na(curH) ? high : math.max(curH, high)
     curL := na(curL) ? low  : math.min(curL, low)
 
-sweepLive = swpDir != 0 and (na(swpEnd) or bar_index <= swpEnd)
+busy = swpDir != 0 and swpState != -1 and not fired and (na(triggerEnd) or bar_index <= triggerEnd)
 
-bool armedNow = false
-if not sweepLive and havePrev and inWindow and not flatten and dayBias != 0 and nTrades < maxTrades
+bool pokedNow = false
+if not busy and havePrev and inWindow and not flatten and dayBias != 0 and nTrades < maxTrades
     canShort = dayBias == -1 and not na(prevH) and curH > prevH
     canLong  = dayBias ==  1 and not na(prevL) and curL < prevL
     if canShort or canLong
-        swpDir   := canShort ? -1 : 1
-        swpLvl   := canShort ? prevH : prevL
-        swpBar   := bar_index
-        swpEnd   := na
-        fvgOk    := false
-        fvgBar   := na
-        mssOk    := false
-        mssBar   := na
-        fired    := false
-        armedNow := true
-    sweepLive := swpDir != 0 and (na(swpEnd) or bar_index <= swpEnd)
+        swpDir     := canShort ? -1 : 1
+        swpLvl     := canShort ? prevH : prevL
+        swpBar     := bar_index
+        swpState   := 0
+        collectEnd := na
+        triggerEnd := na
+        fvgOk      := false
+        fvgBar     := na
+        mssOk      := false
+        mssBar     := na
+        fired      := false
+        pokedNow   := true
+        busy       := true
+
+// live mode: the first 1m close back inside confirms without waiting for the 15m close
+if busy and swpState == 0 and sweepConf == "Any 1m close back inside (live)" and (swpDir == -1 ? close < swpLvl : close > swpLvl)
+    swpState     := 1
+    confirmedNow := true
+
+collecting = busy and (swpState == 0 or na(collectEnd) or bar_index <= collectEnd)
+triggerOk  = busy and swpState == 1 and (na(triggerEnd) or bar_index <= triggerEnd)
 
 // ================================================================ 3) 1m CONFIRMATION
 bearFVG = low[2]  > high
 bullFVG = high[2] < low
 
 bool fvgNow = false
-if sweepLive and not fvgOk and bar_index >= swpBar
+if collecting and not fvgOk and bar_index >= swpBar
     if swpDir == -1 and bearFVG
         fvgOk  := true
         fvgBar := bar_index
@@ -321,7 +356,7 @@ if not na(swH) and close > swH
     swHBroken := true
 
 bool mssDrawn = false
-if sweepLive and not mssOk and mssNow and bar_index >= swpBar
+if collecting and not mssOk and mssNow and bar_index >= swpBar
     mssOk    := true
     mssBar   := bar_index
     mssLvl   := mssPrice
@@ -350,7 +385,7 @@ var bool   pending  = false
 var string lastSkip = "—"
 
 bool trigNow = false
-if sweepLive and not fired and fvgOk and mssOk and inWindow and not flatten and nTrades < maxTrades and strategy.position_size == 0 and not pending
+if triggerOk and not fired and fvgOk and mssOk and inWindow and not flatten and nTrades < maxTrades and strategy.position_size == 0 and not pending
     orderOk = ordMode == "Any order" ? true : ordMode == "FVG then MSS" ? fvgBar <= mssBar : mssBar <= fvgBar
     backOk  = not reqBack or (swpDir == -1 ? close < swpLvl : close > swpLvl)
     if orderOk and backOk
@@ -411,25 +446,36 @@ if pending and (not inWindow or flatten)
 if flatten
     strategy.close_all(comment = "flat")
 
+if failedNow
+    lastSkip := "poke closed beyond the level — a break, not a sweep"
+
 // ================================================================ FUNNEL (how far each day gets)
 var int nDays  = 0
 var int nBias  = 0
+var int nPoke  = 0
 var int nSweep = 0
 var int nFvg   = 0
 var int nMss   = 0
 var int nTrig  = 0
+var bool dPoke  = false
 var bool dSweep = false
 var bool dFvg   = false
 var bool dMss   = false
 
 if winOpen
     nDays  += 1
+    dPoke  := false
     dSweep := false
     dFvg   := false
     dMss   := false
     if dayBias != 0
         nBias += 1
-if armedNow and not dSweep
+// pokes and confirmed sweeps are counted separately — the gap between them is how often the
+// spiking candle closed BEYOND the level instead of back inside, which is a break, not a sweep
+if pokedNow and not dPoke
+    nPoke += 1
+    dPoke := true
+if confirmedNow and not dSweep
     nSweep += 1
     dSweep := true
 if fvgNow and not dFvg
@@ -455,10 +501,15 @@ if showBias and winOpen and haveData
          color = color.new(dayBias == 1 ? longCol : dayBias == -1 ? shortCol : color.gray, 25),
          textcolor = color.white, size = size.small)
 
-if showSet and armedNow
+// the level is marked faintly as soon as it is poked, but only labelled a SWEEP once a close confirms it
+if showSet and pokedNow
     line.new(bar_index, swpLvl, bar_index + extBars, swpLvl, xloc = xloc.bar_index,
+         color = color.new(sigCol, 55), width = 1, style = line.style_dotted)
+
+if showSet and confirmedNow
+    line.new(swpBar, swpLvl, bar_index + extBars, swpLvl, xloc = xloc.bar_index,
          color = sigCol, width = 2, style = line.style_dotted)
-    label.new(bar_index, swpLvl, swpDir == -1 ? "sweep ▲ prev " + mtfTf + " H" : "sweep ▼ prev " + mtfTf + " L",
+    label.new(swpBar, swpLvl, swpDir == -1 ? "sweep ▲ prev " + mtfTf + " H" : "sweep ▼ prev " + mtfTf + " L",
          xloc = xloc.bar_index, style = swpDir == -1 ? label.style_label_down : label.style_label_up,
          color = color.new(sigCol, 85), textcolor = sigCol, size = size.tiny)
 
@@ -493,7 +544,10 @@ bgcolor(inWindow ? color.new(dayBias == 1 ? longCol : dayBias == -1 ? shortCol :
 f_yn(bool b) => b ? "✔" : "—"
 var table dg = table.new(position.bottom_right, 2, 9, border_width = 1)
 if showDiag and barstate.islast
-    swpTxt = swpDir == 0 ? "none yet" : (swpDir == -1 ? "▲ took prev H" : "▼ took prev L") + (sweepLive ? "" : " (expired)")
+    string swpTxt = "none yet"
+    if swpDir != 0
+        side = swpDir == -1 ? "▲ prev H" : "▼ prev L"
+        swpTxt := swpState == 1 ? "swept " + side + (busy ? "" : " (expired)") : swpState == 0 ? "poked " + side + ", awaiting close" : "poke failed (closed beyond)"
     posTxt = strategy.position_size != 0 ? "in trade" : pending ? "limit resting" : nTrades > 0 ? "done (" + str.tostring(nTrades) + ")" : "flat"
     table.cell(dg, 0, 0, "MTF 10:00", text_color = color.white, bgcolor = color.new(color.gray, 20))
     table.cell(dg, 1, 0, "state",     text_color = color.white, bgcolor = color.new(color.gray, 20))
@@ -503,14 +557,14 @@ if showDiag and barstate.islast
     table.cell(dg, 0, 2, "window", text_color = color.white)
     table.cell(dg, 1, 2, inWindow ? "OPEN" : "closed", text_color = inWindow ? color.yellow : color.gray)
     table.cell(dg, 0, 3, "sweep", text_color = color.white)
-    table.cell(dg, 1, 3, swpTxt, text_color = swpDir == 0 ? color.gray : sigCol)
+    table.cell(dg, 1, 3, swpTxt, text_color = swpDir == 0 ? color.gray : swpState == 1 ? sigCol : color.orange)
     table.cell(dg, 0, 4, "FVG / MSS", text_color = color.white)
-    table.cell(dg, 1, 4, f_yn(fvgOk and sweepLive) + "  /  " + f_yn(mssOk and sweepLive), text_color = color.white)
+    table.cell(dg, 1, 4, f_yn(fvgOk and busy) + "  /  " + f_yn(mssOk and busy), text_color = color.white)
     table.cell(dg, 0, 5, "position", text_color = color.white)
     table.cell(dg, 1, 5, posTxt, text_color = color.white)
     table.cell(dg, 0, 6, "last skip", text_color = color.white)
     table.cell(dg, 1, 6, lastSkip, text_color = color.orange)
     table.cell(dg, 0, 7, "funnel", text_color = color.white, bgcolor = color.new(color.gray, 40))
-    table.cell(dg, 1, 7, "days/bias/sweep", text_color = color.white, bgcolor = color.new(color.gray, 40))
-    table.cell(dg, 0, 8, str.tostring(nDays) + " / " + str.tostring(nBias) + " / " + str.tostring(nSweep), text_color = color.yellow)
+    table.cell(dg, 1, 7, "day/bias/poke/swept", text_color = color.white, bgcolor = color.new(color.gray, 40))
+    table.cell(dg, 0, 8, str.tostring(nDays) + " / " + str.tostring(nBias) + " / " + str.tostring(nPoke) + " / " + str.tostring(nSweep), text_color = color.yellow)
     table.cell(dg, 1, 8, "fvg " + str.tostring(nFvg) + " · mss " + str.tostring(nMss) + " · trig " + str.tostring(nTrig), text_color = color.yellow)

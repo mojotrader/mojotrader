@@ -21,13 +21,24 @@ Simpler comparisons are also available in `4h bias rule`: previous close, previo
 high/low, or previous midpoint.
 
 **2) 15m gives the sweep**
-- Short: the 15m candle spikes **above** the previous 15m **high**, then trades back **under** it.
-- Long: the 15m candle spikes **below** the previous 15m **low**, then trades back **over** it.
-- The 15m candle is aggregated from the 1m bars rather than requested, so the
-  **developing** candle is visible — the spike is caught on the 1m bar that makes it
-  instead of 15 minutes later.
-- With `Only look for setups in the 4h direction` on (default), only the sweep that
-  matches the 4h bias arms a window.
+A sweep is **two** things, and the second is what separates it from a plain poke:
+- Short: the 15m candle trades **above** the previous 15m **high** *and closes back under it*.
+- Long: the 15m candle trades **below** the previous 15m **low** *and closes back over it*.
+
+A candle that pokes through and **closes beyond** the level is a *break*, not a sweep, and is
+discarded. The 15m candle is aggregated from the 1m bars rather than requested, so the poke is
+seen on the 1m bar that makes it — but the level is only drawn faintly until the close confirms
+it, and only then is it labelled a sweep.
+
+`Sweep confirmed by` chooses which close counts:
+- `15m candle must close back inside` (default) — the strict reading. The setup therefore
+  triggers on the first 1m bar **after** that candle closes, the FVG and MSS having already
+  formed inside it.
+- `Any 1m close back inside (live)` — the first 1m close back inside confirms it. Triggers
+  earlier, but the 15m close can still go against it.
+
+With `Only look for setups in the 4h direction` on (default), only the sweep matching the 4h
+bias starts a watch.
 
 **3) 1m gives the confirmation, inside that spiking candle**
 - A **Fair Value Gap** in the trade direction — bearish `low[2] > high`, bullish `high[2] < low`.
@@ -38,14 +49,8 @@ high/low, or previous midpoint.
 - `Allow 1m confirmation N bars after the sweep candle closes` defaults to `0`, i.e.
   both must land **inside** the spiking 15m candle. Raise it to let confirmation spill over.
 
-**Signal timing**
-- `Live (inside the 15m candle)` — the trigger is published on the 1m bar that completes
-  the trio, while the 15m candle is still open (it could still close back beyond the swept level).
-- `Confirm on 15m close` — the trigger is held until the 15m candle actually closes back
-  inside the swept level, then published anchored to the **original** trigger bar.
-
-Neither mode repaints: the trigger bar is fixed the moment it happens, and the 4h bias
-only ever reads fully-closed 4h candles.
+Nothing repaints: the trigger bar is fixed the moment it happens, and the 4h bias only ever
+reads fully-closed 4h candles.
 
 **On the chart** — dotted line at the swept level, shaded sweep window, the 1m FVG box,
 a dashed line on the broken swing, a `LONG SETUP` / `SHORT SETUP` label at the trigger,
@@ -116,8 +121,11 @@ triggers. When nothing fires, the funnel shows the exact step it stops at.
 The sweep, the confirmation, the entry and the exit all live inside that one 4h candle. New
 entries stop at 14:00 and everything is flattened at 14:00. One trade per day by default.
 
-**Setup** — identical to the indicator: a 15m sweep of the previous 15m high/low in the bias
-direction, then a 1m FVG plus a 1m market structure shift inside that spiking candle.
+**Setup** — identical to the indicator: a 15m candle that takes the previous 15m high/low in the
+bias direction **and closes back inside it**, then a 1m FVG plus a 1m market structure shift
+inside that spiking candle. A poke that closes beyond the level is a break, not a sweep, and is
+skipped. The funnel counts pokes and confirmed sweeps separately, so the gap between the two
+columns shows how often that happens.
 
 **Entry / target / stop**
 - Entry: market on the trigger bar, or a limit inside the 1m FVG (near edge / 50% / far edge).

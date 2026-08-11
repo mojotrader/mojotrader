@@ -1,7 +1,7 @@
 //@version=6
 // Multi-Timeframe Sweep Setup — 4h direction + 15m liquidity sweep + 1m FVG & MSS.
 // Run this on a 1-MINUTE chart. It only HIGHLIGHTS the bars where all three criteria line up;
-// it places no orders (a strategy version can follow once the setup reads correctly on the chart).
+// it places no orders (see mtf_1000_sweep_strategy.pine for the tradeable version).
 //
 //   1) HTF (4h — the "HTF-2" candle) gives DIRECTION, from the last CLOSED 4h candle against the
 //      one before it. Default rule "Break or failed break":
@@ -9,30 +9,31 @@
 //        took the previous LOW but failed to close below it -> long   (failed breakdown)
 //        took the previous HIGH but failed to close above it -> short (failed breakout)
 //      (simpler comparisons also selectable: previous close / previous high-low / previous midpoint)
-//   2) MTF (15m) gives the LIQUIDITY SWEEP, in the HTF direction.
-//        short: the 15m candle spikes ABOVE the previous 15m HIGH, then trades back UNDER it
-//        long : the 15m candle spikes BELOW the previous 15m LOW,  then trades back OVER it
-//        The 15m candle is aggregated live from the 1m bars, so the spike is seen while it is
-//        happening rather than only after the 15m candle has closed.
+//   2) MTF (15m) gives the LIQUIDITY SWEEP, in the HTF direction. A sweep is TWO things, and the
+//      second is what makes it a sweep rather than just a poke:
+//        short: the 15m candle trades ABOVE the previous 15m HIGH *and CLOSES BACK UNDER IT*
+//        long : the 15m candle trades BELOW the previous 15m LOW  *and CLOSES BACK OVER IT*
+//      The candle is aggregated from the 1m bars, so the poke is seen as it happens, but nothing is
+//      called a sweep until the close confirms it. A candle that pokes and closes beyond the level
+//      is a break, not a sweep, and is discarded.
 //   3) LTF (1m) gives the CONFIRMATION, inside that same spiking 15m candle:
 //        a) a Fair Value Gap in the trade direction (bear: low[2] > high | bull: high[2] < low)
 //        b) a Market Structure Shift: a 1m CLOSE below the last swing LOW (short)
 //           or above the last swing HIGH (long)
 //
-// The setup TRIGGERS on the 1m bar that completes the trio. "Signal timing" chooses whether that
-// trigger is published live, or held until the 15m candle has actually closed back inside the
-// swept level. Nothing repaints either way: the trigger bar is fixed the moment it happens, and
-// the 4h bias only ever reads fully-closed 4h candles.
+// Because the sweep is only confirmed by the 15m close, the setup TRIGGERS on the first 1m bar after
+// that close (the FVG and MSS having already formed inside the candle). "Sweep confirmed by" can be
+// switched to a live 1m close back inside if you want the earlier, looser trigger.
+// Nothing repaints: the 4h bias only reads closed 4h candles, and the trigger bar is fixed when it happens.
 
 indicator("MTF Setup — 4h bias + 15m sweep + 1m FVG/MSS", overlay = true,
      max_lines_count = 500, max_boxes_count = 500, max_labels_count = 500)
 
 // ---------------------------------------------------------------- Inputs
 gTf   = "Timeframes"
-htfTf = input.timeframe("240", "HTF — direction (step 1)", group = gTf,
-     tooltip = "The candle that sets bias. Default 4h.")
+htfTf = input.timeframe("240", "HTF — direction (step 1)", group = gTf)
 mtfTf = input.timeframe("15",  "MTF — sweep (step 2)", group = gTf,
-     tooltip = "The candle that must spike through the previous candle's extreme. Default 15m. The confirmation timeframe (step 3) is the CHART timeframe — put this on a 1m chart.")
+     tooltip = "The candle that must spike through the previous candle's extreme and close back inside. The confirmation timeframe (step 3) is the CHART timeframe — put this on a 1m chart.")
 
 gH       = "1) HTF direction"
 htfMode  = input.string("Break or failed break", "4h bias rule",
@@ -41,25 +42,24 @@ htfMode  = input.string("Break or failed break", "4h bias rule",
 reqAlign = input.bool(true, "Only look for setups in the 4h direction", group = gH)
 
 gM        = "2) MTF sweep"
-reqBack   = input.bool(true, "Price must be back inside the swept level at the trigger", group = gM,
-     tooltip = "Short: the 1m trigger bar must close BELOW the swept 15m high. Long: ABOVE the swept 15m low.")
+sweepConf = input.string("15m candle must close back inside", "Sweep confirmed by",
+     options = ["15m candle must close back inside", "Any 1m close back inside (live)"], group = gM,
+     tooltip = "Default (your rule): the spiking candle has to CLOSE back inside the level before it counts, so the setup triggers just after that candle closes. Live: the first 1m close back inside confirms it, which triggers earlier but can still be undone by the 15m close.")
+reqBack   = input.bool(true, "Price must still be inside the swept level at the trigger", group = gM)
 graceBars = input.int(0, "Allow 1m confirmation N bars after the sweep candle closes", 0, 60, group = gM,
-     tooltip = "0 = the FVG and the MSS must both land inside the spiking 15m candle (your rule). Raise it to let the confirmation spill into the next candle.")
+     tooltip = "0 = the FVG and the MSS must both land inside the spiking 15m candle. Raise it to let the confirmation spill into the next candle.")
 
 gL       = "3) LTF confirmation (chart timeframe)"
 swLeft   = input.int(1, "Swing pivot — left bars",  1, 10, group = gL)
 swRight  = input.int(1, "Swing pivot — right bars", 1, 10, group = gL,
-     tooltip = "1/1 = the classic 3-bar swing, the fastest structure read. Raise for fewer, bigger swings (confirmed this many bars later).")
+     tooltip = "1/1 = the classic 3-bar swing, the fastest structure read. Raise for fewer, bigger swings.")
 mssLook  = input.int(20, "Broken swing must be at most N bars old", 1, 200, group = gL)
 swInWin  = input.bool(false, "Broken swing must have formed inside the sweep candle", group = gL)
 ordMode  = input.string("Any order", "Required order", options = ["Any order", "FVG then MSS", "MSS then FVG"], group = gL)
-confMode = input.string("Live (inside the 15m candle)", "Signal timing",
-     options = ["Live (inside the 15m candle)", "Confirm on 15m close"], group = gL,
-     tooltip = "Live: publish the trigger as it happens (the 15m candle could still close back beyond the swept level). Confirm: hold the trigger until the 15m candle closes back inside, then publish it anchored to the original trigger bar.")
 
 gV        = "Visuals"
 showLvls  = input.bool(true, "Plot previous 15m high / low", group = gV)
-showSweep = input.bool(true, "Mark the swept level",         group = gV)
+showSweep = input.bool(true, "Mark the confirmed sweep",     group = gV)
 showWin   = input.bool(true, "Shade the sweep window",       group = gV)
 showFvg   = input.bool(true, "Draw the 1m FVG",              group = gV)
 showMss   = input.bool(true, "Draw the broken swing (MSS)",  group = gV)
@@ -68,7 +68,7 @@ extBars   = input.int(20, "Extend drawings right (bars)", 0, 200, group = gV)
 longCol   = input.color(color.new(#26a69a, 0), "Long color",  group = gV)
 shortCol  = input.color(color.new(#ef5350, 0), "Short color", group = gV)
 
-liveMode = confMode == "Live (inside the 15m candle)"
+liveSweep = sweepConf == "Any 1m close back inside (live)"
 
 // ================================================================ 1) HTF DIRECTION
 // Canonical non-repaint idiom: ask the HTF for values offset by one bar with lookahead_on, so
@@ -81,8 +81,6 @@ f_bias(float c1, float h1, float l1, float c2, float h2, float l2) =>
     int b = 0
     if not na(c1) and not na(c2)
         if htfMode == "Break or failed break"
-            // a close beyond the previous candle is the bias; otherwise a side that was TAKEN but
-            // not closed beyond is a rejection, and the bias points the other way
             failLow = l1 < l2 and c1 >= l2
             failHi  = h1 > h2 and c1 <= h2
             if c1 > h2
@@ -107,8 +105,8 @@ f_bias(float c1, float h1, float l1, float c2, float h2, float l2) =>
 htfBias = f_bias(hC1, hH1, hL1, hC2, hH2, hL2)
 
 // ================================================================ 2) MTF SWEEP
-// The 15m candle is built from the 1m bars instead of being requested, so the DEVELOPING candle
-// is available: the spike is detected on the 1m bar that makes it, not 15 minutes later.
+// The 15m candle is built from the 1m bars instead of being requested, so the DEVELOPING candle is
+// available and the poke is detected on the 1m bar that makes it.
 mtfT   = time(mtfTf)
 newMtf = not na(mtfT) and (na(mtfT[1]) or mtfT != mtfT[1])
 
@@ -120,51 +118,38 @@ var float prevL    = na
 var float prevC    = na
 var bool  havePrev = false
 
-// Sweep window state
-var int   swpDir    = 0       // -1 = took the previous high (short), 1 = took the previous low (long)
-var float swpLvl    = na      // the swept level
-var int   swpBar    = na      // bar_index of the spike
-var int   swpEnd    = na      // last bar_index the window stays open (na while the MTF candle is still open)
-var int   swpClosed = 0       // 0 = MTF candle still open, 1 = closed back inside, -1 = closed beyond
-var bool  fvgOk     = false
-var int   fvgBar    = na
-var float fvgTop    = na
-var float fvgBot    = na
-var bool  mssOk     = false
-var int   mssBar    = na
-var float mssLvl    = na
-var bool  fired     = false
+// Sweep lifecycle: a POKE starts a watch; only a CLOSE back inside promotes it to a SWEEP.
+var int   swpDir     = 0      // -1 = poked the previous high (short), 1 = poked the previous low (long)
+var float swpLvl     = na
+var int   swpBar     = na     // bar_index of the poke
+var int   swpState   = 0      // 0 = poked, waiting on the close | 1 = confirmed sweep | -1 = failed
+var int   collectEnd = na     // last bar_index that may add an FVG / MSS
+var int   triggerEnd = na     // last bar_index the setup may trigger on
+var bool  fvgOk      = false
+var int   fvgBar     = na
+var float fvgTop     = na
+var float fvgBot     = na
+var bool  mssOk      = false
+var int   mssBar     = na
+var float mssLvl     = na
+var bool  fired      = false
 
-// Pending trigger (only used by "Confirm on 15m close")
-var bool  pend      = false
-var int   pendBar   = na
-var float pendPrice = na
-var int   pendDir   = 0
-
-// Published signal for this bar — assigned from either the MTF-close block or the trigger block
-bool  sigLong   = false
-bool  sigShort  = false
-int   drawBar   = na
-float drawPrice = na
+bool confirmedNow = false
 
 if newMtf
     if curValid
-        prevH := curH
-        prevL := curL
-        prevC := close[1]     // first bar of a new MTF candle -> close[1] is the old candle's close
+        prevH    := curH
+        prevL    := curL
+        prevC    := close[1]        // first bar of a new MTF candle -> close[1] is the old candle's close
         havePrev := true
-    // The spiking candle has now closed: did it close back inside the swept level?
-    if swpDir != 0 and swpClosed == 0 and havePrev
-        swpClosed := swpDir == -1 ? (prevC < swpLvl ? 1 : -1) : (prevC > swpLvl ? 1 : -1)
-        swpEnd    := bar_index - 1 + graceBars
-        // release or discard a trigger that was waiting for this close
-        if pend
-            if swpClosed == 1
-                sigLong   := pendDir == 1
-                sigShort  := pendDir == -1
-                drawBar   := pendBar
-                drawPrice := pendPrice
-            pend := false
+    // the spiking candle has closed: did it close back inside the level it poked?
+    if swpDir != 0 and na(collectEnd) and havePrev
+        if swpState == 0
+            back = swpDir == -1 ? prevC < swpLvl : prevC > swpLvl
+            swpState := back ? 1 : -1
+            confirmedNow := back
+        collectEnd := bar_index - 1 + graceBars
+        triggerEnd := math.max(bar_index, collectEnd)
     curH     := high
     curL     := low
     curValid := not barstate.isfirst
@@ -172,11 +157,12 @@ else
     curH := na(curH) ? high : math.max(curH, high)
     curL := na(curL) ? low  : math.min(curL, low)
 
-winOpen = swpDir != 0 and (na(swpEnd) or bar_index <= swpEnd)
+// a watch is busy until it fails, fires, or runs out of bars
+busy = swpDir != 0 and swpState != -1 and not fired and (na(triggerEnd) or bar_index <= triggerEnd)
 
-// ---- arm a new sweep from the developing MTF candle (only when no window is running)
-bool armedNow = false
-if not winOpen and havePrev
+// ---- start a new watch on a poke through the previous candle's extreme
+bool pokedNow = false
+if not busy and havePrev
     canShort = (not reqAlign or htfBias == -1) and not na(prevH) and curH > prevH
     canLong  = (not reqAlign or htfBias ==  1) and not na(prevL) and curL < prevL
     int newDir = 0
@@ -187,27 +173,34 @@ if not winOpen and havePrev
     else if canLong
         newDir := 1
     if newDir != 0
-        swpDir    := newDir
-        swpLvl    := newDir == -1 ? prevH : prevL
-        swpBar    := bar_index
-        swpEnd    := na
-        swpClosed := 0
-        fvgOk     := false
-        fvgBar    := na
-        mssOk     := false
-        mssBar    := na
-        fired     := false
-        pend      := false
-        armedNow  := true
-    winOpen := swpDir != 0 and (na(swpEnd) or bar_index <= swpEnd)
+        swpDir     := newDir
+        swpLvl     := newDir == -1 ? prevH : prevL
+        swpBar     := bar_index
+        swpState   := 0
+        collectEnd := na
+        triggerEnd := na
+        fvgOk      := false
+        fvgBar     := na
+        mssOk      := false
+        mssBar     := na
+        fired      := false
+        pokedNow   := true
+        busy       := true
+
+// ---- live mode: the first 1m close back inside confirms the sweep without waiting for the 15m close
+if busy and swpState == 0 and liveSweep and (swpDir == -1 ? close < swpLvl : close > swpLvl)
+    swpState     := 1
+    confirmedNow := true
+
+collecting = busy and (swpState == 0 or na(collectEnd) or bar_index <= collectEnd)
+triggerOk  = busy and swpState == 1 and (na(triggerEnd) or bar_index <= triggerEnd)
 
 // ================================================================ 3) LTF CONFIRMATION
-// ---- a) Fair Value Gap in the trade direction, confirmed on the current bar
 bearFVG = low[2]  > high
 bullFVG = high[2] < low
 
 bool fvgNow = false
-if winOpen and not fvgOk and bar_index >= swpBar
+if collecting and not fvgOk and bar_index >= swpBar
     if swpDir == -1 and bearFVG
         fvgOk  := true
         fvgBar := bar_index
@@ -221,7 +214,6 @@ if winOpen and not fvgOk and bar_index >= swpBar
         fvgBot := high[2]
         fvgNow := true
 
-// ---- b) Market Structure Shift: the first CLOSE through the most recent swing
 ph = ta.pivothigh(swLeft, swRight)
 pl = ta.pivotlow(swLeft, swRight)
 
@@ -257,41 +249,37 @@ if not na(swH) and close > swH
     swHBroken := true
 
 bool mssDrawn = false
-if winOpen and not mssOk and mssNow and bar_index >= swpBar
+if collecting and not mssOk and mssNow and bar_index >= swpBar
     mssOk    := true
     mssBar   := bar_index
     mssLvl   := mssPrice
     mssDrawn := true
 
-// ---- trigger: everything present, in the required order, price back inside the swept level
-if winOpen and not fired and fvgOk and mssOk
+// ---- trigger
+bool sigLong  = false
+bool sigShort = false
+if triggerOk and not fired and fvgOk and mssOk
     orderOk = ordMode == "Any order" ? true : ordMode == "FVG then MSS" ? fvgBar <= mssBar : mssBar <= fvgBar
     backOk  = not reqBack or (swpDir == -1 ? close < swpLvl : close > swpLvl)
-    alignOk = not reqAlign or htfBias == swpDir
-    if orderOk and backOk and alignOk
-        fired := true
-        float px = swpDir == -1 ? high : low
-        if liveMode or swpClosed == 1
-            sigLong   := swpDir == 1
-            sigShort  := swpDir == -1
-            drawBar   := bar_index
-            drawPrice := px
-        else if swpClosed == 0
-            pend      := true
-            pendBar   := bar_index
-            pendPrice := px
-            pendDir   := swpDir
-        // swpClosed == -1: the 15m candle closed beyond the swept level -> the setup failed
+    if orderOk and backOk
+        fired    := true
+        sigLong  := swpDir == 1
+        sigShort := swpDir == -1
 
 // ================================================================ VISUALS
-sweepCol = swpDir == -1 ? shortCol : longCol
+sweepCol = swpDir == 1 ? longCol : shortCol
 
-if showSweep and armedNow
+// the level is marked as soon as it is poked, but only labelled a SWEEP once the close confirms it
+if showSweep and pokedNow
     line.new(bar_index, swpLvl, bar_index + extBars, swpLvl, xloc = xloc.bar_index,
-         color = sweepCol, width = 2, style = line.style_dotted)
-    label.new(bar_index, swpLvl, swpDir == -1 ? "sweep ▲ prev " + mtfTf + " H" : "sweep ▼ prev " + mtfTf + " L",
+         color = color.new(sweepCol, 55), width = 1, style = line.style_dotted)
+
+if showSweep and confirmedNow
+    label.new(swpBar, swpLvl, swpDir == -1 ? "sweep ▲ prev " + mtfTf + " H" : "sweep ▼ prev " + mtfTf + " L",
          xloc = xloc.bar_index, style = swpDir == -1 ? label.style_label_down : label.style_label_up,
-         color = color.new(sweepCol, 85), textcolor = sweepCol, size = size.tiny)
+         color = color.new(sweepCol, 80), textcolor = sweepCol, size = size.tiny)
+    line.new(swpBar, swpLvl, bar_index + extBars, swpLvl, xloc = xloc.bar_index,
+         color = sweepCol, width = 2, style = line.style_dotted)
 
 if showFvg and fvgNow
     box.new(fvgBar - 2, fvgTop, fvgBar + extBars, fvgBot, xloc = xloc.bar_index,
@@ -305,22 +293,19 @@ if showMss and mssDrawn
          style = swpDir == -1 ? label.style_label_up : label.style_label_down,
          color = color.new(sweepCol, 85), textcolor = sweepCol, size = size.tiny)
 
-if (sigLong or sigShort) and not na(drawBar)
-    bool  isL = sigLong
-    color sc  = isL ? longCol : shortCol
-    label.new(drawBar, drawPrice, isL ? "LONG SETUP" : "SHORT SETUP", xloc = xloc.bar_index,
-         style = isL ? label.style_label_up : label.style_label_down,
-         color = color.new(sc, 15), textcolor = color.white, size = size.small)
+if sigLong or sigShort
+    label.new(bar_index, sigLong ? low : high, sigLong ? "LONG SETUP" : "SHORT SETUP", xloc = xloc.bar_index,
+         style = sigLong ? label.style_label_up : label.style_label_down,
+         color = color.new(sigLong ? longCol : shortCol, 15), textcolor = color.white, size = size.small)
 
-bgcolor(showWin and winOpen ? color.new(sweepCol, 92) : na, title = "Sweep window")
+// faint while only poked, stronger once the close has confirmed the sweep
+bgcolor(showWin and busy ? color.new(sweepCol, swpState == 1 ? 88 : 94) : na, title = "Sweep window")
 
 plot(showLvls and havePrev ? prevH : na, "Prev MTF high", color = color.new(color.gray, 30), style = plot.style_linebr)
 plot(showLvls and havePrev ? prevL : na, "Prev MTF low",  color = color.new(color.gray, 30), style = plot.style_linebr)
 
-// Live-mode arrow on the trigger bar. In confirm mode the trigger bar is in the past by the time
-// the signal is published, so the label above is the marker instead.
-plotshape(liveMode and sigLong,  "Long trigger",  shape.triangleup,   location.belowbar, longCol,  size = size.small)
-plotshape(liveMode and sigShort, "Short trigger", shape.triangledown, location.abovebar, shortCol, size = size.small)
+plotshape(sigLong,  "Long trigger",  shape.triangleup,   location.belowbar, longCol,  size = size.small)
+plotshape(sigShort, "Short trigger", shape.triangledown, location.abovebar, shortCol, size = size.small)
 
 // ---------------------------------------------------------------- Checklist table
 f_yn(bool b) => b ? "✔" : "—"
@@ -330,20 +315,23 @@ var table chk = table.new(position.top_right, 2, 6, border_width = 1)
 if showTbl and barstate.islast
     biasTxt = htfBias == 1 ? "▲ long" : htfBias == -1 ? "▼ short" : "— flat"
     biasCol = htfBias == 1 ? longCol : htfBias == -1 ? shortCol : color.gray
-    swpTxt  = swpDir == 0 ? "—" : (swpDir == -1 ? "▲ took prev H" : "▼ took prev L") + (winOpen ? "" : " (expired)")
-    sigTxt  = fired and winOpen ? (swpDir == 1 ? "LONG" : "SHORT") : pend ? "pending " + mtfTf + " close" : "—"
+    string swpTxt = "—"
+    if swpDir != 0
+        side = swpDir == -1 ? "▲ prev H" : "▼ prev L"
+        swpTxt := swpState == 1 ? "swept " + side : swpState == 0 ? "poked " + side + ", awaiting close" : "poke failed (closed beyond)"
     table.cell(chk, 0, 0, "MTF setup", text_color = color.white, bgcolor = color.new(color.gray, 20))
     table.cell(chk, 1, 0, "state",     text_color = color.white, bgcolor = color.new(color.gray, 20))
     table.cell(chk, 0, 1, htfTf + " bias",  text_color = color.white)
     table.cell(chk, 1, 1, biasTxt,          text_color = biasCol)
     table.cell(chk, 0, 2, mtfTf + " sweep", text_color = color.white)
-    table.cell(chk, 1, 2, swpTxt,           text_color = swpDir == 0 ? color.gray : sweepCol)
+    table.cell(chk, 1, 2, swpTxt,           text_color = swpDir == 0 ? color.gray : swpState == 1 ? sweepCol : color.orange)
     table.cell(chk, 0, 3, "chart FVG", text_color = color.white)
-    table.cell(chk, 1, 3, f_yn(fvgOk and winOpen), text_color = f_ynCol(fvgOk and winOpen))
+    table.cell(chk, 1, 3, f_yn(fvgOk and busy), text_color = f_ynCol(fvgOk and busy))
     table.cell(chk, 0, 4, "chart MSS", text_color = color.white)
-    table.cell(chk, 1, 4, f_yn(mssOk and winOpen), text_color = f_ynCol(mssOk and winOpen))
+    table.cell(chk, 1, 4, f_yn(mssOk and busy), text_color = f_ynCol(mssOk and busy))
     table.cell(chk, 0, 5, "Signal",  text_color = color.white, bgcolor = color.new(color.gray, 40))
-    table.cell(chk, 1, 5, sigTxt,    text_color = color.yellow, bgcolor = color.new(color.gray, 40))
+    table.cell(chk, 1, 5, fired and busy ? (swpDir == 1 ? "LONG" : "SHORT") : "—",
+         text_color = color.yellow, bgcolor = color.new(color.gray, 40))
 
 // Nudge if the chart timeframe is not below the sweep timeframe (step 3 needs a faster chart).
 if barstate.islast and timeframe.in_seconds() >= timeframe.in_seconds(mtfTf)
