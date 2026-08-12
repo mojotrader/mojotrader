@@ -87,18 +87,21 @@ land **inside** the spiking 15m candle. Raise it to let the confirmation form af
 Nothing repaints: the trigger bar is fixed the moment it happens, and the 4h bias only ever
 reads fully-closed 4h candles.
 
-**On the chart — drawings follow the timeframe you are on**
-Each layer belongs to a timeframe, and on the default `Auto` detail setting a chart only draws
-the layers at or below its own resolution:
+**On the chart — one shade, plus layers that follow the timeframe**
+The **4h bias is the only shading in the script**, and it is drawn on **every timeframe** —
+green while long, red while short. It is deliberately not tied to the drawing tier, because the
+whole point is to carry the 4h read down onto the 15m and 1m charts. The sweep is marked with
+lines and a label rather than a second background, so the shading always means exactly one thing.
 
-| chart | what is drawn |
+Everything else is layered by resolution, on the default `Auto` detail setting:
+
+| chart | drawn on top of the 4h shade |
 | --- | --- |
-| 4h | the bias shading only — **green** while the bias is long, **red** while short |
-| 15m | bias shading + the sweep (swept level, sweep label, previous 15m high/low) |
-| 1m | all of the above + the 1m FVG box, the broken-swing MSS line, and the setup label |
+| 4h | nothing — the shade alone |
+| 15m | the sweep: swept level, sweep label, previous 15m high/low |
+| 1m | the FVG and iFVG boxes, the broken-swing MSS line, and the setup label |
 
-So stepping up to the 4h is not buried under 1m annotations it cannot resolve. Set
-`Drawing detail` to `Everything` to draw every layer regardless of chart. The checklist table
+Set `Drawing detail` to `Everything` to draw every layer regardless of chart. The checklist table
 reports which layer set is active. Alerts exist for long, short, and either side.
 
 ### `pinescript/bms_market_structure.pine`

@@ -1,11 +1,12 @@
 //@version=6
 // Multi-Timeframe Sweep Setup — 4h direction + 15m liquidity sweep + 1m FVG / iFVG / MSS.
 //
-// The drawings follow whichever chart you open:
-//     4h chart  -> every candle shaded by the bias IT creates, green long / red short
-//     15m chart -> that shading plus the sweeps taken in the 4h direction
-//     1m chart  -> all of that plus the FVG, the inverse FVG and the MSS, drawn ONLY inside the
-//                  15m candle that swept the previous one
+// The 4h bias is shaded on EVERY timeframe — that background is the only shading in the script.
+// The rest of the drawings follow whichever chart you open:
+//     4h chart  -> the bias shading alone
+//     15m chart -> plus the sweeps taken in the 4h direction (lines and a label, no shading)
+//     1m chart  -> plus the FVG, the inverse FVG and the MSS, drawn ONLY inside the 15m candle
+//                  that swept the previous one
 //
 //   1) BIAS — every 4h candle is classified against the candle before it ("Break or failed break"):
 //        closes ABOVE the previous 4h high -> long        | closes BELOW the previous 4h low -> short
@@ -397,7 +398,9 @@ tierLtf = not autoDet or timeframe.in_seconds() <  timeframe.in_seconds(mtfTf)
 
 sweepCol = swpDir == 1 ? longCol : shortCol
 
-// ---- HTF layer: every 4h candle carries the colour of the bias it creates
+// ---- The ONLY shading in the script: the 4h bias, on every timeframe. Deliberately not gated by
+// the drawing tier — the point of it is to carry the 4h read down onto the 15m and 1m charts.
+// The sweep is marked with lines and a label instead, so the background stays a single signal.
 bgcolor(showBias and shadeBias != 0 ? color.new(shadeBias == 1 ? longCol : shortCol, biasAlpha) : na,
      title = "4h bias")
 
@@ -456,8 +459,6 @@ if tierLtf and (sigLong or sigShort)
     label.new(bar_index, sigLong ? low : high, sigLong ? "LONG SETUP" : "SHORT SETUP", xloc = xloc.bar_index,
          style = sigLong ? label.style_label_up : label.style_label_down,
          color = color.new(sigLong ? longCol : shortCol, 15), textcolor = color.white, size = size.small)
-
-bgcolor(tierMtf and busy and swpState == 1 ? color.new(sweepCol, 90) : na, title = "Sweep window")
 
 plot(tierMtf and showLvls and havePrev ? prevH : na, "Prev MTF high", color = color.new(color.gray, 30), style = plot.style_linebr)
 plot(tierMtf and showLvls and havePrev ? prevL : na, "Prev MTF low",  color = color.new(color.gray, 30), style = plot.style_linebr)
