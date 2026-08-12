@@ -61,9 +61,19 @@ land **inside** the spiking 15m candle. Raise it to let the confirmation form af
 Nothing repaints: the trigger bar is fixed the moment it happens, and the 4h bias only ever
 reads fully-closed 4h candles.
 
-**On the chart** — dotted line at the swept level, shaded sweep window, the 1m FVG box,
-a dashed line on the broken swing, a `LONG SETUP` / `SHORT SETUP` label at the trigger,
-and a top-right checklist table. Alerts exist for long, short, and either side.
+**On the chart — drawings follow the timeframe you are on**
+Each layer belongs to a timeframe, and on the default `Auto` detail setting a chart only draws
+the layers at or below its own resolution:
+
+| chart | what is drawn |
+| --- | --- |
+| 4h | the bias shading only — **green** while the bias is long, **red** while short |
+| 15m | bias shading + the sweep (swept level, sweep label, previous 15m high/low) |
+| 1m | all of the above + the 1m FVG box, the broken-swing MSS line, and the setup label |
+
+So stepping up to the 4h is not buried under 1m annotations it cannot resolve. Set
+`Drawing detail` to `Everything` to draw every layer regardless of chart. The checklist table
+reports which layer set is active. Alerts exist for long, short, and either side.
 
 ### `pinescript/bms_market_structure.pine`
 BMS Market Structure — a ZigZag that plots confirmed swing points and labels them
@@ -120,6 +130,11 @@ wrong two candles or produce no bias at all.
 **This needs extended-hours (ETH) data.** The bias candles are built from 02:00–10:00 ET bars,
 which an RTH-only chart does not have. When they are missing the panel says so rather than
 sitting silent.
+
+**Drawings follow the chart timeframe** — same layering as the indicator: a 4h chart gets the bias
+shading only (green long / red short), a 15m chart adds the sweep, a 1m chart adds the FVG, MSS and
+the R/R box. `Drawing detail` → `Everything` overrides it. This affects drawings only; the strategy
+still has to run on a 1m chart to trade correctly.
 
 **Diagnostics panel** (bottom right, on by default) — the setup is rare, so the panel shows
 today's live state (bias and *why*, window open/closed, sweep, FVG, MSS, position, last skip

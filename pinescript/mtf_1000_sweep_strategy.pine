@@ -28,6 +28,10 @@
 //   STOP  : the SAME distance on the other side of the fill — a forced 1:1.
 //   Entries stop at 14:00 ET and everything is flattened at 14:00 ET — the end of that 4h candle.
 //
+//   The DRAWINGS follow whatever chart you open: a 4h chart gets the bias shading only (green long
+//   / red short), a 15m chart adds the sweep, a 1m chart adds the FVG, MSS and R/R box. Trading
+//   still requires the 1m chart — the layering only affects what is drawn.
+//
 //   THIS SETUP IS RARE. The bottom-right panel shows a day-by-day funnel (days -> bias -> sweep ->
 //   FVG -> MSS -> trigger -> trade) plus today's live state, so when nothing fires you can see the
 //   exact step it stops at instead of staring at an empty chart. NEEDS EXTENDED-HOURS (ETH) DATA:
@@ -105,6 +109,9 @@ qtyFixed    = input.float(1, "Contracts (fixed sizing)", minval = 1, group = gS)
 ptVal       = input.float(2.0, "$ per point per contract", group = gS, tooltip = "MNQ=2, NQ=20, MES=5, ES=50.")
 
 gV       = "Visuals"
+detail   = input.string("Auto (match the chart timeframe)", "Drawing detail",
+     options = ["Auto (match the chart timeframe)", "Everything"], group = gV,
+     tooltip = "Auto: each chart shows only the layer that belongs to it. On the 4h chart just the bias shading; on the 15m chart the bias shading plus the sweep; on the 1m chart all of that plus the FVG, MSS and the R/R box. Everything: draw every layer regardless of chart. NOTE this only affects DRAWINGS — the strategy still has to run on a 1m chart to trade correctly.")
 showDiag = input.bool(true, "Show the diagnostics panel", group = gV,
      tooltip = "Day-by-day funnel plus today's live state. Turn this off only once the strategy is behaving.")
 showBias = input.bool(true, "Draw the bias candle levels", group = gV)
@@ -499,9 +506,16 @@ if trigNow
     nTrig += 1
 
 // ================================================================ VISUALS
+// Each layer belongs to a timeframe: the bias to the 4h, the sweep to the 15m, the FVG/MSS/RR to
+// the 1m. On "Auto" a chart draws only the layers at or below its own resolution, so a 4h chart is
+// left with the bias shading alone instead of annotations it cannot resolve.
+autoDet = detail == "Auto (match the chart timeframe)"
+tierMtf = not autoDet or timeframe.in_seconds() <  htfMin * 60                   // sweep layer
+tierLtf = not autoDet or timeframe.in_seconds() <  timeframe.in_seconds(mtfTf)   // FVG / MSS / RR
+
 sigCol = (tDir != 0 ? tDir : swpDir) == 1 ? longCol : shortCol
 
-if showBias and winOpen and haveData
+if tierMtf and showBias and winOpen and haveData
     line.new(bar_index, prvBH, bar_index + (winEnd - winStart), prvBH, xloc = xloc.bar_index,
          color = color.new(color.orange, 30), width = 1, style = line.style_dashed)
     line.new(bar_index, prvBL, bar_index + (winEnd - winStart), prvBL, xloc = xloc.bar_index,
@@ -513,11 +527,11 @@ if showBias and winOpen and haveData
          textcolor = color.white, size = size.small)
 
 // the level is marked faintly as soon as it is poked, but only labelled a SWEEP once a close confirms it
-if showSet and pokedNow
+if tierMtf and showSet and pokedNow
     line.new(bar_index, swpLvl, bar_index + extBars, swpLvl, xloc = xloc.bar_index,
          color = color.new(sigCol, 55), width = 1, style = line.style_dotted)
 
-if showSet and confirmedNow
+if tierMtf and showSet and confirmedNow
     line.new(swpBar, swpLvl, bar_index + extBars, swpLvl, xloc = xloc.bar_index,
          color = sigCol, width = 2, style = line.style_dotted)
     label.new(swpBar, swpLvl, swpDir == -1 ? "sweep ▲ prev " + mtfTf + " H" : "sweep ▼ prev " + mtfTf + " L",
@@ -531,11 +545,11 @@ if showSet and confirmedNow
              style = label.style_label_left, color = color.new(sigCol, 85),
              textcolor = sigCol, size = size.tiny)
 
-if showSet and fvgNow
+if tierLtf and showSet and fvgNow
     box.new(fvgBar - 2, fvgTop, fvgBar + extBars, fvgBot, xloc = xloc.bar_index,
          border_color = color.new(sigCol, 40), border_width = 1, bgcolor = color.new(sigCol, 82))
 
-if showSet and mssDrawn
+if tierLtf and showSet and mssDrawn
     int mssFrom = swpDir == -1 ? swLBar : swHBar
     line.new(mssFrom, mssLvl, mssBar + math.min(extBars, 5), mssLvl, xloc = xloc.bar_index,
          color = sigCol, width = 1, style = line.style_dashed)
@@ -543,7 +557,7 @@ if showSet and mssDrawn
          style = swpDir == -1 ? label.style_label_up : label.style_label_down,
          color = color.new(sigCol, 85), textcolor = sigCol, size = size.tiny)
 
-if showRR and trigNow
+if tierLtf and showRR and trigNow
     float sl = tDir == 1 ? refEnt - refRisk : refEnt + refRisk
     x2 = bar_index + rrBars
     box.new(bar_index, tDir == 1 ? tpLvl : refEnt, x2, tDir == 1 ? refEnt : tpLvl, xloc = xloc.bar_index,
@@ -554,13 +568,13 @@ if showRR and trigNow
          xloc = xloc.bar_index, style = label.style_label_left,
          color = color.new(color.gray, 15), textcolor = color.white, size = size.small)
 
-plot(inWindow ? dHigh : na, "HOD", color = color.new(color.gray, 10), style = plot.style_linebr)
-plot(inWindow ? dLow  : na, "LOD", color = color.new(color.gray, 10), style = plot.style_linebr)
-bgcolor(inWindow ? color.new(dayBias == 1 ? longCol : dayBias == -1 ? shortCol : color.gray, 88) : na, title = "Trade window")
+plot(tierMtf and inWindow ? dHigh : na, "HOD", color = color.new(color.gray, 10), style = plot.style_linebr)
+plot(tierMtf and inWindow ? dLow  : na, "LOD", color = color.new(color.gray, 10), style = plot.style_linebr)
+bgcolor(inWindow ? color.new(dayBias == 1 ? longCol : dayBias == -1 ? shortCol : color.gray, 88) : na, title = "Trade window (green long / red short bias)")
 
 // ---------------------------------------------------------------- Diagnostics panel
 f_yn(bool b) => b ? "✔" : "—"
-var table dg = table.new(position.bottom_right, 2, 9, border_width = 1)
+var table dg = table.new(position.bottom_right, 2, 10, border_width = 1)
 if showDiag and barstate.islast
     string swpTxt = "none yet"
     if swpDir != 0
@@ -586,3 +600,5 @@ if showDiag and barstate.islast
     table.cell(dg, 1, 7, "day/bias/poke/swept", text_color = color.white, bgcolor = color.new(color.gray, 40))
     table.cell(dg, 0, 8, str.tostring(nDays) + " / " + str.tostring(nBias) + " / " + str.tostring(nPoke) + " / " + str.tostring(nSweep), text_color = color.yellow)
     table.cell(dg, 1, 8, "fvg " + str.tostring(nFvg) + " · mss " + str.tostring(nMss) + " · trig " + str.tostring(nTrig), text_color = color.yellow)
+    table.cell(dg, 0, 9, "drawing", text_color = color.gray)
+    table.cell(dg, 1, 9, not autoDet ? "all layers" : tierLtf ? "bias + sweep + FVG/MSS" : tierMtf ? "bias + sweep" : "bias only", text_color = color.gray)

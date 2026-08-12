@@ -1,7 +1,11 @@
 //@version=6
 // Multi-Timeframe Sweep Setup — 4h direction + 15m liquidity sweep + 1m FVG & MSS.
-// Run this on a 1-MINUTE chart. It only HIGHLIGHTS the bars where all three criteria line up;
-// it places no orders (see mtf_1000_sweep_strategy.pine for the tradeable version).
+// The setup itself resolves on a 1-MINUTE chart, but the drawings follow whatever chart you open:
+//     4h chart  -> the bias shading only, green for long / red for short
+//     15m chart -> the bias shading plus the sweep
+//     1m chart  -> all of that plus the FVG and the MSS
+// so you can step up and down the timeframes without a pile of annotations the chart cannot
+// resolve. It only HIGHLIGHTS the setup; it places no orders (see mtf_1000_sweep_strategy.pine).
 //
 //   1) HTF (4h — the "HTF-2" candle) gives DIRECTION, from the last CLOSED 4h candle against the
 //      one before it. Default rule "Break or failed break":
@@ -65,6 +69,10 @@ ordMode  = input.string("Any order", "Required order", options = ["Any order", "
      tooltip = "Only applies when the market structure shift is required.")
 
 gV        = "Visuals"
+detail    = input.string("Auto (match the chart timeframe)", "Drawing detail",
+     options = ["Auto (match the chart timeframe)", "Everything"], group = gV,
+     tooltip = "Auto: each chart shows only the layer that belongs to it. On the 4h chart just the bias shading; on the 15m chart the bias shading plus the sweep; on the 1m chart all of that plus the FVG and MSS. Everything: draw every layer regardless of chart.")
+showBias  = input.bool(true, "Shade the 4h bias (green long / red short)", group = gV)
 showLvls  = input.bool(true, "Plot previous 15m high / low", group = gV)
 showSweep = input.bool(true, "Mark the confirmed sweep",     group = gV)
 showWin   = input.bool(true, "Shade the sweep window",       group = gV)
@@ -274,25 +282,32 @@ if triggerOk and not fired and fvgOk and (not reqMss or mssOk)
         sigShort := swpDir == -1
 
 // ================================================================ VISUALS
+// Each layer belongs to a timeframe: the bias to the HTF, the sweep to the MTF, the FVG/MSS to the
+// chart. On "Auto" a chart only draws the layers at or below its own resolution, so the 4h chart is
+// left with the bias shading alone instead of a pile of 1m annotations it cannot resolve.
+autoDet = detail == "Auto (match the chart timeframe)"
+tierMtf = not autoDet or timeframe.in_seconds() <  timeframe.in_seconds(htfTf)   // sweep layer
+tierLtf = not autoDet or timeframe.in_seconds() <  timeframe.in_seconds(mtfTf)   // FVG / MSS layer
+
 sweepCol = swpDir == 1 ? longCol : shortCol
 
 // the level is marked as soon as it is poked, but only labelled a SWEEP once the close confirms it
-if showSweep and pokedNow
+if tierMtf and showSweep and pokedNow
     line.new(bar_index, swpLvl, bar_index + extBars, swpLvl, xloc = xloc.bar_index,
          color = color.new(sweepCol, 55), width = 1, style = line.style_dotted)
 
-if showSweep and confirmedNow
+if tierMtf and showSweep and confirmedNow
     label.new(swpBar, swpLvl, swpDir == -1 ? "sweep ▲ prev " + mtfTf + " H" : "sweep ▼ prev " + mtfTf + " L",
          xloc = xloc.bar_index, style = swpDir == -1 ? label.style_label_down : label.style_label_up,
          color = color.new(sweepCol, 80), textcolor = sweepCol, size = size.tiny)
     line.new(swpBar, swpLvl, bar_index + extBars, swpLvl, xloc = xloc.bar_index,
          color = sweepCol, width = 2, style = line.style_dotted)
 
-if showFvg and fvgNow
+if tierLtf and showFvg and fvgNow
     box.new(fvgBar - 2, fvgTop, fvgBar + extBars, fvgBot, xloc = xloc.bar_index,
          border_color = color.new(sweepCol, 40), border_width = 1, bgcolor = color.new(sweepCol, 82))
 
-if showMss and mssDrawn
+if tierLtf and showMss and mssDrawn
     int mssFrom = swpDir == -1 ? swLBar : swHBar
     line.new(mssFrom, mssLvl, mssBar + math.min(extBars, 5), mssLvl, xloc = xloc.bar_index,
          color = sweepCol, width = 1, style = line.style_dashed)
@@ -300,25 +315,28 @@ if showMss and mssDrawn
          style = swpDir == -1 ? label.style_label_up : label.style_label_down,
          color = color.new(sweepCol, 85), textcolor = sweepCol, size = size.tiny)
 
-if sigLong or sigShort
+if tierLtf and (sigLong or sigShort)
     label.new(bar_index, sigLong ? low : high, sigLong ? "LONG SETUP" : "SHORT SETUP", xloc = xloc.bar_index,
          style = sigLong ? label.style_label_up : label.style_label_down,
          color = color.new(sigLong ? longCol : shortCol, 15), textcolor = color.white, size = size.small)
 
-// faint while only poked, stronger once the close has confirmed the sweep
-bgcolor(showWin and busy ? color.new(sweepCol, swpState == 1 ? 88 : 94) : na, title = "Sweep window")
+// HTF layer — the only thing drawn on a 4h chart: green while the bias is long, red while short
+bgcolor(showBias and htfBias != 0 ? color.new(htfBias == 1 ? longCol : shortCol, 90) : na, title = "4h bias")
 
-plot(showLvls and havePrev ? prevH : na, "Prev MTF high", color = color.new(color.gray, 30), style = plot.style_linebr)
-plot(showLvls and havePrev ? prevL : na, "Prev MTF low",  color = color.new(color.gray, 30), style = plot.style_linebr)
+// MTF layer — faint while only poked, stronger once the close has confirmed the sweep
+bgcolor(tierMtf and showWin and busy ? color.new(sweepCol, swpState == 1 ? 86 : 93) : na, title = "Sweep window")
 
-plotshape(sigLong,  "Long trigger",  shape.triangleup,   location.belowbar, longCol,  size = size.small)
-plotshape(sigShort, "Short trigger", shape.triangledown, location.abovebar, shortCol, size = size.small)
+plot(tierMtf and showLvls and havePrev ? prevH : na, "Prev MTF high", color = color.new(color.gray, 30), style = plot.style_linebr)
+plot(tierMtf and showLvls and havePrev ? prevL : na, "Prev MTF low",  color = color.new(color.gray, 30), style = plot.style_linebr)
+
+plotshape(tierLtf and sigLong,  "Long trigger",  shape.triangleup,   location.belowbar, longCol,  size = size.small)
+plotshape(tierLtf and sigShort, "Short trigger", shape.triangledown, location.abovebar, shortCol, size = size.small)
 
 // ---------------------------------------------------------------- Checklist table
 f_yn(bool b) => b ? "✔" : "—"
 f_ynCol(bool b) => b ? color.new(#26a69a, 0) : color.gray
 
-var table chk = table.new(position.top_right, 2, 6, border_width = 1)
+var table chk = table.new(position.top_right, 2, 7, border_width = 1)
 if showTbl and barstate.islast
     biasTxt = htfBias == 1 ? "▲ long" : htfBias == -1 ? "▼ short" : "— flat"
     biasCol = htfBias == 1 ? longCol : htfBias == -1 ? shortCol : color.gray
@@ -339,12 +357,9 @@ if showTbl and barstate.islast
     table.cell(chk, 0, 5, "Signal",  text_color = color.white, bgcolor = color.new(color.gray, 40))
     table.cell(chk, 1, 5, fired and busy ? (swpDir == 1 ? "LONG" : "SHORT") : "—",
          text_color = color.yellow, bgcolor = color.new(color.gray, 40))
-
-// Nudge if the chart timeframe is not below the sweep timeframe (step 3 needs a faster chart).
-if barstate.islast and timeframe.in_seconds() >= timeframe.in_seconds(mtfTf)
-    label.new(bar_index, high, "Put this on a chart FASTER than " + mtfTf + " (1m intended)",
-         xloc = xloc.bar_index, style = label.style_label_down,
-         color = color.new(color.orange, 10), textcolor = color.white, size = size.small)
+    table.cell(chk, 0, 6, "drawing", text_color = color.gray)
+    table.cell(chk, 1, 6, not autoDet ? "all layers" : tierLtf ? "bias + sweep + FVG/MSS" : tierMtf ? "bias + sweep" : "bias only",
+         text_color = color.gray)
 
 // ---------------------------------------------------------------- Alerts
 alertcondition(sigLong,  "MTF setup — LONG",  "MTF LONG setup: 4h up, 15m swept prev low, 1m FVG + MSS")
