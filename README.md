@@ -12,15 +12,21 @@ a 15m liquidity sweep and 1m confirmation all line up. The setup resolves on a
 It only draws the setup; it places no orders.
 
 **1) 4h gives direction**
-Judged from the last **closed** 4h candle against the one before it. Default rule,
+**Every** 4h candle is classified against the candle before it, and each one carries the colour of
+the bias *it* creates — so the rule can be read straight off the 4h chart. Default rule,
 `Break or failed break`:
 - Closes **above** the previous 4h **high** → long. Closes **below** the previous **low** → short.
 - Took the previous **low** but **failed to close below** it → long (failed breakdown).
 - Took the previous **high** but **failed to close above** it → short (failed breakout).
 - Took both sides and closed inside, or an inside candle → no bias.
 
-Simpler comparisons are also available in `4h bias rule`: previous close, previous
-high/low, or previous midpoint.
+A trade acts on the bias from the last **closed** 4h candle, which is one candle behind the shade
+on the forming candle; `Shade shows` switches the colouring between the two. Sweeps are always
+gated by the bias in force. The 4h candles are aggregated from the chart's own bars, so the
+classification does not depend on how TradingView aligns its 4h grid.
+
+Simpler comparisons are also available in `Bias rule`: previous close, previous high/low, or
+previous midpoint.
 
 **2) 15m gives the sweep**
 A sweep is **two** things, and the second is what separates it from a plain poke:
@@ -42,9 +48,18 @@ it, and only then is it labelled a sweep.
 With `Only look for setups in the 4h direction` on (default), only the sweep matching the 4h
 bias starts a watch.
 
-**3) 1m gives the confirmation**
+**3) 1m gives the confirmation** — or is skipped entirely
+`Signal on` → `The 15m sweep close alone` fires the moment the sweeping candle closes back inside,
+without dropping to the faster chart at all. The gaps and MSS are still drawn, they just stop
+gating anything. Otherwise:
+
 Once the sweep candle has closed, a **Fair Value Gap** in the trade direction from inside it is
-enough — bearish `low[2] > high`, bullish `high[2] < low`.
+enough — bearish `low[2] > high`, bullish `high[2] < low`. An **inverse FVG** also counts: an
+opposite-direction gap that price then *closes through*, flipping it into support (long) or
+resistance (short). `Gap that confirms` selects FVG, iFVG, or either (default).
+
+The gaps and the MSS are drawn **only inside a confirmed sweep candle** — a poke that closed
+beyond its level gets no annotations at all.
 
 A **Market Structure Shift** (the first 1m **close** below the last swing low for a short, above
 the last swing high for a long) is tracked and drawn as well, but only gates the signal when

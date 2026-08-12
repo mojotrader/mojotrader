@@ -74,6 +74,9 @@ graceBars = input.int(0, "Allow confirmation N bars after the sweep candle close
      tooltip = "0 = the FVG and the MSS must both land inside the spiking 15m candle. Raising this is the single biggest loosener if the setup never completes.")
 
 gL      = "3) 1m confirmation"
+entryTrig= input.string("1m gap after the sweep", "Take the trade on",
+     options = ["1m gap after the sweep", "The 15m sweep close alone"], group = gL,
+     tooltip = "1m gap after the sweep (default): once the sweep is confirmed, wait for a 1m FVG (and the MSS if required). The 15m sweep close alone: enter as soon as the sweeping 15m candle closes back inside, without looking at the 1m chart at all — step 3 is skipped and the FVG/MSS are drawn but gate nothing. Entry is market in that mode, since there is no gap to rest a limit in.")
 reqMss  = input.bool(false, "Also require a market structure shift", group = gL,
      tooltip = "Off (default): once the sweep is confirmed, a 1m FVG in the trade direction is enough to trigger. On: the FVG must be joined by a 1m close through the last swing low/high. The MSS is tracked and drawn either way — this only decides whether it gates the entry.")
 fvgPick = input.string("Most recent before the trigger", "Which FVG to trade",
@@ -401,14 +404,18 @@ var bool   exitsSet = false
 var bool   pending  = false
 var string lastSkip = "—"
 
+sweepOnly = entryTrig == "The 15m sweep close alone"
+
 bool trigNow = false
-if triggerOk and not fired and fvgOk and (not reqMss or mssOk) and inWindow and not flatten and nTrades < maxTrades and strategy.position_size == 0 and not pending
-    orderOk = not reqMss or (ordMode == "Any order" ? true : ordMode == "FVG then MSS" ? fvgBar <= mssBar : mssBar <= fvgBar)
+confOk = sweepOnly or (fvgOk and (not reqMss or mssOk))
+if triggerOk and not fired and confOk and inWindow and not flatten and nTrades < maxTrades and strategy.position_size == 0 and not pending
+    orderOk = sweepOnly or not reqMss or (ordMode == "Any order" ? true : ordMode == "FVG then MSS" ? fvgBar <= mssBar : mssBar <= fvgBar)
     backOk  = not reqBack or (swpDir == -1 ? close < swpLvl : close > swpLvl)
     if orderOk and backOk
         // target first — the stop mirrors it, so the target decides whether the trade is viable
         float tgt = tpMode == "HOD / LOD" ? (swpDir == 1 ? dHigh : dLow) : swpOpp
-        float ent = entMode == "Limit in the 1m FVG" ? f_fvgLvl(swpDir) : close
+        useLimit  = entMode == "Limit in the 1m FVG" and fvgOk and not sweepOnly
+        float ent = useLimit ? f_fvgLvl(swpDir) : close
         float rsk = swpDir == 1 ? tgt - ent : ent - tgt
         float q   = useRiskSize ? f_size(acctSize * riskPct / 100.0, rsk) : qtyFixed
         if na(rsk) or rsk < minStop
@@ -427,7 +434,7 @@ if triggerOk and not fired and fvgOk and (not reqMss or mssOk) and inWindow and 
             exitsSet := false
             nTrades  := nTrades + 1
             lastSkip := "—"
-            if entMode == "Limit in the 1m FVG"
+            if useLimit
                 strategy.entry(tDir == 1 ? "MTFL" : "MTFS", tDir == 1 ? strategy.long : strategy.short, qty = q, limit = ent)
                 pending := true
             else
@@ -515,11 +522,8 @@ tierLtf = not autoDet or timeframe.in_seconds() <  timeframe.in_seconds(mtfTf)  
 
 sigCol = (tDir != 0 ? tDir : swpDir) == 1 ? longCol : shortCol
 
+// the bias is carried by the window shading; only the reason gets a label
 if tierMtf and showBias and winOpen and haveData
-    line.new(bar_index, prvBH, bar_index + (winEnd - winStart), prvBH, xloc = xloc.bar_index,
-         color = color.new(color.orange, 30), width = 1, style = line.style_dashed)
-    line.new(bar_index, prvBL, bar_index + (winEnd - winStart), prvBL, xloc = xloc.bar_index,
-         color = color.new(color.orange, 30), width = 1, style = line.style_dashed)
     label.new(bar_index, dayBias == 1 ? prvBL : prvBH,
          (dayBias == 1 ? "LONG bias — " : dayBias == -1 ? "SHORT bias — " : "no bias — ") + biasWhy,
          xloc = xloc.bar_index, style = dayBias == 1 ? label.style_label_up : label.style_label_down,
@@ -537,13 +541,6 @@ if tierMtf and showSet and confirmedNow
     label.new(swpBar, swpLvl, swpDir == -1 ? "sweep ▲ prev " + mtfTf + " H" : "sweep ▼ prev " + mtfTf + " L",
          xloc = xloc.bar_index, style = swpDir == -1 ? label.style_label_down : label.style_label_up,
          color = color.new(sigCol, 85), textcolor = sigCol, size = size.tiny)
-    // the far side of the swept candle — where the trade is aiming
-    if tpMode != "HOD / LOD"
-        line.new(swpBar, swpOpp, bar_index + extBars, swpOpp, xloc = xloc.bar_index,
-             color = color.new(sigCol, 25), width = 1, style = line.style_solid)
-        label.new(bar_index + extBars, swpOpp, "target", xloc = xloc.bar_index,
-             style = label.style_label_left, color = color.new(sigCol, 85),
-             textcolor = sigCol, size = size.tiny)
 
 if tierLtf and showSet and fvgNow
     box.new(fvgBar - 2, fvgTop, fvgBar + extBars, fvgBot, xloc = xloc.bar_index,
@@ -590,7 +587,7 @@ if showDiag and barstate.islast
     table.cell(dg, 1, 2, inWindow ? "OPEN" : "closed", text_color = inWindow ? color.yellow : color.gray)
     table.cell(dg, 0, 3, "sweep", text_color = color.white)
     table.cell(dg, 1, 3, swpTxt, text_color = swpDir == 0 ? color.gray : swpState == 1 ? sigCol : color.orange)
-    table.cell(dg, 0, 4, reqMss ? "FVG / MSS" : "FVG / (MSS)", text_color = color.white)
+    table.cell(dg, 0, 4, sweepOnly ? "FVG / MSS (ignored)" : reqMss ? "FVG / MSS" : "FVG / (MSS)", text_color = color.white)
     table.cell(dg, 1, 4, f_yn(fvgOk and busy) + "  /  " + f_yn(mssOk and busy) + (reqMss ? "" : "  MSS not required"), text_color = color.white)
     table.cell(dg, 0, 5, "position", text_color = color.white)
     table.cell(dg, 1, 5, posTxt, text_color = color.white)
