@@ -43,16 +43,24 @@ ibWed     = input.bool(true, "IB Wednesday", group = gDayI)
 ibThu     = input.bool(true, "IB Thursday",  group = gDayI)
 ibFri     = input.bool(true, "IB Friday",    group = gDayI)
 
-// ---------------------------------------------------------------- Risk sizing (% of a FIXED capital, no compounding)
+// ---------------------------------------------------------------- Risk sizing (% of a FIXED capital, or a flat $ - no compounding)
 gRisk       = "Risk sizing"
-useRiskSize = input.bool(true, "Size by % risk (else fixed contracts below)", group = gRisk,
-     tooltip = "ON: size each entry so its risk = (risk per setup %)/units of the FIXED account size below. OFF: use the fixed 'contracts per unit' in the config.")
+useRiskSize = input.bool(true, "Size by risk (else fixed contracts below)", group = gRisk,
+     tooltip = "ON: size each entry so its risk equals the per-setup risk below, split across the setup's units. OFF: use the fixed 'contracts per unit' in the config.")
 acctSize    = input.float(30000, "Account size $ (fixed - NO compounding)", minval = 1, group = gRisk,
      tooltip = "Sizing uses this constant capital every day; it does NOT grow/shrink with P&L. So the dollar risk per trade is the same every day (no compounding).")
-riskPct     = input.float(1.0, "Risk per setup (% of capital)", minval = 0.1, step = 0.1, group = gRisk,
-     tooltip = "Total risk for one strategy's setup, split equally between its entry units. 1% on 30k = $300 = $150 per unit (with average-down on).")
+riskMode    = input.string("% of capital", "Risk per setup measured in", options = ["% of capital", "$ per setup"], group = gRisk,
+     tooltip = "% of capital: the setup risks that percentage of the fixed account size above. $ per setup: the setup risks a flat dollar amount, regardless of the account size - useful when you want the same dollar risk across instruments or when comparing runs without the account size confusing the picture. Whichever is selected, the other input is ignored.")
+riskPct     = input.float(1.0, "  Risk per setup (% of capital)", minval = 0.1, step = 0.1, group = gRisk,
+     tooltip = "Used when 'Risk per setup measured in' = % of capital. Total risk for one strategy's setup, split equally between its entry units. 1% on 30k = $300 = $150 per unit (with average-down on).")
+riskDlr     = input.float(300, "  Risk per setup ($)", minval = 1, step = 25, group = gRisk,
+     tooltip = "Used when 'Risk per setup measured in' = $ per setup. Total dollar risk for one strategy's setup, split equally between its entry units - $300 with average-down on is $150 per unit. The stop distance then decides the contract count.")
 maxDayPct   = input.float(2.0, "Daily max loss (% of capital, 0 = off)", minval = 0, step = 0.5, group = gRisk,
-     tooltip = "Once the day's loss reaches this % of the day's starting equity, open trades are closed and no new trades are taken until the next day.")
+     tooltip = "Once the day's loss reaches this % of the day's starting equity, open trades are closed and no new trades are taken until the next day. This one is always a percentage of the account size, independent of how the per-setup risk is expressed.")
+
+// The $ risk a whole setup may lose, however it was expressed. Every sizing calculation below reads
+// this, so the two inputs never both apply and switching mode changes nothing else.
+setupBudget = riskMode == "$ per setup" ? riskDlr : acctSize * (riskPct / 100.0)
 
 // ---------------------------------------------------------------- HARDCODED CONFIG (edit values here)
 // Session
@@ -234,8 +242,8 @@ if or_rDone and not na(or_rH) and or_rH > or_rL
         or_zstop := or_shallow ? or_rH : (orbDeepSL == "75% line" ? or_rL + 0.75*or_rng : or_rH)
     if or_dir != 0
         orbU  = (orbAvg and or_shallow) ? 2 : 1                          // units this setup will use
-        orbBud = acctSize * (riskPct/100.0) / orbU                         // $ risk budget per unit
-        orbUPct = riskPct / orbU
+        orbBud = setupBudget / orbU                                        // $ risk budget per unit
+        orbUPct = orbBud / acctSize * 100.0                                // that unit's risk as a % of capital
         orbSz1 := useRiskSize ? f_size(orbBud, math.abs(or_e1 - or_zstop), orbUPct) : orbQty
         orbSz2 := useRiskSize ? f_size(orbBud, math.abs(or_e2 - or_zstop), orbUPct) : orbQty
 or_useAdd = orbAvg and or_shallow and not na(or_e2)
@@ -372,8 +380,8 @@ if ib_rDone and not na(ib_rH) and ib_rH > ib_rL
         ib_zstop := ib_shallow ? ib_rH : (ibDeepSL == "75% line" ? ib_rL + 0.75*ib_rng : ib_rH)
     if ib_dir != 0
         ibU  = (ibAvg and ib_shallow) ? 2 : 1
-        ibBud = acctSize * (riskPct/100.0) / ibU
-        ibUPct = riskPct / ibU
+        ibBud = setupBudget / ibU
+        ibUPct = ibBud / acctSize * 100.0
         ibSz1 := useRiskSize ? f_size(ibBud, math.abs(ib_e1 - ib_zstop), ibUPct) : ibQty
         ibSz2 := useRiskSize ? f_size(ibBud, math.abs(ib_e2 - ib_zstop), ibUPct) : ibQty
 // INTERACTION: on IB formation, resolve ORB vs IB
