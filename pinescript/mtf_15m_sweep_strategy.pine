@@ -1,0 +1,306 @@
+//@version=6
+// MTF 15m Sweep — run on a 15-MINUTE chart. Everything happens on the chart timeframe; there is no
+// 1m layer and no FVG/MSS confirmation. This is the plain version of the setup, meant to establish
+// a baseline the confirmation variants can be measured against.
+//
+//   1) BIAS — every 4h candle is classified against the candle before it, and the bias in force is
+//      the one from the last CLOSED 4h candle:
+//        closes ABOVE the previous 4h high -> long        | closes BELOW the previous 4h low -> short
+//        took the previous LOW but failed to close below  -> long  (failed breakdown)
+//        took the previous HIGH but failed to close above -> short (failed breakout)
+//        inside / two-sided candles carry the previous bias forward, so a bias is always in force.
+//      The 4h candles are aggregated from the chart's own bars, so this does not depend on how
+//      TradingView aligns its 4h grid. EVERY trade is taken in the direction of that bias.
+//   2) SWEEP — a candle that takes the PREVIOUS candle's extreme and CLOSES BACK INSIDE IT:
+//        long  (4h long) : trades BELOW the previous low  and closes back over it
+//        short (4h short): trades ABOVE the previous high and closes back under it
+//      A candle that pokes and closes BEYOND the level is a break, not a sweep, and is skipped.
+//   3) ENTRY — market on the sweep, filled at the next bar's open.
+//      STOP  : the SWEEPING candle's own extreme — its low for a long, its high for a short. That
+//              is the wick that did the sweeping, so the trade is wrong if price goes back through it.
+//      TARGET: a multiple of that risk — 1:1, 1:2, 1:3, or scaled out a third at each.
+//
+//   The sweep is defined against the PREVIOUS CHART BAR, so putting this on a 5m chart tests a 5m
+//   sweep and on a 1h chart a 1h sweep. 15m is what it was written for.
+//   Validate before trading; this is an idea to backtest.
+
+strategy("MTF 15m Sweep — 4h bias + sweep", overlay = true,
+     pyramiding = 1, max_lines_count = 500, max_boxes_count = 200, max_labels_count = 200,
+     initial_capital = 1000000, margin_long = 0, margin_short = 0,
+     default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
+
+// ---------------------------------------------------------------- Inputs
+gB       = "1) 4h bias"
+htfTf    = input.timeframe("240", "Bias timeframe", group = gB)
+htfMode  = input.string("Break or failed break", "Bias rule",
+     options = ["Break or failed break", "Close vs previous close", "Close beyond previous high/low", "Close vs previous midpoint"], group = gB)
+undecided= input.string("Carry the previous bias", "Candles the rule cannot decide",
+     options = ["Carry the previous bias", "Bigger sweep wins", "Leave unmarked"], group = gB,
+     tooltip = "Inside candles and candles that took both sides have no signal of their own. Carrying the previous bias keeps one in force at all times; Leave unmarked stands the strategy down until a candle decides.")
+allowLong  = input.bool(true, "Take longs",  group = gB)
+allowShort = input.bool(true, "Take shorts", group = gB)
+
+gS       = "2) Sweep"
+slBufTk  = input.float(0, "Stop buffer beyond the sweep extreme (ticks)", 0, step = 1, group = gS,
+     tooltip = "Pushes the stop past the sweeping candle's wick by this many ticks. 0 puts it exactly on the wick.")
+minRtk   = input.float(0, "Skip if the stop is closer than (ticks)", 0, step = 1, group = gS,
+     tooltip = "A sweep whose wick is only a tick or two from the close gives a stop so tight it is noise. 0 disables the filter.")
+maxRtk   = input.float(0, "Skip if the stop is further than (ticks, 0 = no cap)", 0, step = 1, group = gS)
+
+gE       = "3) Exit"
+tpMode   = input.string("1:1", "Target", options = ["1:1", "1:2", "1:3", "Scale out 1/3 at 1R, 2R, 3R"], group = gE,
+     tooltip = "R is the distance from the fill to the sweeping candle's extreme. Scale out needs at least 3 contracts; below that it falls back to a single target at the largest multiple.")
+beAt     = input.string("Off", "Move the stop to breakeven at", options = ["Off", "1R", "2R"], group = gE)
+
+gT       = "Session / timing"
+tz       = input.string("America/New_York", "Timezone", group = gT)
+useSess  = input.bool(false, "Only enter inside a session", group = gT)
+sess     = input.session("0930-1600", "  Session", group = gT)
+useFlat  = input.bool(false, "Force-flatten at a time each day", group = gT)
+flatH    = input.int(16, "  Flatten hour",   0, 23, group = gT)
+flatM    = input.int(0,  "  Flatten minute", 0, 59, group = gT)
+maxDay   = input.int(0, "Max trades per day (0 = no limit)", 0, 20, group = gT)
+
+gZ          = "Position sizing"
+useRiskSize = input.bool(false, "Size by % of account risked", group = gZ)
+acctSize    = input.float(100000, "Account size ($)", minval = 1, group = gZ, tooltip = "Fixed — the sizer does not compound.")
+riskPct     = input.float(0.5, "Risk per trade (%)", minval = 0.01, step = 0.05, group = gZ)
+qtyFixed    = input.float(3, "Contracts (fixed sizing)", minval = 1, group = gZ)
+ptVal       = input.float(2.0, "$ per point per contract", group = gZ, tooltip = "MNQ=2, NQ=20, MES=5, ES=50.")
+
+gV       = "Visuals"
+showBias = input.bool(true, "Shade the 4h bias (green long / red short)", group = gV)
+biasAlpha= input.int(88, "Bias shade transparency", 60, 98, group = gV)
+showSweep= input.bool(true, "Mark the swept level", group = gV)
+showRR   = input.bool(true, "Show the risk/reward box", group = gV)
+rrBars   = input.int(12, "R/R box width (bars)", 1, 200, group = gV)
+showTbl  = input.bool(true, "Show the panel", group = gV)
+longCol  = input.color(color.new(#26a69a, 0), "Long color",  group = gV)
+shortCol = input.color(color.new(#ef5350, 0), "Short color", group = gV)
+
+tickSz = syminfo.mintick
+slBuf  = slBufTk * tickSz
+minR   = minRtk  * tickSz
+maxR   = maxRtk  * tickSz
+
+// ================================================================ 1) 4h BIAS
+f_biasRaw(float c1, float h1, float l1, float c2, float h2, float l2) =>
+    int b = 0
+    if not na(c1) and not na(h2) and not na(l2)
+        if htfMode == "Break or failed break"
+            failLow = l1 < l2 and c1 >= l2
+            failHi  = h1 > h2 and c1 <= h2
+            if c1 > h2
+                b := 1
+            else if c1 < l2
+                b := -1
+            else if failLow and failHi
+                b := undecided == "Bigger sweep wins" ? ((h1 - h2) > (l2 - l1) ? -1 : 1) : 0
+            else if failLow
+                b := 1
+            else if failHi
+                b := -1
+        else if htfMode == "Close beyond previous high/low"
+            b := c1 > h2 ? 1 : c1 < l2 ? -1 : 0
+        else if htfMode == "Close vs previous midpoint"
+            m2 = (h2 + l2) / 2
+            b := c1 > m2 ? 1 : c1 < m2 ? -1 : 0
+        else
+            b := c1 > c2 ? 1 : c1 < c2 ? -1 : 0
+    b
+
+// an undecided candle changed nothing, so by default it keeps the bias already in force
+f_resolve(int raw, int carried) =>
+    raw != 0 ? raw : undecided == "Leave unmarked" ? 0 : carried
+
+htfT   = time(htfTf)
+newHtf = not na(htfT) and (na(htfT[1]) or htfT != htfT[1])
+
+var float hCurH = na
+var float hCurL = na
+var float hPrvH = na
+var float hPrvL = na
+var float hPrvC = na
+var float hPr2H = na
+var float hPr2L = na
+var float hPr2C = na
+var bool  hCurValid = false
+var bool  hHavePrv  = false
+var bool  hHavePr2  = false
+var int   bias      = 0     // resolved bias of the last CLOSED 4h candle — what every trade follows
+
+if newHtf
+    if hCurValid
+        if hHavePrv
+            hPr2H := hPrvH
+            hPr2L := hPrvL
+            hPr2C := hPrvC
+            hHavePr2 := true
+        hPrvH := hCurH
+        hPrvL := hCurL
+        hPrvC := close[1]
+        hHavePrv := true
+        if hHavePr2
+            bias := f_resolve(f_biasRaw(hPrvC, hPrvH, hPrvL, hPr2C, hPr2H, hPr2L), bias)
+    hCurH := high
+    hCurL := low
+    hCurValid := not barstate.isfirst
+else
+    hCurH := na(hCurH) ? high : math.max(hCurH, high)
+    hCurL := na(hCurL) ? low  : math.min(hCurL, low)
+
+// ================================================================ 2) SWEEP ON THE CHART TIMEFRAME
+// This bar took the previous bar's extreme and closed back inside it. Both halves matter: without
+// the close back inside it is a break, and a break in the bias direction is the opposite trade.
+sweepLong  = low  < low[1]  and close > low[1]
+sweepShort = high > high[1] and close < high[1]
+
+// ---------------------------------------------------------------- Session / day gates
+inSess  = not useSess or not na(time(timeframe.period, sess, tz))
+tod     = hour(time, tz) * 60 + minute(time, tz)
+flatten = useFlat and tod >= flatH * 60 + flatM
+
+dayKey  = year(time, tz) * 10000 + month(time, tz) * 100 + dayofmonth(time, tz)
+newDay  = na(dayKey[1]) or dayKey != dayKey[1]
+var int nDay = 0
+if newDay
+    nDay := 0
+dayOk = maxDay == 0 or nDay < maxDay
+
+// ================================================================ 3) ENTRY
+f_size(float budget, float ptDist) =>
+    perC = ptDist * ptVal
+    raw  = perC > 0 ? budget / perC : 0.0
+    fr   = raw - math.floor(raw)
+    n = fr > 0.5 ? math.ceil(raw) : math.floor(raw)
+    n := riskPct >= 0.5 and n < 1 ? 1 : n
+    n
+
+var int    tDir     = 0
+var float  swpWick  = na    // the sweeping candle's extreme — where the stop goes
+var float  swpLvl   = na    // the level that was swept
+var float  slLvl    = na
+var float  rDist    = na
+var float  refEnt   = na
+var bool   exitsSet = false
+var bool   beDone   = false
+var string lastSkip = "—"
+
+goLong  = allowLong  and bias ==  1 and sweepLong
+goShort = allowShort and bias == -1 and sweepShort
+
+bool tookNow = false
+if (goLong or goShort) and inSess and not flatten and dayOk and strategy.position_size == 0
+    int    d    = goLong ? 1 : -1
+    float  wick = d == 1 ? low - slBuf : high + slBuf
+    float  risk = math.abs(close - wick)          // reference risk off this bar's close
+    float  q    = useRiskSize ? f_size(acctSize * riskPct / 100.0, risk) : qtyFixed
+    if risk < minR or risk <= 0
+        lastSkip := "stop too tight"
+    else if maxR > 0 and risk > maxR
+        lastSkip := "stop too wide"
+    else if q < 1
+        lastSkip := "size < 1 contract"
+    else
+        tDir     := d
+        swpWick  := wick
+        swpLvl   := d == 1 ? low[1] : high[1]
+        exitsSet := false
+        beDone   := false
+        tookNow  := true
+        nDay     := nDay + 1
+        lastSkip := "—"
+        strategy.entry(d == 1 ? "L" : "S", d == 1 ? strategy.long : strategy.short, qty = q)
+
+// ---------------------------------------------------------------- Exits
+// R is measured from the ACTUAL fill to the sweeping candle's extreme, so the multiples are exact
+// rather than approximated off the signal bar's close.
+inPos = strategy.position_size != 0
+if inPos and not exitsSet
+    ent = strategy.position_avg_price
+    r   = tDir == 1 ? ent - swpWick : swpWick - ent
+    if r <= 0
+        // the fill gapped through the stop — there is no trade left to manage
+        strategy.close_all(comment = "gapped through stop")
+    else
+        refEnt   := ent
+        rDist    := r
+        slLvl    := swpWick
+        exitsSet := true
+
+if inPos and exitsSet
+    tp1 = tDir == 1 ? refEnt + rDist     : refEnt - rDist
+    tp2 = tDir == 1 ? refEnt + rDist * 2 : refEnt - rDist * 2
+    tp3 = tDir == 1 ? refEnt + rDist * 3 : refEnt - rDist * 3
+
+    // breakeven
+    if beAt != "Off" and not beDone
+        trig = beAt == "1R" ? tp1 : tp2
+        hit  = tDir == 1 ? high >= trig : low <= trig
+        if hit
+            slLvl  := tDir == 1 ? math.max(slLvl, refEnt) : math.min(slLvl, refEnt)
+            beDone := true
+
+    string eid = tDir == 1 ? "L" : "S"
+    float  pos = math.abs(strategy.position_size)
+    scaleOut   = tpMode == "Scale out 1/3 at 1R, 2R, 3R" and pos >= 3
+    if scaleOut
+        float leg = math.floor(pos / 3)
+        strategy.exit("X1", from_entry = eid, qty = leg, stop = slLvl, limit = tp1)
+        strategy.exit("X2", from_entry = eid, qty = leg, stop = slLvl, limit = tp2)
+        strategy.exit("X3", from_entry = eid,            stop = slLvl, limit = tp3)
+    else
+        float tgt = tpMode == "1:1" ? tp1 : tpMode == "1:2" ? tp2 : tp3
+        strategy.exit("X", from_entry = eid, stop = slLvl, limit = tgt)
+
+if not inPos and inPos[1]
+    exitsSet := false
+    tDir     := 0
+
+if flatten
+    strategy.close_all(comment = "flat")
+
+// ================================================================ VISUALS
+bgcolor(showBias and bias != 0 ? color.new(bias == 1 ? longCol : shortCol, biasAlpha) : na, title = "4h bias")
+
+if showSweep and tookNow
+    // the level ran from the candle that made it to the bar that took it, and stops there
+    line.new(bar_index - 1, swpLvl, bar_index, swpLvl, xloc = xloc.bar_index,
+         color = tDir == 1 ? longCol : shortCol, width = 2, style = line.style_dashed)
+    label.new(bar_index, swpLvl, tDir == 1 ? "sweep ▼" : "sweep ▲", xloc = xloc.bar_index,
+         style = tDir == 1 ? label.style_label_up : label.style_label_down,
+         color = color.new(tDir == 1 ? longCol : shortCol, 80),
+         textcolor = tDir == 1 ? longCol : shortCol, size = size.tiny)
+
+if showRR and inPos and not inPos[1] and exitsSet
+    c   = tDir == 1 ? longCol : shortCol
+    mult= tpMode == "1:1" ? 1.0 : tpMode == "1:2" ? 2.0 : 3.0
+    tgt = tDir == 1 ? refEnt + rDist * mult : refEnt - rDist * mult
+    x2  = bar_index + rrBars
+    box.new(bar_index, tDir == 1 ? tgt : refEnt, x2, tDir == 1 ? refEnt : tgt, xloc = xloc.bar_index,
+         border_color = color.new(c, 60), border_width = 1, bgcolor = color.new(color.green, 85))
+    box.new(bar_index, tDir == 1 ? refEnt : slLvl, x2, tDir == 1 ? slLvl : refEnt, xloc = xloc.bar_index,
+         border_color = color.new(c, 60), border_width = 1, bgcolor = color.new(color.red, 85))
+    label.new(x2, refEnt, (tDir == 1 ? "LONG  " : "SHORT  ") + str.tostring(rDist, "#.##") + " pts = 1R",
+         xloc = xloc.bar_index, style = label.style_label_left,
+         color = color.new(color.gray, 15), textcolor = color.white, size = size.tiny)
+
+plot(exitsSet and inPos ? slLvl : na, "Stop", color = color.new(color.red, 20), style = plot.style_linebr)
+
+// ---------------------------------------------------------------- Panel
+var table dg = table.new(position.bottom_right, 2, 5, border_width = 1)
+if showTbl and barstate.islast
+    btxt = bias == 1 ? "▲ long" : bias == -1 ? "▼ short" : "— none"
+    bcol = bias == 1 ? longCol : bias == -1 ? shortCol : color.gray
+    ptxt = strategy.position_size != 0 ? (tDir == 1 ? "long" : "short") + " @ " + str.tostring(refEnt, "#.##") : "flat"
+    table.cell(dg, 0, 0, "MTF 15m sweep", text_color = color.white, bgcolor = color.new(color.gray, 20))
+    table.cell(dg, 1, 0, "state",         text_color = color.white, bgcolor = color.new(color.gray, 20))
+    table.cell(dg, 0, 1, htfTf + " bias", text_color = color.white)
+    table.cell(dg, 1, 1, btxt,            text_color = bcol)
+    table.cell(dg, 0, 2, "position",      text_color = color.white)
+    table.cell(dg, 1, 2, ptxt,            text_color = color.white)
+    table.cell(dg, 0, 3, "target",        text_color = color.white)
+    table.cell(dg, 1, 3, tpMode,          text_color = color.white)
+    table.cell(dg, 0, 4, "last skip",     text_color = color.gray)
+    table.cell(dg, 1, 4, lastSkip,        text_color = color.orange)

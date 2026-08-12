@@ -137,6 +137,33 @@ once it has fully closed.
 
 ## Strategies
 
+### `pinescript/mtf_15m_sweep_strategy.pine`
+MTF 15m Sweep — the plain version of the setup, and the baseline the confirmation variants should
+be measured against. **Run it on a 15-minute chart.** No 1m layer, no FVG, no MSS.
+
+**Every trade follows the 4h bias.** Classified exactly as in the indicator, with inside and
+two-sided candles carrying the previous bias forward so one is always in force. The 4h candles are
+aggregated from the chart's own bars, so nothing depends on the 4h grid alignment.
+
+**Entry** — a candle that takes the previous candle's extreme *and closes back inside it*, in the
+bias direction. A poke that closes beyond the level is a break, not a sweep, and is skipped. The
+order is market on that close, filled at the next bar's open.
+
+**Stop** — the **sweeping candle's own extreme**: its low for a long, its high for a short. That is
+the wick that did the sweeping, so the trade is wrong if price goes back through it. An optional
+tick buffer pushes it past the wick.
+
+**Target** — a multiple of that risk: `1:1`, `1:2`, `1:3`, or `Scale out 1/3 at 1R, 2R, 3R`. R is
+measured from the **actual fill** to the stop, so the multiples are exact rather than approximated
+off the signal bar's close. Optional breakeven at 1R or 2R.
+
+Filters, all off by default so the baseline is unfiltered: session window, daily flatten time, max
+trades per day, and minimum/maximum stop distance in ticks (a sweep whose wick sits a tick from the
+close gives a stop so tight it is noise).
+
+The sweep is defined against the **previous chart bar**, so the same script on a 5m chart tests a
+5m sweep and on a 1h chart a 1h sweep.
+
 ### `pinescript/mtf_1000_sweep_strategy.pine`
 MTF 10:00 Sweep — the strategy built on the indicator above, narrowed to one shot per day.
 **Run it on a 1-minute chart.**
