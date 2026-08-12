@@ -153,21 +153,32 @@ order is market on that close, filled at the next bar's open.
 the wick that did the sweeping, so the trade is wrong if price goes back through it. An optional
 tick buffer pushes it past the wick.
 
-**Target** — two families, six options.
+**Target** — two families:
 
-*R-multiple*: `1:1`, `1:2`, `1:3`, or `Scale out 1/3 at 1R, 2R, 3R`. R is the stop distance above,
-and the target is a multiple of it. Optional breakeven at 1R or 2R.
+*R-multiple*: `1:1`, `1:2`, `1:3`, or `Scale out 1/3 at 1R, 2R, 3R` — a multiple of the stop distance.
 
-*Level*: `Swept candle far side` or `Last closed 4h extreme`. The target is the level itself — for
-a long, the swept candle's **high** or the last closed 4h candle's **high**, mirrored for a short —
-and the **stop mirrors that distance** on the other side of the fill. So the trade is a forced 1:1
-whose size is dictated by how far the level happens to sit, rather than by the sweeping wick. The
-4h level is snapshotted at the signal, since a new 4h candle can close before the fill. A setup
-whose target has already been passed is skipped, and `minimum / maximum stop distance` doubles as a
-too-close / too-far filter on the level.
+*Level*: `Swept candle far side` or `Last closed 4h extreme` — for a long, the swept candle's
+**high** or the last closed 4h candle's **high**; mirrored for a short. The 4h level is snapshotted
+at the signal, since a new 4h candle can close before the fill, and a setup whose target has
+already been passed is skipped rather than entered with an inverted stop.
 
-Either family measures R from the **actual fill**, not the signal bar's close, so the multiples and
-the mirror are exact.
+**Stop** — chosen independently:
+
+| `Stop loss` | where it goes |
+| --- | --- |
+| `Sweeping candle high / low` | on the wick that did the sweeping, plus an optional tick buffer |
+| `Same distance as the target` | an equal distance the other side of the fill — a forced 1:1 |
+
+The mirror only applies to a **level** target. An R-multiple target is a multiple *of* the stop, so
+deriving the stop from it would be circular; the wick is used instead and the panel says so.
+`Minimum / maximum stop distance` filters whichever distance is in play. Breakeven applies to
+R-multiple targets only — with a mirrored stop, 1R *is* the target.
+
+Either way R is measured from the **actual fill**, not the signal bar's close.
+
+**Bias flip** — `Close the trade if the 4h bias no longer agrees` (on by default) closes an open
+position at market the moment a 4h close turns the bias against it. The trade exists because the 4h
+was pointing that way; when it stops, so does the reason for holding.
 
 Filters, all off by default so the baseline is unfiltered: session window, daily flatten time, max
 trades per day, and minimum/maximum stop distance in ticks (a sweep whose wick sits a tick from the
