@@ -6,7 +6,9 @@ Day-trading research and indicators for the index futures **NQ** (Nasdaq-100) an
 
 ### `pinescript/mtf_sweep_fvg_mss_indicator.pine`
 MTF Setup — a three-timeframe checklist that highlights the bar where 4h direction,
-a 15m liquidity sweep and 1m confirmation all line up. **Run it on a 1-minute chart.**
+a 15m liquidity sweep and 1m confirmation all line up. The setup resolves on a
+**1-minute chart**, but the drawings adapt to whichever timeframe you open (see
+*On the chart* below), so you can step up to the 15m or 4h and still read the bias.
 It only draws the setup; it places no orders.
 
 **1) 4h gives direction**
