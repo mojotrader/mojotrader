@@ -98,8 +98,12 @@ Everything else is layered by resolution, on the default `Auto` detail setting:
 | chart | drawn on top of the 4h shade |
 | --- | --- |
 | 4h | nothing — the shade alone |
-| 15m | the sweep: swept level, sweep label, previous 15m high/low |
-| 1m | the FVG and iFVG boxes, the broken-swing MSS line, and the setup label |
+| 15m | the sweep: the swept level and its label |
+| 1m | plus the previous 15m high/low, the FVG and iFVG boxes, the MSS line and the setup label |
+
+The swept level is drawn from the candle that **made** it to the bar that **took** it, and stops
+there — a swept level is spent, so it is never extended to the right. A poke that has not yet been
+confirmed draws nothing at all.
 
 Set `Drawing detail` to `Everything` to draw every layer regardless of chart. The checklist table
 reports which layer set is active. Alerts exist for long, short, and either side.

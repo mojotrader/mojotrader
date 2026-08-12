@@ -208,12 +208,15 @@ var float prevH    = na
 var float prevL    = na
 var float prevC    = na
 var bool  havePrev = false
+var int   mtfCurStart = na   // first bar_index of the developing MTF candle
+var int   mtfPrvStart = na   // first bar_index of the candle that produced prevH / prevL
 
 // Sweep lifecycle: a POKE starts a watch; only a CLOSE back inside promotes it to a SWEEP.
 var int   swpDir     = 0
 var float swpLvl     = na
 var float swpOpp     = na    // far side of the swept candle
 var int   swpBar     = na
+var int   swpFrom    = na    // first bar of the candle that made the level
 var int   swpState   = 0     // 0 = poked, awaiting close | 1 = confirmed sweep | -1 = failed
 var int   collectEnd = na
 var int   triggerEnd = na
@@ -242,6 +245,7 @@ if newMtf
         prevH    := curH
         prevL    := curL
         prevC    := close[1]
+        mtfPrvStart := mtfCurStart
         havePrev := true
     if swpDir != 0 and na(collectEnd) and havePrev
         if swpState == 0
@@ -252,6 +256,7 @@ if newMtf
         triggerEnd := math.max(bar_index, collectEnd)
     curH     := high
     curL     := low
+    mtfCurStart := bar_index
     curValid := not barstate.isfirst
 else
     curH := na(curH) ? high : math.max(curH, high)
@@ -275,6 +280,7 @@ if not busy and havePrev
         swpLvl     := newDir == -1 ? prevH : prevL
         swpOpp     := newDir == -1 ? prevL : prevH
         swpBar     := bar_index
+        swpFrom    := na(mtfPrvStart) ? bar_index - 1 : mtfPrvStart
         swpState   := 0
         collectEnd := na
         triggerEnd := na
@@ -404,14 +410,12 @@ sweepCol = swpDir == 1 ? longCol : shortCol
 bgcolor(showBias and shadeBias != 0 ? color.new(shadeBias == 1 ? longCol : shortCol, biasAlpha) : na,
      title = "4h bias")
 
-// ---- MTF layer
-if tierMtf and showSweep and pokedNow
-    line.new(bar_index, swpLvl, bar_index + extBars, swpLvl, xloc = xloc.bar_index,
-         color = color.new(sweepCol, 55), width = 1, style = line.style_dotted)
-
+// ---- MTF layer. The level runs from the candle that MADE it to the bar that TOOK it, and stops
+// there — a swept level is spent, so extending it to the right would draw a level that no longer
+// exists. Nothing is drawn for a poke; only a confirmed sweep gets a line.
 if tierMtf and showSweep and confirmedNow
-    line.new(swpBar, swpLvl, bar_index + extBars, swpLvl, xloc = xloc.bar_index,
-         color = sweepCol, width = 2, style = line.style_dotted)
+    line.new(swpFrom, swpLvl, swpBar, swpLvl, xloc = xloc.bar_index,
+         color = sweepCol, width = 2, style = line.style_dashed)
     label.new(swpBar, swpLvl, swpDir == -1 ? "sweep ▲ prev " + mtfTf + " H" : "sweep ▼ prev " + mtfTf + " L",
          xloc = xloc.bar_index, style = swpDir == -1 ? label.style_label_down : label.style_label_up,
          color = color.new(sweepCol, 80), textcolor = sweepCol, size = size.tiny)
@@ -460,8 +464,10 @@ if tierLtf and (sigLong or sigShort)
          style = sigLong ? label.style_label_up : label.style_label_down,
          color = color.new(sigLong ? longCol : shortCol, 15), textcolor = color.white, size = size.small)
 
-plot(tierMtf and showLvls and havePrev ? prevH : na, "Prev MTF high", color = color.new(color.gray, 30), style = plot.style_linebr)
-plot(tierMtf and showLvls and havePrev ? prevL : na, "Prev MTF low",  color = color.new(color.gray, 30), style = plot.style_linebr)
+// Below the sweep timeframe only: on the 15m chart itself these levels are just the previous
+// candle's own high and low, so they add a stair-stepped line that says nothing.
+plot(tierLtf and showLvls and havePrev ? prevH : na, "Prev MTF high", color = color.new(color.gray, 30), style = plot.style_linebr)
+plot(tierLtf and showLvls and havePrev ? prevL : na, "Prev MTF low",  color = color.new(color.gray, 30), style = plot.style_linebr)
 
 plotshape(tierLtf and sigLong,  "Long trigger",  shape.triangleup,   location.belowbar, longCol,  size = size.small)
 plotshape(tierLtf and sigShort, "Short trigger", shape.triangledown, location.abovebar, shortCol, size = size.small)

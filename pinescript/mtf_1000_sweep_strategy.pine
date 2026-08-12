@@ -249,6 +249,8 @@ var float prevH    = na
 var float prevL    = na
 var float prevC    = na
 var bool  havePrev = false
+var int   mtfCurStart = na   // first bar_index of the developing MTF candle
+var int   mtfPrvStart = na   // first bar_index of the candle that produced prevH / prevL
 
 // Sweep lifecycle: a POKE through the previous extreme starts a watch; only a CLOSE back inside
 // promotes it to a SWEEP. A candle that pokes and closes beyond the level is a break, not a sweep.
@@ -256,6 +258,7 @@ var int   swpDir     = 0     // -1 = poked the previous 15m high (short), 1 = po
 var float swpLvl     = na    // the level that was swept
 var float swpOpp     = na    // the FAR side of that same candle — the target
 var int   swpBar     = na
+var int   swpFrom    = na    // first bar of the candle that made the level
 var int   swpState   = 0     // 0 = poked, awaiting the close | 1 = confirmed sweep | -1 = failed
 var int   collectEnd = na    // last bar_index that may add an FVG / MSS
 var int   triggerEnd = na    // last bar_index the setup may trigger on
@@ -275,7 +278,8 @@ if newMtf
     if curValid
         prevH    := curH
         prevL    := curL
-        prevC    := close[1]     // first bar of a new candle -> close[1] is the old candle's close
+        prevC    := close[1]
+        mtfPrvStart := mtfCurStart     // first bar of a new candle -> close[1] is the old candle's close
         havePrev := true
     // the spiking candle has closed: did it close back inside the level it poked?
     if swpDir != 0 and na(collectEnd) and havePrev
@@ -288,6 +292,7 @@ if newMtf
         triggerEnd := math.max(bar_index, collectEnd)
     curH     := high
     curL     := low
+    mtfCurStart := bar_index
     curValid := not barstate.isfirst
 else
     curH := na(curH) ? high : math.max(curH, high)
@@ -304,6 +309,7 @@ if not busy and havePrev and inWindow and not flatten and dayBias != 0 and nTrad
         swpLvl     := canShort ? prevH : prevL
         swpOpp     := canShort ? prevL : prevH   // long sweeps the low -> target that candle's high
         swpBar     := bar_index
+        swpFrom    := na(mtfPrvStart) ? bar_index - 1 : mtfPrvStart
         swpState   := 0
         collectEnd := na
         triggerEnd := na
@@ -530,14 +536,11 @@ if tierMtf and showBias and winOpen and haveData
          color = color.new(dayBias == 1 ? longCol : dayBias == -1 ? shortCol : color.gray, 25),
          textcolor = color.white, size = size.small)
 
-// the level is marked faintly as soon as it is poked, but only labelled a SWEEP once a close confirms it
-if tierMtf and showSet and pokedNow
-    line.new(bar_index, swpLvl, bar_index + extBars, swpLvl, xloc = xloc.bar_index,
-         color = color.new(sigCol, 55), width = 1, style = line.style_dotted)
-
+// The level runs from the candle that MADE it to the bar that TOOK it, and stops there — a swept
+// level is spent. Nothing is drawn for a poke; only a confirmed sweep gets a line.
 if tierMtf and showSet and confirmedNow
-    line.new(swpBar, swpLvl, bar_index + extBars, swpLvl, xloc = xloc.bar_index,
-         color = sigCol, width = 2, style = line.style_dotted)
+    line.new(swpFrom, swpLvl, swpBar, swpLvl, xloc = xloc.bar_index,
+         color = sigCol, width = 2, style = line.style_dashed)
     label.new(swpBar, swpLvl, swpDir == -1 ? "sweep ▲ prev " + mtfTf + " H" : "sweep ▼ prev " + mtfTf + " L",
          xloc = xloc.bar_index, style = swpDir == -1 ? label.style_label_down : label.style_label_up,
          color = color.new(sigCol, 85), textcolor = sigCol, size = size.tiny)
@@ -565,8 +568,8 @@ if tierLtf and showRR and trigNow
          xloc = xloc.bar_index, style = label.style_label_left,
          color = color.new(color.gray, 15), textcolor = color.white, size = size.small)
 
-plot(tierMtf and inWindow ? dHigh : na, "HOD", color = color.new(color.gray, 10), style = plot.style_linebr)
-plot(tierMtf and inWindow ? dLow  : na, "LOD", color = color.new(color.gray, 10), style = plot.style_linebr)
+plot(tierLtf and inWindow ? dHigh : na, "HOD", color = color.new(color.gray, 10), style = plot.style_linebr)
+plot(tierLtf and inWindow ? dLow  : na, "LOD", color = color.new(color.gray, 10), style = plot.style_linebr)
 bgcolor(inWindow ? color.new(dayBias == 1 ? longCol : dayBias == -1 ? shortCol : color.gray, 88) : na, title = "Trade window (green long / red short bias)")
 
 // ---------------------------------------------------------------- Diagnostics panel
