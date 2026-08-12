@@ -18,7 +18,16 @@ the bias *it* creates — so the rule can be read straight off the 4h chart. Def
 - Closes **above** the previous 4h **high** → long. Closes **below** the previous **low** → short.
 - Took the previous **low** but **failed to close below** it → long (failed breakdown).
 - Took the previous **high** but **failed to close above** it → short (failed breakout).
-- Took both sides and closed inside, or an inside candle → no bias.
+- **Inside candle**, or took **both sides** and closed inside → the rule has no signal of its own.
+
+`Candles the rule cannot decide` controls those last two so that **no candle is left unmarked**:
+`Carry the previous bias` (default) keeps the bias already in force, since nothing happened to
+change it; `Bigger sweep wins` resolves two-sided candles by the side rejected harder (a deeper
+poke above the high → short); `Leave unmarked` shows the gaps instead.
+
+`Tag each 4h candle with its bias and the reason` puts one small label per closed candle — `L` or
+`S` plus the clause that decided it (`closed above prev high`, `swept low, closed back above`,
+`carried — inside candle`, …) — so the classification can be checked candle by candle.
 
 A trade acts on the bias from the last **closed** 4h candle, which is one candle behind the shade
 on the forming candle; `Shade shows` switches the colouring between the two. Sweeps are always
