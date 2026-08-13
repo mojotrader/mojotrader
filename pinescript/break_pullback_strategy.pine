@@ -23,6 +23,20 @@
 //   Stop: shallow -> range extreme (100%) ; deeper -> 75% line. Optional breakeven when the range level is reclaimed.
 //   TP long/short selectable: range level / +10% / +30% / +50% / HOD-LOD. One setup/day per range, EOD flatten.
 //
+// TARGETS - SCALE-OUT (on by default): instead of one target for the whole position, HALF comes off at target 1
+//   (+10% extension) and the other half runs to target 2 (+30%). Both halves keep the same stop, so a stop-out
+//   after the first half is booked is a much smaller loss. Turn "Scale out" off to go back to a single target.
+//
+// POSITION SIZE - two ways to size, picked with the "Sizing mode" dropdown:
+//   1) FIXED CONTRACTS - trade the same number of contracts every day, whatever the account is doing.
+//   2) RISK % - COMPOUNDING - risk X% of the capital per setup, where the capital is the equity at the START of
+//      the trading day. Win today and tomorrow's contracts are sized off the bigger account (compounding); lose
+//      and the next day's size steps back down. Two non-compounding variants are kept for comparison runs:
+//      a fixed account size, and a flat $ risk per setup.
+//   MINIMUM SIZE: a setup never trades under "Minimum contracts per setup" (2 by default). With average-down
+//   armed those contracts are SPLIT across the two entries - 2 becomes 1 + 1 - and a single-entry setup takes
+//   all 2 itself. That is also what makes the half-at-T1 / half-at-T2 scale-out possible on the smallest setup.
+//
 // PROBABILITY TABLE (bottom right) - how often price REACHES each level from a given starting point, walk-forward:
 //   - "From FILL" rows: from the entry fill to the EOD flatten, per range-size bucket.
 //   - "From 25% PB" / "From 50% PB" rows: from the moment price retraces to that fib. Two different starting
@@ -37,7 +51,6 @@ strategy("Break-then-Pullback (ORB + IB)", overlay = true, pyramiding = 6, max_b
      initial_capital = 30000, margin_long = 0, margin_short = 0,
      default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
      commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
-// NOTE: position sizing uses a FIXED account size (see 'Account size $' input) - it does NOT compound with P&L.
 
 // ---------------------------------------------------------------- Strategy toggles (isolate each for backtesting)
 gStrat    = "Strategies (toggle to track each separately)"
@@ -60,28 +73,40 @@ ibWed     = input.bool(true, "IB Wednesday", group = gDayI)
 ibThu     = input.bool(true, "IB Thursday",  group = gDayI)
 ibFri     = input.bool(true, "IB Friday",    group = gDayI)
 
-// ---------------------------------------------------------------- Risk sizing (% of a FIXED capital, or a flat $ - no compounding)
-gRisk       = "Risk sizing"
-useRiskSize = input.bool(false, "Size by risk (else use the contracts below)", group = gRisk,
-     tooltip = "OFF (default): trade exactly the contract counts set below - the R/R tool, the strategy orders and the webhook all use them. ON: ignore those counts and size each entry so the setup's risk equals the per-setup risk below, split across its units.")
-orbQtyIn    = input.float(2, "ORB contracts per entry", minval = 1, step = 1, group = gRisk,
-     tooltip = "Contracts for ONE ORB entry unit. With average-down on, a shallow ORB setup fires two of these units, so the setup's total is 2x this number (the R/R label shows both the per-unit and the setup total).")
-ibQtyIn     = input.float(1, "IB contracts per entry", minval = 1, step = 1, group = gRisk,
-     tooltip = "Contracts for ONE IB entry unit. With average-down on, a shallow IB setup fires two of these units.")
-acctSize    = input.float(30000, "Account size $ (fixed - NO compounding)", minval = 1, group = gRisk,
-     tooltip = "Sizing uses this constant capital every day; it does NOT grow/shrink with P&L. So the dollar risk per trade is the same every day (no compounding).")
-riskMode    = input.string("% of capital", "Risk per setup measured in", options = ["% of capital", "$ per setup"], group = gRisk,
-     tooltip = "% of capital: the setup risks that percentage of the fixed account size above. $ per setup: the setup risks a flat dollar amount regardless of the account size - useful when you want the same dollar risk across instruments, or when comparing runs without the account size confusing the picture. Whichever is selected, the other input is ignored.")
+// ---------------------------------------------------------------- Position sizing (fixed contracts, or % risk with compounding)
+gRisk       = "Position sizing"
+sizeMode    = input.string("Fixed contracts", "Sizing mode",
+     options = ["Fixed contracts", "Risk % - COMPOUNDING", "Risk % - fixed capital", "Risk $ per setup"], group = gRisk,
+     tooltip = "Fixed contracts: trade the same size every day - the contracts below, whatever the account is doing.\n\nRisk % - COMPOUNDING: risk that % of the capital per setup, where capital = the EQUITY AT THE START OF THE DAY. Every winning day raises tomorrow's size, every losing day lowers it, so profits compound and drawdowns shrink the bet. Size never changes in the middle of a day, so one trade's outcome cannot resize the next trade on the same day.\n\nRisk % - fixed capital: same math on the constant 'Account size $' - no compounding, for comparing runs.\n\nRisk $ per setup: a flat dollar risk regardless of account size.")
+orbQtyIn    = input.float(2, "Fixed: ORB contracts per SETUP", minval = 1, step = 1, group = gRisk,
+     tooltip = "Used in 'Fixed contracts' mode: contracts for the WHOLE ORB setup, not per entry. With average-down armed they are split across the two entries (2 -> 1 + 1); with a single entry the setup takes them all (2). Raised to the minimum below if it is set higher.")
+ibQtyIn     = input.float(2, "Fixed: IB contracts per SETUP", minval = 1, step = 1, group = gRisk,
+     tooltip = "Used in 'Fixed contracts' mode: contracts for the WHOLE IB setup, split the same way as the ORB one.")
+minQty      = input.int(2, "Minimum contracts per setup", minval = 1, group = gRisk,
+     tooltip = "The floor on a setup's total size, in every sizing mode. 2 is the default because the scale-out needs two contracts to take half off at target 1 and let half run to target 2. With average-down armed the floor is shared by the two entries (2 -> at least 1 each); with one entry it applies to that entry alone.")
+minQtyMode  = input.string("Round up to the minimum", "If risk sizing lands under the minimum", options = ["Round up to the minimum", "Skip the setup"], group = gRisk,
+     tooltip = "Only affects the risk-based modes. Round up: take the minimum size anyway - on a wide stop that risks MORE than the configured %, which is the price of always being in the trade. Skip the setup: take no trade when the risk budget cannot pay for the minimum size, keeping the risk cap strict.")
+acctSize    = input.float(30000, "Account size $ (non-compounding modes)", minval = 1, group = gRisk,
+     tooltip = "The constant capital used by 'Risk % - fixed capital'. Ignored by the compounding mode, which reads the day's starting equity instead.")
 riskPct     = input.float(1.0, "  Risk per setup (% of capital)", minval = 0.1, step = 0.1, group = gRisk,
-     tooltip = "Used when 'Risk per setup measured in' = % of capital. Total risk for one strategy's setup, split equally between its entry units. 1% on 30k = $300 = $150 per unit (with average-down on).")
+     tooltip = "Used by both Risk % modes. Total risk for one strategy's setup, split equally between its entry units. 1% on 30k = $300 = $150 per unit (with average-down on).")
 riskDlr     = input.float(300, "  Risk per setup ($)", minval = 1, step = 25, group = gRisk,
-     tooltip = "Used when 'Risk per setup measured in' = $ per setup. Total dollar risk for one strategy's setup, split equally between its entry units - $300 with average-down on is $150 per unit. The stop distance then decides the contract count.")
+     tooltip = "Used by 'Risk $ per setup'. Total dollar risk for one strategy's setup, split equally between its entry units - $300 with average-down on is $150 per unit. The stop distance then decides the contract count.")
 maxDayPct   = input.float(2.0, "Daily max loss (% of capital, 0 = off)", minval = 0, step = 0.5, group = gRisk,
-     tooltip = "Once the day's loss reaches this % of the day's starting equity, open trades are closed and no new trades are taken until the next day. This one is always a percentage of the account size, independent of how the per-setup risk is expressed.")
+     tooltip = "Once the day's loss reaches this % of the sizing capital, open trades are closed and no new trades are taken until the next day. In the compounding mode that capital is the day's starting equity, so the daily stop compounds with the account too.")
 
-// The $ risk a whole setup may lose, however it was expressed. Every sizing calculation below reads
-// this, so the two inputs never both apply and switching mode changes nothing else.
-setupBudget = riskMode == "$ per setup" ? riskDlr : acctSize * (riskPct / 100.0)
+useRiskSize = sizeMode != "Fixed contracts"
+compounding = sizeMode == "Risk % - COMPOUNDING"
+forceMinQty = minQtyMode == "Round up to the minimum"
+
+// ---------------------------------------------------------------- Targets / scale-out
+gTgt      = "Targets"
+scaleOut  = input.bool(true, "Scale out: half at target 1, half at target 2", group = gTgt,
+     tooltip = "ON (default): half the setup's contracts exit at target 1 and the rest run to target 2, both halves protected by the same stop. OFF: the whole position uses the single per-strategy target of the hardcoded config (ORB long +10% / short +30%, IB +30%).\n\nOdd sizes give the extra contract to the runner (3 -> 1 out at T1, 2 to T2). A setup that ends up with a single contract cannot be halved, so it runs to target 2 alone - the minimum size above is what stops that happening.")
+tp1Sel    = input.string("Ext 10%", "  Target 1 (first half)",  options = ["Range level", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gTgt,
+     tooltip = "Where the first half comes off. Extensions are measured from the broken range level, in multiples of the range height.")
+tp2Sel    = input.string("Ext 30%", "  Target 2 (runner)", options = ["Range level", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gTgt,
+     tooltip = "Where the remaining half comes off. It is also the level the setup is considered finished at, which is when a held-back IB gets its turn.")
 
 // ---------------------------------------------------------------- HARDCODED CONFIG (edit values here)
 // Session
@@ -100,7 +125,7 @@ orbTpL    = "Ext 10%"
 orbTpS    = "Ext 30%"
 orbDeepSL = "75% line"
 orbBE     = false
-orbQty    = orbQtyIn          // contracts per ORB unit (from the Risk sizing group)
+orbQty    = orbQtyIn          // fixed-mode contracts for the whole ORB setup (Position sizing group)
 orbCutH   = 15
 orbCutM   = 0
 // IB settings
@@ -112,7 +137,7 @@ ibTpL     = "Ext 30%"
 ibTpS     = "Ext 30%"
 ibDeepSL  = "75% line"
 ibBE      = false
-ibQty     = ibQtyIn           // contracts per IB unit (from the Risk sizing group)
+ibQty     = ibQtyIn           // fixed-mode contracts for the whole IB setup (Position sizing group)
 ibCutH    = 14
 ibCutM    = 0
 
@@ -131,6 +156,8 @@ pmtToken  = input.string("", "PickMyTrade token", group = grpA)
 pmtAcct   = input.string("", "Tradovate account id", group = grpA)
 pmtSym    = input.string("MNQ1!", "Broker symbol", group = grpA)
 pmtType   = input.string("market", "Order type", options = ["market", "limit"], group = grpA)
+pmtPartial = input.bool(false, "Send the scale-out as a partial order", group = grpA,
+     tooltip = "Only matters with the scale-out on. The entry alert carries the RUNNER's target, so the broker-side bracket would hold the whole position to target 2. With this on, hitting target 1 also fires an opposite-side order for just those contracts, which nets the position down on a futures account - the same half-off the backtest takes. Leave OFF until you have confirmed on PickMyTrade that a partial order reduces the position instead of opening a new one or reversing it, and that it does not fight the bracket already sitting at target 2.")
 
 // ---------------------------------------------------------------- Break alerts (manual trading)
 grpBA     = "Break alerts (manual)"
@@ -178,12 +205,21 @@ else if inSess
 tod     = hour(time, tz) * 60 + minute(time, tz)
 flatten = tod >= (flatH*60 + flatM)
 
-// fixed-capital sizing (NO compounding) + daily max-loss halt (today's P&L vs today's start equity)
+// COMPOUNDING BASE + daily max-loss halt (today's P&L vs today's start equity)
+// dayStartEq is the equity the day opened with. In the compounding mode it IS the sizing capital: every closed
+// day's profit or loss is folded into it before the next day sizes a trade, so wins compound into bigger size
+// and losses cut the size back. It is deliberately frozen for the whole session - an intraday swing (or an open
+// position's floating P&L) must never resize a trade that is being placed on the same day.
 var float dayStartEq = na
 if newSession
     dayStartEq := strategy.equity
 dayPnL    = strategy.equity - dayStartEq              // today's P&L incl. open
-dailyHalt = maxDayPct > 0 and dayPnL <= -(acctSize * maxDayPct / 100.0)
+sizeCap   = compounding ? (na(dayStartEq) ? strategy.initial_capital : dayStartEq) : acctSize
+dailyHalt = maxDayPct > 0 and dayPnL <= -(sizeCap * maxDayPct / 100.0)
+
+// The $ risk a whole setup may lose, however it was expressed. Every sizing calculation below reads this one
+// value, so switching mode changes nothing else and the unused inputs simply do not apply.
+setupBudget = sizeMode == "Risk $ per setup" ? riskDlr : sizeCap * (riskPct / 100.0)
 
 // day-of-week gates (per strategy)
 dow      = dayofweek(time, tz)
@@ -200,19 +236,42 @@ if newSession
 if ib_rDone
     ibFormed := true
 
-// position sizer: contracts for a given $ budget and stop distance (points).
-// round: fractional <= .5 -> down, > .5 -> up (2.1-2.5 -> 2, >2.5 -> 3). Min 1 when the unit's risk >= 0.5%.
-f_size(float budget, float ptDist, float unitPct) =>
+// position sizer: contracts for ONE entry unit, given its $ budget and stop distance (points).
+// round: fractional <= .5 -> down, > .5 -> up (2.1-2.5 -> 2, >2.5 -> 3). minN is the unit's share of the
+// minimum setup size; under it the unit is either rounded up (risking more than the budget) or zeroed, which
+// makes the caller skip the setup entirely.
+f_size(float budget, float ptDist, float minN) =>
     perC = ptDist * ptVal
     raw  = perC > 0 ? budget / perC : 0.0
     fr   = raw - math.floor(raw)
-    n = fr > 0.5 ? math.ceil(raw) : math.floor(raw)
-    n := (unitPct >= 0.5 and n < 1) ? 1 : n
+    float n = fr > 0.5 ? math.ceil(raw) : math.floor(raw)
+    if n < minN
+        n := forceMinQty ? minN : 0.0
     n
+
+// scale-out split for ONE entry unit: how many of its contracts exit at target 1, how many run to target 2.
+// A unit of 2+ halves itself (the odd contract runs). A unit of exactly 1 cannot be halved, so the two entries
+// of an average-down setup cover a half each - the second (better-priced) unit banks target 1, the first runs.
+// The split is fixed when the setup is sized, so an exit order is never re-cut after it has been placed.
+f_tpSplit(float q, bool unit2) =>
+    float a = 0.0
+    if scaleOut and q > 0
+        if q >= 2
+            a := math.floor(q / 2) * 1.0
+        else if unit2
+            a := q
+    [a, q - a]
 
 // TP resolver
 f_tp(int d, float rH, float rL, float rg, float dHi, float dLo, string tpL, string tpS) =>
     d == 1 ? (tpL == "HOD/LOD" ? dHi : tpL == "Ext 10%" ? rH + 0.10*rg : tpL == "Ext 30%" ? rH + 0.30*rg : tpL == "Ext 50%" ? rH + 0.50*rg : rH) : (tpS == "HOD/LOD" ? dLo : tpS == "Ext 10%" ? rL - 0.10*rg : tpS == "Ext 30%" ? rL - 0.30*rg : tpS == "Ext 50%" ? rL - 0.50*rg : rL)
+
+// the pair of targets a setup works with: [first half, runner]. With the scale-out off both are the single
+// per-strategy target, so every caller can treat the setup as "some contracts at t1, the rest at t2".
+f_tpPair(int d, float rH, float rL, float rg, float dHi, float dLo, string tpL, string tpS) =>
+    t2 = scaleOut ? f_tp(d, rH, rL, rg, dHi, dLo, tp2Sel, tp2Sel) : f_tp(d, rH, rL, rg, dHi, dLo, tpL, tpS)
+    t1 = scaleOut ? f_tp(d, rH, rL, rg, dHi, dLo, tp1Sel, tp1Sel) : t2
+    [t1, t2]
 
 // ================================================================ Historical-probability stats
 // TWO walk-forward studies are collected (a day is only added to the sample after its EOD flatten, so the numbers
@@ -375,8 +434,13 @@ var float or_curTP = na
 var bool  or_beDone = false
 var bool  or_closed = false
 var bool  or_oppBroke = false
+var float or_tp1 = na            // first-half target (scale-out); na when the whole position uses one target
 var float orbSz1 = na
 var float orbSz2 = na
+var float orbA1 = 0              // unit 1: contracts exiting at target 1 / running to target 2
+var float orbB1 = 0
+var float orbA2 = 0              // unit 2 (average-down): same split
+var float orbB2 = 0
 
 if newSession
     or_rH := na
@@ -397,8 +461,13 @@ if newSession
     or_beDone := false
     or_closed := false
     or_oppBroke := false
+    or_tp1 := na
     orbSz1 := na
     orbSz2 := na
+    orbA1 := 0
+    orbB1 := 0
+    orbA2 := 0
+    orbB2 := 0
 if or_inR
     if na(or_rH) or high > or_rH
         or_rH := high
@@ -423,11 +492,22 @@ if or_rDone and not na(or_rH) and or_rH > or_rL
         or_e2 := or_rL + 0.5*or_rng
         or_zstop := or_shallow ? or_rH : (orbDeepSL == "75% line" ? or_rL + 0.75*or_rng : or_rH)
     if or_dir != 0
-        orbU  = (orbAvg and or_shallow) ? 2 : 1                            // units this setup will use
-        orbBud = setupBudget / orbU                                        // $ risk budget per unit
-        orbUPct = orbBud / acctSize * 100.0                                // that unit's risk as a % of capital
-        orbSz1 := useRiskSize ? f_size(orbBud, math.abs(or_e1 - or_zstop), orbUPct) : orbQty
-        orbSz2 := useRiskSize ? f_size(orbBud, math.abs(or_e2 - or_zstop), orbUPct) : orbQty
+        orbU   = (orbAvg and or_shallow) ? 2 : 1                           // entry units this setup will use
+        orbTot = math.max(orbQty, minQty)                                  // fixed mode: contracts for the SETUP
+        orbBud = setupBudget / orbU                                        // risk mode: $ budget per unit
+        orbMin = math.ceil(minQty * 1.0 / orbU) * 1.0                      // each unit's share of the minimum
+        if useRiskSize
+            orbSz1 := f_size(orbBud, math.abs(or_e1 - or_zstop), orbMin)
+            orbSz2 := orbU == 2 ? f_size(orbBud, math.abs(or_e2 - or_zstop), orbMin) : 0.0
+        else
+            orbSz1 := orbU == 2 ? math.ceil(orbTot / 2) * 1.0 : orbTot     // 2 contracts -> 1 + 1
+            orbSz2 := orbU == 2 ? math.floor(orbTot / 2) * 1.0 : 0.0
+        [oa1, ob1] = f_tpSplit(orbSz1, false)
+        [oa2, ob2] = f_tpSplit(orbSz2, true)
+        orbA1 := oa1
+        orbB1 := ob1
+        orbA2 := oa2
+        orbB2 := ob2
 or_useAdd = orbAvg and or_shallow and not na(or_e2)
 // break by selected type
 or_brk = orbBreak == "Wick (touch)" ? ((or_dir == 1 and high >= or_rH) or (or_dir == -1 and low <= or_rL)) : ((or_dir == 1 and close > or_rH) or (or_dir == -1 and close < or_rL))
@@ -455,19 +535,21 @@ if or_placed and not or_closed
     if or_dir == 1
         if not or_f1 and low <= or_e1
             or_f1 := true
-        if or_useAdd and not or_f2 and low <= or_e2
+        if or_useAdd and orbSz2 >= 1 and not or_f2 and low <= or_e2
             or_f2 := true
     if or_dir == -1
         if not or_f1 and high >= or_e1
             or_f1 := true
-        if or_useAdd and not or_f2 and high >= or_e2
+        if or_useAdd and orbSz2 >= 1 and not or_f2 and high >= or_e2
             or_f2 := true
 or_firstFill = (or_f1 or or_f2) and not (or_f1[1] or or_f2[1])
 if or_f1 or or_f2
     or_avgPx := or_f1 and or_f2 ? (or_e1 + or_e2) / 2 : or_f1 ? or_e1 : or_e2
 if or_firstFill
     or_curStop := or_zstop
-    or_curTP := f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
+    [orT1, orT2] = f_tpPair(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
+    or_tp1   := orT1
+    or_curTP := orT2                                  // the runner's target = where the setup is finished
     or_beDone := false
 if orbBE and not or_beDone and (or_f1 or or_f2) and not or_closed
     if or_dir == 1 and high >= or_rH
@@ -476,11 +558,28 @@ if orbBE and not or_beDone and (or_f1 or or_f2) and not or_closed
     if or_dir == -1 and low <= or_rL
         or_curStop := math.min(or_curStop, or_avgPx)
         or_beDone := true
+// Exits. Each entry unit gets up to two bracket orders: its target-1 share and its target-2 share, both carrying
+// the same stop, so whichever half is still open is always protected. With the scale-out off the target-1 share
+// is zero and the unit exits in one piece, exactly as before.
 if not na(or_curStop)
-    strategy.exit("ORLx",  from_entry = "ORL",  stop = or_curStop, limit = or_curTP)
-    strategy.exit("ORL2x", from_entry = "ORL2", stop = or_curStop, limit = or_curTP)
-    strategy.exit("ORSx",  from_entry = "ORS",  stop = or_curStop, limit = or_curTP)
-    strategy.exit("ORS2x", from_entry = "ORS2", stop = or_curStop, limit = or_curTP)
+    if or_dir == 1
+        if orbA1 > 0
+            strategy.exit("ORLx1",  from_entry = "ORL",  qty = orbA1, stop = or_curStop, limit = or_tp1)
+        if orbB1 > 0
+            strategy.exit("ORLx",   from_entry = "ORL",  qty = orbB1, stop = or_curStop, limit = or_curTP)
+        if orbA2 > 0
+            strategy.exit("ORL2x1", from_entry = "ORL2", qty = orbA2, stop = or_curStop, limit = or_tp1)
+        if orbB2 > 0
+            strategy.exit("ORL2x",  from_entry = "ORL2", qty = orbB2, stop = or_curStop, limit = or_curTP)
+    else
+        if orbA1 > 0
+            strategy.exit("ORSx1",  from_entry = "ORS",  qty = orbA1, stop = or_curStop, limit = or_tp1)
+        if orbB1 > 0
+            strategy.exit("ORSx",   from_entry = "ORS",  qty = orbB1, stop = or_curStop, limit = or_curTP)
+        if orbA2 > 0
+            strategy.exit("ORS2x1", from_entry = "ORS2", qty = orbA2, stop = or_curStop, limit = or_tp1)
+        if orbB2 > 0
+            strategy.exit("ORS2x",  from_entry = "ORS2", qty = orbB2, stop = or_curStop, limit = or_curTP)
 if (or_f1 or or_f2) and not or_closed and not na(or_curStop)
     if or_dir == 1 and (low <= or_curStop or high >= or_curTP)
         or_closed := true
@@ -625,8 +724,13 @@ var bool  ib_beDone = false
 var bool  ib_closed = false
 var bool  ib_oppBroke = false
 var bool  ib_missed = false      // the IB pullback was reached while an ORB trade held the seat -> skip IB today
+var float ib_tp1 = na            // first-half target (scale-out); na when the whole position uses one target
 var float ibSz1 = na
 var float ibSz2 = na
+var float ibA1 = 0               // unit 1: contracts exiting at target 1 / running to target 2
+var float ibB1 = 0
+var float ibA2 = 0               // unit 2 (average-down): same split
+var float ibB2 = 0
 
 if newSession
     ib_rH := na
@@ -648,8 +752,13 @@ if newSession
     ib_closed := false
     ib_oppBroke := false
     ib_missed := false
+    ib_tp1 := na
     ibSz1 := na
     ibSz2 := na
+    ibA1 := 0
+    ibB1 := 0
+    ibA2 := 0
+    ibB2 := 0
 if ib_inR
     if na(ib_rH) or high > ib_rH
         ib_rH := high
@@ -674,11 +783,22 @@ if ib_rDone and not na(ib_rH) and ib_rH > ib_rL
         ib_e2 := ib_rL + 0.5*ib_rng
         ib_zstop := ib_shallow ? ib_rH : (ibDeepSL == "75% line" ? ib_rL + 0.75*ib_rng : ib_rH)
     if ib_dir != 0
-        ibU  = (ibAvg and ib_shallow) ? 2 : 1
+        ibU   = (ibAvg and ib_shallow) ? 2 : 1
+        ibTot = math.max(ibQty, minQty)
         ibBud = setupBudget / ibU
-        ibUPct = ibBud / acctSize * 100.0
-        ibSz1 := useRiskSize ? f_size(ibBud, math.abs(ib_e1 - ib_zstop), ibUPct) : ibQty
-        ibSz2 := useRiskSize ? f_size(ibBud, math.abs(ib_e2 - ib_zstop), ibUPct) : ibQty
+        ibMin = math.ceil(minQty * 1.0 / ibU) * 1.0
+        if useRiskSize
+            ibSz1 := f_size(ibBud, math.abs(ib_e1 - ib_zstop), ibMin)
+            ibSz2 := ibU == 2 ? f_size(ibBud, math.abs(ib_e2 - ib_zstop), ibMin) : 0.0
+        else
+            ibSz1 := ibU == 2 ? math.ceil(ibTot / 2) * 1.0 : ibTot
+            ibSz2 := ibU == 2 ? math.floor(ibTot / 2) * 1.0 : 0.0
+        [ia1, ib1] = f_tpSplit(ibSz1, false)
+        [ia2, ib2] = f_tpSplit(ibSz2, true)
+        ibA1 := ia1
+        ibB1 := ib1
+        ibA2 := ia2
+        ibB2 := ib2
 // INTERACTION: an OPEN ORB trade always keeps priority - the IB order is held back (either direction, so the two
 // can never stack risk or hedge each other). The IB is not cancelled, only delayed: the moment the ORB closes
 // (target, stop or the flip of its own exit) the IB limit goes in, provided price has NOT already traded through
@@ -711,19 +831,21 @@ if ib_placed and not ib_closed
     if ib_dir == 1
         if not ib_f1 and low <= ib_e1
             ib_f1 := true
-        if ib_useAdd and not ib_f2 and low <= ib_e2
+        if ib_useAdd and ibSz2 >= 1 and not ib_f2 and low <= ib_e2
             ib_f2 := true
     if ib_dir == -1
         if not ib_f1 and high >= ib_e1
             ib_f1 := true
-        if ib_useAdd and not ib_f2 and high >= ib_e2
+        if ib_useAdd and ibSz2 >= 1 and not ib_f2 and high >= ib_e2
             ib_f2 := true
 ib_firstFill = (ib_f1 or ib_f2) and not (ib_f1[1] or ib_f2[1])
 if ib_f1 or ib_f2
     ib_avgPx := ib_f1 and ib_f2 ? (ib_e1 + ib_e2) / 2 : ib_f1 ? ib_e1 : ib_e2
 if ib_firstFill
     ib_curStop := ib_zstop
-    ib_curTP := f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
+    [ibT1, ibT2] = f_tpPair(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
+    ib_tp1   := ibT1
+    ib_curTP := ibT2
     ib_beDone := false
 if ibBE and not ib_beDone and (ib_f1 or ib_f2) and not ib_closed
     if ib_dir == 1 and high >= ib_rH
@@ -733,10 +855,24 @@ if ibBE and not ib_beDone and (ib_f1 or ib_f2) and not ib_closed
         ib_curStop := math.min(ib_curStop, ib_avgPx)
         ib_beDone := true
 if not na(ib_curStop)
-    strategy.exit("IBLx",  from_entry = "IBL",  stop = ib_curStop, limit = ib_curTP)
-    strategy.exit("IBL2x", from_entry = "IBL2", stop = ib_curStop, limit = ib_curTP)
-    strategy.exit("IBSx",  from_entry = "IBS",  stop = ib_curStop, limit = ib_curTP)
-    strategy.exit("IBS2x", from_entry = "IBS2", stop = ib_curStop, limit = ib_curTP)
+    if ib_dir == 1
+        if ibA1 > 0
+            strategy.exit("IBLx1",  from_entry = "IBL",  qty = ibA1, stop = ib_curStop, limit = ib_tp1)
+        if ibB1 > 0
+            strategy.exit("IBLx",   from_entry = "IBL",  qty = ibB1, stop = ib_curStop, limit = ib_curTP)
+        if ibA2 > 0
+            strategy.exit("IBL2x1", from_entry = "IBL2", qty = ibA2, stop = ib_curStop, limit = ib_tp1)
+        if ibB2 > 0
+            strategy.exit("IBL2x",  from_entry = "IBL2", qty = ibB2, stop = ib_curStop, limit = ib_curTP)
+    else
+        if ibA1 > 0
+            strategy.exit("IBSx1",  from_entry = "IBS",  qty = ibA1, stop = ib_curStop, limit = ib_tp1)
+        if ibB1 > 0
+            strategy.exit("IBSx",   from_entry = "IBS",  qty = ibB1, stop = ib_curStop, limit = ib_curTP)
+        if ibA2 > 0
+            strategy.exit("IBS2x1", from_entry = "IBS2", qty = ibA2, stop = ib_curStop, limit = ib_tp1)
+        if ibB2 > 0
+            strategy.exit("IBS2x",  from_entry = "IBS2", qty = ibB2, stop = ib_curStop, limit = ib_curTP)
 if (ib_f1 or ib_f2) and not ib_closed and not na(ib_curStop)
     if ib_dir == 1 and (low <= ib_curStop or high >= ib_curTP)
         ib_closed := true
@@ -879,38 +1015,47 @@ f_pmt(string act, float q, float slp, float tpp) =>
       ',"tp":' + str.tostring(math.round_to_mintick(tpp)) + '}'
 liveORB  = (or_f1 or or_f2) and not or_closed
 autoStop = liveORB ? or_curStop : ib_curStop
-autoTP   = liveORB ? or_curTP  : ib_curTP
+autoTP   = liveORB ? or_curTP  : ib_curTP     // the runner's target; the first half is taken off by the alert below
 autoQty  = math.abs(strategy.position_size)   // actual net contracts (respects % sizing)
 buyNow   = strategy.position_size > 0 and (strategy.position_size[1] <= 0 or strategy.position_size > strategy.position_size[1])
 sellNow  = strategy.position_size < 0 and (strategy.position_size[1] >= 0 or strategy.position_size < strategy.position_size[1])
 closeNow = flatten and strategy.position_size[1] != 0
+// a scale-out: the position shrank but is not flat and did not flip - i.e. the first half hit its target
+partNow  = pmtPartial and not closeNow and strategy.position_size != 0 and strategy.position_size[1] != 0 and
+     math.sign(strategy.position_size) == math.sign(strategy.position_size[1]) and
+     math.abs(strategy.position_size) < math.abs(strategy.position_size[1])
+partQty  = math.abs(strategy.position_size[1]) - math.abs(strategy.position_size)
 if autoOn and buyNow
     alert(f_pmt("buy",  autoQty, autoStop, autoTP), alert.freq_once_per_bar)
 if autoOn and sellNow
     alert(f_pmt("sell", autoQty, autoStop, autoTP), alert.freq_once_per_bar)
+if autoOn and partNow
+    alert(f_pmt(strategy.position_size > 0 ? "sell" : "buy", partQty, 0.0, 0.0), alert.freq_once_per_bar)
 if autoOn and closeNow
     alert(f_pmt("close", 0, 0.0, 0.0), alert.freq_once_per_bar)
 
 // ---------------------------------------------------------------- Break alerts (fire once when each range breaks)
 if brkAlerts and runORB and or_dir != 0 and or_broke and not or_broke[1]
-    orTPa = f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
+    [orTP1a, orTP2a] = f_tpPair(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
     alert("ORB BREAK  " + (or_dir == 1 ? "LONG" : "SHORT") +
          "  | broke " + str.tostring(math.round_to_mintick(or_dir == 1 ? or_rH : or_rL)) +
          "  | pullback entry " + str.tostring(math.round_to_mintick(or_e1)) +
          "  | stop " + str.tostring(math.round_to_mintick(or_zstop)) +
-         "  | target " + str.tostring(math.round_to_mintick(orTPa)), alert.freq_once_per_bar)
+         (scaleOut ? "  | half out " + str.tostring(math.round_to_mintick(orTP1a)) + ", rest " : "  | target ") +
+         str.tostring(math.round_to_mintick(orTP2a)), alert.freq_once_per_bar)
 if brkAlerts and runIB and ib_dir != 0 and ib_broke and not ib_broke[1]
-    ibTPa = f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
+    [ibTP1a, ibTP2a] = f_tpPair(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
     alert("IB BREAK  " + (ib_dir == 1 ? "LONG" : "SHORT") +
          "  | broke " + str.tostring(math.round_to_mintick(ib_dir == 1 ? ib_rH : ib_rL)) +
          "  | pullback entry " + str.tostring(math.round_to_mintick(ib_e1)) +
          "  | stop " + str.tostring(math.round_to_mintick(ib_zstop)) +
-         "  | target " + str.tostring(math.round_to_mintick(ibTPa)), alert.freq_once_per_bar)
+         (scaleOut ? "  | half out " + str.tostring(math.round_to_mintick(ibTP1a)) + ", rest " : "  | target ") +
+         str.tostring(math.round_to_mintick(ibTP2a)), alert.freq_once_per_bar)
 
 // ---------------------------------------------------------------- Risk/Reward + fib tool
 // Drawn when the ENTRY ORDER IS ACTUALLY PLACED (or_placed / ib_placed), so a break that any filter rejects -
-// wrong weekday, range too small, past the cutoff, IB already formed, double-break day, daily loss halt, sizing
-// under one contract, or an IB waiting behind an open ORB - draws nothing at all.
+// wrong weekday, range too small, past the cutoff, IB already formed, double-break day, daily loss halt, a risk
+// budget too small for the minimum size, or an IB waiting behind an open ORB - draws nothing at all.
 // ANCHORING: y is price and x is BAR INDEX, both fixed at creation. The box is one bar wide to begin with and its
 // right edge is extended bar by bar while the setup is live, so it always covers real bars - it never projects
 // into empty space past the last bar and never stretches across a session gap. Nothing moves when you pan or zoom.
@@ -931,25 +1076,32 @@ f_trimDraws() =>
         while array.size(dLab) > keepLab
             label.delete(array.shift(dLab))
 
-// q = contracts on this entry. ent2/q2 describe the average-down unit when one is armed - it gets no box of its
-// own, its numbers ride along in the label so the chart stays readable.
-f_drawRR(int d, float ent, float zstop, float ptp, float q, color sigCol, string tag, float ent2, float q2) =>
-    riskUsd = math.abs(ent - zstop) * ptVal * q
-    rewUsd  = math.abs(ptp - ent) * ptVal * q
+// a1/b1 are unit 1's contracts going to target 1 / target 2; a2/b2 the same for the average-down unit (ent2),
+// which gets no box of its own - its numbers ride along in the label so the chart stays readable. The reward box
+// is drawn to the RUNNER's target, and the $ reward is the blended figure both halves actually produce.
+f_drawRR(int d, float ent, float zstop, float t1, float t2, float a1, float b1, color sigCol, string tag, float ent2, float a2, float b2) =>
+    q1 = a1 + b1
+    q2 = a2 + b2
+    hasAdd = not na(ent2) and q2 > 0
+    riskUsd = (math.abs(ent - zstop) * q1 + (hasAdd ? math.abs(ent2 - zstop) * q2 : 0.0)) * ptVal
+    rewUsd  = (a1 * math.abs(t1 - ent) + b1 * math.abs(t2 - ent) +
+         (hasAdd ? a2 * math.abs(t1 - ent2) + b2 * math.abs(t2 - ent2) : 0.0)) * ptVal
     risk1   = math.abs(ent - zstop) * ptVal
-    rew1    = math.abs(ptp - ent) * ptVal
     rrr = riskUsd > 0 ? rewUsd / riskUsd : na
-    bw = box.new(bar_index, d == 1 ? ptp : ent, bar_index + 1, d == 1 ? ent : ptp, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.green, 82))
+    bw = box.new(bar_index, d == 1 ? t2 : ent, bar_index + 1, d == 1 ? ent : t2, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.green, 82))
     br = box.new(bar_index, d == 1 ? ent : zstop, bar_index + 1, d == 1 ? zstop : ent, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.red, 82))
-    txt = tag + "  " + str.tostring(q, "#.#") + " contract" + (q == 1 ? "" : "s") +
-         "  Risk $" + str.tostring(riskUsd, "#") + " | Reward $" + str.tostring(rewUsd, "#") + " (" + str.tostring(rrr, "#.##") + "R)" +
-         "\n1 contract: Risk $" + str.tostring(risk1, "#") + " | Reward $" + str.tostring(rew1, "#")
-    if not na(ent2) and q2 > 0
-        totR = riskUsd + math.abs(ent2 - zstop) * ptVal * q2
-        totW = rewUsd  + math.abs(ptp - ent2)  * ptVal * q2
-        txt := txt + "\n+ avg-down " + str.tostring(q2, "#.#") + " @ " + str.tostring(math.round_to_mintick(ent2)) +
-             "  ->  setup total Risk $" + str.tostring(totR, "#") + " | Reward $" + str.tostring(totW, "#") +
-             " (" + str.tostring(totR > 0 ? totW / totR : na, "#.##") + "R)"
+    txt = tag + "  " + str.tostring(q1 + q2, "#.#") + " contract" + (q1 + q2 == 1 ? "" : "s") +
+         "  Risk $" + str.tostring(riskUsd, "#") + " | Reward $" + str.tostring(rewUsd, "#") + " (" + str.tostring(rrr, "#.##") + "R)"
+    if hasAdd
+        txt := txt + "\nentry " + str.tostring(q1, "#.#") + " @ " + str.tostring(math.round_to_mintick(ent)) +
+             "  +  avg-down " + str.tostring(q2, "#.#") + " @ " + str.tostring(math.round_to_mintick(ent2))
+    txt := txt + (a1 + a2 > 0 ?
+         "\nT1 " + str.tostring(a1 + a2, "#.#") + " @ " + str.tostring(math.round_to_mintick(t1)) +
+         "  |  T2 " + str.tostring(b1 + b2, "#.#") + " @ " + str.tostring(math.round_to_mintick(t2)) :
+         "\ntarget " + str.tostring(math.round_to_mintick(t2)) + " (no scale-out)")
+    txt := txt + "\n1 contract: Risk $" + str.tostring(risk1, "#") +
+         (a1 + a2 > 0 ? " | to T1 $" + str.tostring(math.abs(t1 - ent) * ptVal, "#") : "") +
+         " | to " + (a1 + a2 > 0 ? "T2 $" : "target $") + str.tostring(math.abs(t2 - ent) * ptVal, "#")
     lb = label.new(bar_index + 1, ent, txt, xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.gray, 15), textcolor = color.white, size = size.small)
     array.push(dBox, bw)
     array.push(dBox, br)
@@ -980,14 +1132,15 @@ var label orbLb = na
 var bool  orbGrow = false
 var array<line> orbFib = array.new<line>()
 if runORB and or_placed and not or_placed[1] and not na(or_e1) and not na(or_zstop)
-    orTP = f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
+    [orTPa, orTPb] = f_tpPair(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
     orbBw := na
     orbBr := na
     orbLb := na
     if showFibs
         f_drawFibs(or_rL, or_rng, color.new(color.orange, 0), orbFib)
     if showRR
-        [bw, br, lb] = f_drawRR(or_dir, or_e1, or_zstop, orTP, orbSz1, color.new(color.orange, 0), "ORB", (or_useAdd and orbSz2 >= 1) ? or_e2 : na, or_useAdd ? orbSz2 : 0)
+        [bw, br, lb] = f_drawRR(or_dir, or_e1, or_zstop, orTPa, orTPb, orbA1, orbB1, color.new(color.orange, 0), "ORB",
+             (or_useAdd and orbSz2 >= 1) ? or_e2 : na, or_useAdd ? orbA2 : 0, or_useAdd ? orbB2 : 0)
         orbBw := bw
         orbBr := br
         orbLb := lb
@@ -1004,14 +1157,15 @@ var label ibLb = na
 var bool  ibGrow = false
 var array<line> ibFib = array.new<line>()
 if runIB and ib_placed and not ib_placed[1] and not na(ib_e1) and not na(ib_zstop)
-    ibTP = f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
+    [ibTPa, ibTPb] = f_tpPair(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
     ibBw := na
     ibBr := na
     ibLb := na
     if showFibs
         f_drawFibs(ib_rL, ib_rng, color.new(color.teal, 0), ibFib)
     if showRR
-        [bw2, br2, lb2] = f_drawRR(ib_dir, ib_e1, ib_zstop, ibTP, ibSz1, color.new(color.teal, 0), "IB", (ib_useAdd and ibSz2 >= 1) ? ib_e2 : na, ib_useAdd ? ibSz2 : 0)
+        [bw2, br2, lb2] = f_drawRR(ib_dir, ib_e1, ib_zstop, ibTPa, ibTPb, ibA1, ibB1, color.new(color.teal, 0), "IB",
+             (ib_useAdd and ibSz2 >= 1) ? ib_e2 : na, ib_useAdd ? ibA2 : 0, ib_useAdd ? ibB2 : 0)
         ibBw := bw2
         ibBr := br2
         ibLb := lb2
@@ -1025,7 +1179,14 @@ if ibGrow
 // ---------------------------------------------------------------- Strategy rules panel (top-right)
 var table info = na
 if showInfo and barstate.islast
-    info := table.new(position.top_right, 1, 14, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
+    tgtTxt = scaleOut ? "Targets: half @ " + tp1Sel + ", rest @ " + tp2Sel + " (same stop)"
+         : "Target: ORB L " + orbTpL + " / S " + orbTpS + " ; IB " + ibTpL
+    szTxt  = sizeMode == "Fixed contracts" ? "Size: fixed " + str.tostring(math.max(orbQty, minQty), "#") + " ORB / " + str.tostring(math.max(ibQty, minQty), "#") + " IB per setup"
+         : compounding ? "Size: " + str.tostring(riskPct, "#.##") + "% of the day's EQUITY - compounds daily"
+         : sizeMode == "Risk $ per setup" ? "Size: $" + str.tostring(riskDlr, "#") + " risk per setup (flat)"
+         : "Size: " + str.tostring(riskPct, "#.##") + "% of a fixed $" + str.tostring(acctSize, "#")
+    minTxt = "Min " + str.tostring(minQty) + " contracts/setup; avg-down splits them"
+    info := table.new(position.top_right, 1, 16, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
     table.cell(info, 0, 0,  "BREAK-THEN-PULLBACK  (ORB + IB)",                    text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 1,  "Ranges: ORB 09:30-09:45 | IB 09:30-10:30 (ET)",      text_color = color.white,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 2,  "Direction: low-first = LONG, high-first = SHORT",     text_color = color.white,  text_size = size.small, text_halign = text.align_left)
@@ -1033,13 +1194,15 @@ if showInfo and barstate.islast
     table.cell(info, 0, 4,  "Enter AFTER the range breaks; limit at fib pullback:", text_color = color.white, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 5,  "  shallow -> 25% line | deeper -> 50% line",          text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 6,  "Stop: shallow = range extreme | deeper = 75% line",   text_color = color.white,  text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 7,  "Target: ORB L +10% / S +30% ; IB +30% extension",    text_color = color.white,  text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 7,  tgtTxt,                                               text_color = color.white,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 8,  "Avg-down: 2nd unit @ 50% (shallow setups)",           text_color = color.silver, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 9,  "One at a time: IB waits for an open ORB to close",    text_color = color.silver, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 13, orbCarry ? "ORB carry ON: unfilled ORB rests past 10:30" : "ORB carry off (unfilled ORB dies at 10:30)", text_color = orbCarry ? color.orange : color.gray, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 10, "Skip double-break days | Flatten 15:30 ET",           text_color = color.silver, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 11, "Toggle Run ORB/IB + weekdays to isolate results",     text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 12, "Odds live in the table; > marks where price is now",  text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 9,  szTxt,                                                text_color = compounding ? color.lime : color.white, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 10, minTxt,                                               text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 11, "One at a time: IB waits for an open ORB to close",    text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 12, orbCarry ? "ORB carry ON: unfilled ORB rests past 10:30" : "ORB carry off (unfilled ORB dies at 10:30)", text_color = orbCarry ? color.orange : color.gray, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 13, "Skip double-break days | Flatten 15:30 ET",           text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 14, "Toggle Run ORB/IB + weekdays to isolate results",     text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 15, "Odds live in the table; > marks where price is now",  text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
 
 // ---------------------------------------------------------------- Probability table
 // Columns: N = sample size, Reach = how often that starting point is even reached, then the odds of price trading
