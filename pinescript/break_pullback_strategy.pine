@@ -1077,8 +1077,12 @@ f_trimDraws() =>
             label.delete(array.shift(dLab))
 
 // a1/b1 are unit 1's contracts going to target 1 / target 2; a2/b2 the same for the average-down unit (ent2),
-// which gets no box of its own - its numbers ride along in the label so the chart stays readable. The reward box
-// is drawn to the RUNNER's target, and the $ reward is the blended figure both halves actually produce.
+// which gets no box of its own - its numbers ride along in the label so the chart stays readable.
+// BOX HEIGHT: the reward box is drawn to target 1, the NEAR target, never to the runner. Script drawings count
+// towards the chart's price-scale auto-fit, so a box stretched to the far target widens the fitted range and
+// squashes the candles into a band. Target 1 keeps the box no taller than a single-target setup's would be.
+// The runner still shows up in the label text, and the $ reward quoted there is the blended figure both halves
+// actually produce - so the numbers describe the whole trade while the box stays out of the scale's way.
 f_drawRR(int d, float ent, float zstop, float t1, float t2, float a1, float b1, color sigCol, string tag, float ent2, float a2, float b2) =>
     q1 = a1 + b1
     q2 = a2 + b2
@@ -1088,7 +1092,7 @@ f_drawRR(int d, float ent, float zstop, float t1, float t2, float a1, float b1, 
          (hasAdd ? a2 * math.abs(t1 - ent2) + b2 * math.abs(t2 - ent2) : 0.0)) * ptVal
     risk1   = math.abs(ent - zstop) * ptVal
     rrr = riskUsd > 0 ? rewUsd / riskUsd : na
-    bw = box.new(bar_index, d == 1 ? t2 : ent, bar_index + 1, d == 1 ? ent : t2, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.green, 82))
+    bw = box.new(bar_index, d == 1 ? t1 : ent, bar_index + 1, d == 1 ? ent : t1, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.green, 82))
     br = box.new(bar_index, d == 1 ? ent : zstop, bar_index + 1, d == 1 ? zstop : ent, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.red, 82))
     txt = tag + "  " + str.tostring(q1 + q2, "#.#") + " contract" + (q1 + q2 == 1 ? "" : "s") +
          "  Risk $" + str.tostring(riskUsd, "#") + " | Reward $" + str.tostring(rewUsd, "#") + " (" + str.tostring(rrr, "#.##") + "R)"
