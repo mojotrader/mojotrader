@@ -4,10 +4,10 @@
 // a baseline the confirmation variants can be measured against.
 //
 //   1) BIAS — every 4h candle is classified against the candle before it, and the bias in force is
-//      the one from the last CLOSED 4h candle:
-//        closes ABOVE the previous 4h high -> long        | closes BELOW the previous 4h low -> short
-//        took the previous LOW but failed to close below  -> long  (failed breakdown)
-//        took the previous HIGH but failed to close above -> short (failed breakout)
+//      the one from the last CLOSED 4h candle. Two mechanisms, selectable together or separately:
+//        BREAK        — closes ABOVE the previous 4h high -> long | BELOW its low -> short
+//        FAILED BREAK — took the previous LOW but failed to close below  -> long
+//                       took the previous HIGH but failed to close above -> short
 //        inside / two-sided candles carry the previous bias forward, so a bias is always in force.
 //      The 4h candles are aggregated from the chart's own bars, so this does not depend on how
 //      TradingView aligns its 4h grid. EVERY trade is taken in the direction of that bias.
@@ -20,9 +20,11 @@
 //      LEVEL (swept candle's far side, or the last closed 4h extreme) — for a long, the swept
 //        candle's HIGH or the last closed 4h candle's HIGH; mirrored for a short.
 //      Either way R is measured from the ACTUAL fill, not the signal bar's close.
-//      The STOP is chosen independently: the sweeping candle's wick, or the same distance as the
-//      target mirrored around the fill. The mirror only applies to a LEVEL target — an R-multiple
-//      target is a multiple OF the stop, so deriving the stop from it would be circular.
+//      The STOP is chosen independently: the sweeping candle's wick, or derived from the target —
+//      either the same distance mirrored around the fill (1:1) or that distance divided by a ratio,
+//      so 1.5 puts the stop two thirds of the way and makes the trade 1:1.5. A target-derived stop
+//      only applies to a LEVEL target — an R-multiple target is a multiple OF the stop, so deriving
+//      the stop from it would be circular.
 //   4) BIAS FLIP — with "Close the trade if the 4h bias no longer agrees" on, an open position is
 //      closed at market the moment a 4h close turns the bias against it.
 //
@@ -40,7 +42,7 @@ strategy("MTF 15m Sweep — 4h bias + sweep", overlay = true,
 gB       = "1) 4h bias"
 htfTf    = input.timeframe("240", "Bias timeframe", group = gB)
 htfMode  = input.string("Break or failed break", "Bias rule",
-     options = ["Break or failed break", "Close vs previous close", "Close beyond previous high/low", "Close vs previous midpoint"], group = gB)
+     options = ["Break or failed break", "Break only", "Failed break only", "Close vs previous close", "Close vs previous midpoint"], group = gB)
 undecided= input.string("Carry the previous bias", "Candles the rule cannot decide",
      options = ["Carry the previous bias", "Bigger sweep wins", "Leave unmarked"], group = gB,
      tooltip = "Inside candles and candles that took both sides have no signal of their own. Carrying the previous bias keeps one in force at all times; Leave unmarked stands the strategy down until a candle decides.")
@@ -60,8 +62,10 @@ tpMode   = input.string("1:1", "Target",
                 "Swept candle far side", "Last closed 4h extreme"], group = gE,
      tooltip = "The first four are multiples of the stop distance. The last two aim at a LEVEL: the far side of the candle that was swept (its high for a long, its low for a short), or the last closed 4h candle's high/low. Scale out needs at least 3 contracts; below that it falls back to a single 3R target.")
 slMode   = input.string("Sweeping candle high / low", "Stop loss",
-     options = ["Sweeping candle high / low", "Same distance as the target"], group = gE,
-     tooltip = "Sweeping candle high / low: the wick that did the sweeping — the trade is wrong if price returns through it. Same distance as the target: the stop goes an equal distance the other side of the fill, forcing a 1:1. NOTE the second only applies to the two LEVEL targets — an R-multiple target is defined AS a multiple of the stop, so deriving the stop from it would be circular, and the wick is used instead.")
+     options = ["Sweeping candle high / low", "Same distance as the target", "Fraction of the target (set ratio)"], group = gE,
+     tooltip = "Sweeping candle high / low: the wick that did the sweeping — the trade is wrong if price returns through it. Same distance as the target: an equal distance the other side of the fill, forcing a 1:1. Fraction of the target: the stop is the target distance DIVIDED by the ratio below, so a ratio of 1.5 puts the stop two thirds of the way and makes the trade 1:1.5. NOTE the last two only apply to the two LEVEL targets — an R-multiple target is defined AS a multiple of the stop, so deriving the stop from it would be circular, and the wick is used instead.")
+slRatio  = input.float(1.5, "  Reward : risk for that stop", minval = 0.1, step = 0.1, group = gE,
+     tooltip = "Only used by 'Fraction of the target'. Stop distance = target distance / this. 1.5 gives a 1:1.5 trade, 2 gives 1:2, 1 is identical to 'Same distance as the target'. Above 1 the stop tightens and the trade is stopped out more often for a bigger payoff; below 1 it widens.")
 closeFlip= input.bool(true, "Close the trade if the 4h bias no longer agrees", group = gE,
      tooltip = "Checked on every 4h close. The whole premise is that the trade runs with the higher-timeframe direction, so when that direction changes the reason for holding is gone — the position is closed at market rather than left to its stop.")
 beAt     = input.string("Off", "Move the stop to breakeven at", options = ["Off", "1R", "2R"], group = gE,
@@ -97,7 +101,9 @@ shortCol = input.color(color.new(#ef5350, 0), "Short color", group = gV)
 // That distinction decides which stop choices are even meaningful: mirroring the target distance
 // only works when the target is a level, otherwise stop and target would each define the other.
 levelMode  = tpMode == "Swept candle far side" or tpMode == "Last closed 4h extreme"
-mirrorStop = levelMode and slMode == "Same distance as the target"
+// Both target-derived stops are the same calculation; "Same distance" is just the ratio pinned to 1.
+mirrorStop = levelMode and (slMode == "Same distance as the target" or slMode == "Fraction of the target (set ratio)")
+stopRatio  = slMode == "Fraction of the target (set ratio)" ? slRatio : 1.0
 
 tickSz = syminfo.mintick
 slBuf  = slBufTk * tickSz
@@ -108,21 +114,35 @@ maxR   = maxRtk  * tickSz
 f_biasRaw(float c1, float h1, float l1, float c2, float h2, float l2) =>
     int b = 0
     if not na(c1) and not na(h2) and not na(l2)
+        // the two mechanisms named separately, so either can be selected on its own
+        brkUp    = c1 > h2                      // closed beyond the previous high
+        brkDn    = c1 < l2                      // closed beyond the previous low
+        failLow  = l1 < l2 and c1 >= l2         // took the previous low, failed to close below
+        failHi   = h1 > h2 and c1 <= h2         // took the previous high, failed to close above
+        twoSided = failLow and failHi           // took BOTH sides and closed inside
+        tie      = undecided == "Bigger sweep wins" ? ((h1 - h2) > (l2 - l1) ? -1 : 1) : 0
         if htfMode == "Break or failed break"
-            failLow = l1 < l2 and c1 >= l2
-            failHi  = h1 > h2 and c1 <= h2
-            if c1 > h2
+            if brkUp
                 b := 1
-            else if c1 < l2
+            else if brkDn
                 b := -1
-            else if failLow and failHi
-                b := undecided == "Bigger sweep wins" ? ((h1 - h2) > (l2 - l1) ? -1 : 1) : 0
+            else if twoSided
+                b := tie
             else if failLow
                 b := 1
             else if failHi
                 b := -1
-        else if htfMode == "Close beyond previous high/low"
-            b := c1 > h2 ? 1 : c1 < l2 ? -1 : 0
+        else if htfMode == "Break only"
+            // a rejection says nothing here; only a close beyond the previous candle counts
+            b := brkUp ? 1 : brkDn ? -1 : 0
+        else if htfMode == "Failed break only"
+            // a clean break says nothing here; only a side taken and not closed beyond counts
+            if twoSided
+                b := tie
+            else if failLow
+                b := 1
+            else if failHi
+                b := -1
         else if htfMode == "Close vs previous midpoint"
             m2 = (h2 + l2) / 2
             b := c1 > m2 ? 1 : c1 < m2 ? -1 : 0
@@ -223,7 +243,7 @@ if (goLong or goShort) and inSess and not flatten and dayOk and strategy.positio
     else if tpMode == "Last closed 4h extreme"
         lvl := d == 1 ? hPrvH : hPrvL
     // risk is the mirror of the target distance only when the stop is derived from it
-    float risk = mirrorStop ? math.abs(lvl - close) : math.abs(close - wick)
+    float risk = mirrorStop ? math.abs(lvl - close) / stopRatio : math.abs(close - wick)
     float q    = useRiskSize ? f_size(acctSize * riskPct / 100.0, risk) : qtyFixed
     beyond = not levelMode or (not na(lvl) and (d == 1 ? lvl > close : lvl < close))
     if not beyond
@@ -254,7 +274,9 @@ if inPos and not exitsSet
     ent = strategy.position_avg_price
     // mirrored stop: R is the distance to the target, and the stop is that far the other side.
     // wick stop:     R is the distance to the sweeping candle's extreme, which IS the stop.
-    r  = mirrorStop ? (tDir == 1 ? tgtLvl - ent : ent - tgtLvl) : (tDir == 1 ? ent - swpWick : swpWick - ent)
+    // derived stop: R is the target distance scaled down by the ratio, placed the other side of the fill
+    tDist = tDir == 1 ? tgtLvl - ent : ent - tgtLvl
+    r  = mirrorStop ? tDist / stopRatio : (tDir == 1 ? ent - swpWick : swpWick - ent)
     sl = mirrorStop ? (tDir == 1 ? ent - r : ent + r) : swpWick
     // a level target still has to sit the right side of the fill even when the stop is the wick
     tgtOk = not levelMode or (tDir == 1 ? tgtLvl > ent : tgtLvl < ent)
@@ -327,7 +349,7 @@ if showRR and inPos and not inPos[1] and exitsSet
          border_color = color.new(c, 60), border_width = 1, bgcolor = color.new(color.green, 85))
     box.new(bar_index, tDir == 1 ? refEnt : slLvl, x2, tDir == 1 ? slLvl : refEnt, xloc = xloc.bar_index,
          border_color = color.new(c, 60), border_width = 1, bgcolor = color.new(color.red, 85))
-    label.new(x2, refEnt, (tDir == 1 ? "LONG  " : "SHORT  ") + str.tostring(rDist, "#.##") + (mirrorStop ? " pts to target = 1R" : " pts risk"),
+    label.new(x2, refEnt, (tDir == 1 ? "LONG  " : "SHORT  ") + str.tostring(rDist, "#.##") + (mirrorStop ? " pts risk, 1:" + str.tostring(stopRatio, "#.##") : " pts risk"),
          xloc = xloc.bar_index, style = label.style_label_left,
          color = color.new(color.gray, 15), textcolor = color.white, size = size.tiny)
 
@@ -348,6 +370,6 @@ if showTbl and barstate.islast
     table.cell(dg, 0, 3, "target",        text_color = color.white)
     table.cell(dg, 1, 3, tpMode,          text_color = color.white)
     table.cell(dg, 0, 4, "stop from",     text_color = color.white)
-    table.cell(dg, 1, 4, mirrorStop ? "mirrored target distance" : "sweeping candle wick", text_color = color.white)
+    table.cell(dg, 1, 4, mirrorStop ? "target distance / " + str.tostring(stopRatio, "#.##") : "sweeping candle wick", text_color = color.white)
     table.cell(dg, 0, 5, "last skip",     text_color = color.gray)
     table.cell(dg, 1, 5, lastSkip,        text_color = color.orange)

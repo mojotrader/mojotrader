@@ -34,8 +34,11 @@ on the forming candle; `Shade shows` switches the colouring between the two. Swe
 gated by the bias in force. The 4h candles are aggregated from the chart's own bars, so the
 classification does not depend on how TradingView aligns its 4h grid.
 
-Simpler comparisons are also available in `Bias rule`: previous close, previous high/low, or
-previous midpoint.
+`Bias rule` can also run the two mechanisms **separately**, which is the point of splitting them —
+`Break only` classifies solely on a close beyond the previous candle and treats a rejection as
+saying nothing; `Failed break only` does the reverse. Run all three and the funnel tells you which
+mechanism is carrying the edge. Two simpler comparisons are also there: previous close and previous
+midpoint.
 
 **2) 15m gives the sweep**
 A sweep is **two** things, and the second is what separates it from a plain poke:
@@ -168,8 +171,9 @@ already been passed is skipped rather than entered with an inverted stop.
 | --- | --- |
 | `Sweeping candle high / low` | on the wick that did the sweeping, plus an optional tick buffer |
 | `Same distance as the target` | an equal distance the other side of the fill — a forced 1:1 |
+| `Fraction of the target` | the target distance **divided by** `Reward : risk for that stop` — 1.5 puts the stop two thirds of the way, making the trade 1:1.5 |
 
-The mirror only applies to a **level** target. An R-multiple target is a multiple *of* the stop, so
+The last two only apply to a **level** target. An R-multiple target is a multiple *of* the stop, so
 deriving the stop from it would be circular; the wick is used instead and the panel says so.
 `Minimum / maximum stop distance` filters whichever distance is in play. Breakeven applies to
 R-multiple targets only — with a mirrored stop, 1R *is* the target.

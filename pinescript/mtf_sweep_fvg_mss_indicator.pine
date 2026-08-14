@@ -8,10 +8,11 @@
 //     1m chart  -> plus the FVG, the inverse FVG and the MSS, drawn ONLY inside the 15m candle
 //                  that swept the previous one
 //
-//   1) BIAS — every 4h candle is classified against the candle before it ("Break or failed break"):
-//        closes ABOVE the previous 4h high -> long        | closes BELOW the previous 4h low -> short
-//        took the previous LOW but failed to close below  -> long  (failed breakdown)
-//        took the previous HIGH but failed to close above -> short (failed breakout)
+//   1) BIAS — every 4h candle is classified against the candle before it. Two mechanisms, which can
+//      be selected together ("Break or failed break") or one at a time to see which carries the edge:
+//        BREAK        — closes ABOVE the previous 4h high -> long | BELOW its low -> short
+//        FAILED BREAK — took the previous LOW but failed to close below  -> long
+//                       took the previous HIGH but failed to close above -> short
 //        inside candle, or took both sides and closed inside -> no bias
 //      Every candle carries its own colour. The bias a TRADE uses is the one from the last CLOSED
 //      4h candle, which is what gates the sweeps below — the shading can show either (see inputs).
@@ -41,8 +42,8 @@ mtfTf = input.timeframe("15",  "MTF — sweep (step 2)", group = gTf,
 
 gH       = "1) HTF bias"
 htfMode  = input.string("Break or failed break", "Bias rule",
-     options = ["Break or failed break", "Close vs previous close", "Close beyond previous high/low", "Close vs previous midpoint"], group = gH,
-     tooltip = "Break or failed break: a close beyond the previous candle sets the bias that way; a side that was TAKEN but not closed beyond is a rejection and sets the bias the other way (poked the low, closed back inside -> long).")
+     options = ["Break or failed break", "Break only", "Failed break only", "Close vs previous close", "Close vs previous midpoint"], group = gH,
+     tooltip = "Break or failed break: both clauses together. Break only: the bias comes solely from a CLOSE beyond the previous candle - above its high is long, below its low is short - and a rejection says nothing. Failed break only: the bias comes solely from a REJECTION - a side taken but not closed beyond, so poking the low and closing back inside is long - and a clean break beyond says nothing. Splitting them shows which of the two mechanisms is actually carrying the edge. Candles a rule cannot decide are handled by the input below.")
 shadeMode= input.string("Each candle's own bias", "Shade shows",
      options = ["Each candle's own bias", "The bias in force (last closed)"], group = gH,
      tooltip = "Each candle's own bias (default): every 4h candle is coloured by the bias it creates, so you can read the rule straight off the 4h chart. The developing candle is provisional until it closes. Bias in force: the colour is the bias a trade would actually use right now, i.e. from the last CLOSED 4h candle — one candle behind. Sweeps are always gated by the bias in force either way.")
@@ -101,22 +102,35 @@ sweepOnly = entryTrig == "The 15m sweep close alone"
 f_biasRaw(float c1, float h1, float l1, float c2, float h2, float l2) =>
     int b = 0
     if not na(c1) and not na(h2) and not na(l2)
+        // the two mechanisms named separately, so either can be selected on its own
+        brkUp    = c1 > h2                      // closed beyond the previous high
+        brkDn    = c1 < l2                      // closed beyond the previous low
+        failLow  = l1 < l2 and c1 >= l2         // took the previous low, failed to close below
+        failHi   = h1 > h2 and c1 <= h2         // took the previous high, failed to close above
+        twoSided = failLow and failHi           // took BOTH sides and closed inside
+        tie      = undecided == "Bigger sweep wins" ? ((h1 - h2) > (l2 - l1) ? -1 : 1) : 0
         if htfMode == "Break or failed break"
-            failLow = l1 < l2 and c1 >= l2      // took the previous low, failed to close below
-            failHi  = h1 > h2 and c1 <= h2      // took the previous high, failed to close above
-            if c1 > h2
+            if brkUp
                 b := 1
-            else if c1 < l2
+            else if brkDn
                 b := -1
-            else if failLow and failHi
-                // took BOTH sides and closed inside
-                b := undecided == "Bigger sweep wins" ? ((h1 - h2) > (l2 - l1) ? -1 : 1) : 0
+            else if twoSided
+                b := tie
             else if failLow
                 b := 1
             else if failHi
                 b := -1
-        else if htfMode == "Close beyond previous high/low"
-            b := c1 > h2 ? 1 : c1 < l2 ? -1 : 0
+        else if htfMode == "Break only"
+            // a rejection says nothing here; only a close beyond the previous candle counts
+            b := brkUp ? 1 : brkDn ? -1 : 0
+        else if htfMode == "Failed break only"
+            // a clean break says nothing here; only a side taken and not closed beyond counts
+            if twoSided
+                b := tie
+            else if failLow
+                b := 1
+            else if failHi
+                b := -1
         else if htfMode == "Close vs previous midpoint"
             m2 = (h2 + l2) / 2
             b := c1 > m2 ? 1 : c1 < m2 ? -1 : 0
