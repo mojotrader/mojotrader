@@ -1056,9 +1056,13 @@ if brkAlerts and runIB and ib_dir != 0 and ib_broke and not ib_broke[1]
 // Drawn when the ENTRY ORDER IS ACTUALLY PLACED (or_placed / ib_placed), so a break that any filter rejects -
 // wrong weekday, range too small, past the cutoff, IB already formed, double-break day, daily loss halt, a risk
 // budget too small for the minimum size, or an IB waiting behind an open ORB - draws nothing at all.
-// ANCHORING: y is price and x is BAR INDEX, both fixed at creation. The box is one bar wide to begin with and its
-// right edge is extended bar by bar while the setup is live, so it always covers real bars - it never projects
-// into empty space past the last bar and never stretches across a session gap. Nothing moves when you pan or zoom.
+// ANCHORING: y is price and x is the BAR'S TIMESTAMP (xloc.bar_time), both fixed at creation. Timestamps are
+// absolute, so a drawing stays welded to the candle it was made on. Bar INDEXES are not: an index counts from
+// the first bar the script has loaded, so the moment you scroll back far enough for TradingView to fetch more
+// history every candle's index shifts and index-anchored drawings slide off their candles. The box is one bar
+// wide to begin with and its right edge is extended bar by bar while the setup is live, so it always covers
+// real bars - it never projects into empty space past the last bar. Nothing moves when you pan or zoom.
+barMs = timeframe.in_seconds(timeframe.period) * 1000     // one bar of chart time, for the right-hand edges
 // HISTORY: every valid setup keeps its boxes and fib lines, so you can scroll back and read the risk/reward of
 // any past setup at the price levels it actually had. Only the text labels are capped (newest few by default),
 // since those are what turn a long history into noise. Both limits are inputs; 0 on either means keep everything.
@@ -1088,8 +1092,8 @@ f_drawRR(int d, float ent, float zstop, float t1, float t2, float a1, float b1, 
          (hasAdd ? a2 * math.abs(t1 - ent2) + b2 * math.abs(t2 - ent2) : 0.0)) * ptVal
     risk1   = math.abs(ent - zstop) * ptVal
     rrr = riskUsd > 0 ? rewUsd / riskUsd : na
-    bw = box.new(bar_index, d == 1 ? t2 : ent, bar_index + 1, d == 1 ? ent : t2, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.green, 82))
-    br = box.new(bar_index, d == 1 ? ent : zstop, bar_index + 1, d == 1 ? zstop : ent, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.red, 82))
+    bw = box.new(time, d == 1 ? t2 : ent, time + barMs, d == 1 ? ent : t2, xloc = xloc.bar_time, border_color = sigCol, border_width = 1, bgcolor = color.new(color.green, 82))
+    br = box.new(time, d == 1 ? ent : zstop, time + barMs, d == 1 ? zstop : ent, xloc = xloc.bar_time, border_color = sigCol, border_width = 1, bgcolor = color.new(color.red, 82))
     txt = tag + "  " + str.tostring(q1 + q2, "#.#") + " contract" + (q1 + q2 == 1 ? "" : "s") +
          "  Risk $" + str.tostring(riskUsd, "#") + " | Reward $" + str.tostring(rewUsd, "#") + " (" + str.tostring(rrr, "#.##") + "R)"
     if hasAdd
@@ -1102,7 +1106,7 @@ f_drawRR(int d, float ent, float zstop, float t1, float t2, float a1, float b1, 
     txt := txt + "\n1 contract: Risk $" + str.tostring(risk1, "#") +
          (a1 + a2 > 0 ? " | to T1 $" + str.tostring(math.abs(t1 - ent) * ptVal, "#") : "") +
          " | to " + (a1 + a2 > 0 ? "T2 $" : "target $") + str.tostring(math.abs(t2 - ent) * ptVal, "#")
-    lb = label.new(bar_index + 1, ent, txt, xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.gray, 15), textcolor = color.white, size = size.small)
+    lb = label.new(time + barMs, ent, txt, xloc = xloc.bar_time, style = label.style_label_left, color = color.new(color.gray, 15), textcolor = color.white, size = size.small)
     array.push(dBox, bw)
     array.push(dBox, br)
     array.push(dLab, lb)
@@ -1112,19 +1116,19 @@ f_drawFibs(float rL, float rg, color sigCol, array<line> dest) =>
     array.clear(dest)
     for i = 1 to 3
         y = rL + i * 0.25 * rg
-        ln = line.new(bar_index, y, bar_index + 1, y, xloc = xloc.bar_index, color = color.new(sigCol, 35), style = line.style_dotted, width = 1)
+        ln = line.new(time, y, time + barMs, y, xloc = xloc.bar_time, color = color.new(sigCol, 35), style = line.style_dotted, width = 1)
         array.push(dest, ln)
         array.push(dLin, ln)
 
 // stretch the live setup's drawings to the current bar; prices stay exactly where they were set
 f_grow(box bw, box br, label lb, array<line> fib) =>
     if not na(bw)
-        box.set_right(bw, bar_index)
-        box.set_right(br, bar_index)
-        label.set_x(lb, bar_index)
+        box.set_right(bw, time + barMs)
+        box.set_right(br, time + barMs)
+        label.set_x(lb, time + barMs)
     if array.size(fib) > 0
         for i = 0 to array.size(fib) - 1
-            line.set_x2(array.get(fib, i), bar_index)
+            line.set_x2(array.get(fib, i), time + barMs)
 
 var box   orbBw = na
 var box   orbBr = na
