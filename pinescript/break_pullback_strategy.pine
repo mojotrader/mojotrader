@@ -1083,7 +1083,7 @@ f_trimDraws() =>
 // squashes the candles into a band. Target 1 keeps the box no taller than a single-target setup's would be.
 // The runner still shows up in the label text, and the $ reward quoted there is the blended figure both halves
 // actually produce - so the numbers describe the whole trade while the box stays out of the scale's way.
-f_drawRR(int d, float ent, float zstop, float t1, float t2, float a1, float b1, color sigCol, string tag, float ent2, float a2, float b2) =>
+f_drawRR(int d, float ent, float zstop, float ptp, float t1, float t2, float a1, float b1, color sigCol, string tag, float ent2, float a2, float b2) =>
     q1 = a1 + b1
     q2 = a2 + b2
     hasAdd = not na(ent2) and q2 > 0
@@ -1092,7 +1092,7 @@ f_drawRR(int d, float ent, float zstop, float t1, float t2, float a1, float b1, 
          (hasAdd ? a2 * math.abs(t1 - ent2) + b2 * math.abs(t2 - ent2) : 0.0)) * ptVal
     risk1   = math.abs(ent - zstop) * ptVal
     rrr = riskUsd > 0 ? rewUsd / riskUsd : na
-    bw = box.new(bar_index, d == 1 ? t1 : ent, bar_index + 1, d == 1 ? ent : t1, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.green, 82))
+    bw = box.new(bar_index, d == 1 ? ptp : ent, bar_index + 1, d == 1 ? ent : ptp, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.green, 82))
     br = box.new(bar_index, d == 1 ? ent : zstop, bar_index + 1, d == 1 ? zstop : ent, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.red, 82))
     txt = tag + "  " + str.tostring(q1 + q2, "#.#") + " contract" + (q1 + q2 == 1 ? "" : "s") +
          "  Risk $" + str.tostring(riskUsd, "#") + " | Reward $" + str.tostring(rewUsd, "#") + " (" + str.tostring(rrr, "#.##") + "R)"
@@ -1136,6 +1136,7 @@ var label orbLb = na
 var bool  orbGrow = false
 var array<line> orbFib = array.new<line>()
 if runORB and or_placed and not or_placed[1] and not na(or_e1) and not na(or_zstop)
+    orTP = f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
     [orTPa, orTPb] = f_tpPair(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
     orbBw := na
     orbBr := na
@@ -1143,7 +1144,7 @@ if runORB and or_placed and not or_placed[1] and not na(or_e1) and not na(or_zst
     if showFibs
         f_drawFibs(or_rL, or_rng, color.new(color.orange, 0), orbFib)
     if showRR
-        [bw, br, lb] = f_drawRR(or_dir, or_e1, or_zstop, orTPa, orTPb, orbQa1, orbQb1, color.new(color.orange, 0), "ORB",
+        [bw, br, lb] = f_drawRR(or_dir, or_e1, or_zstop, orTP, orTPa, orTPb, orbQa1, orbQb1, color.new(color.orange, 0), "ORB",
              (or_useAdd and orbSz2 >= 1) ? or_e2 : na, or_useAdd ? orbQa2 : 0.0, or_useAdd ? orbQb2 : 0.0)
         orbBw := bw
         orbBr := br
@@ -1161,6 +1162,7 @@ var label ibLb = na
 var bool  ibGrow = false
 var array<line> ibFib = array.new<line>()
 if runIB and ib_placed and not ib_placed[1] and not na(ib_e1) and not na(ib_zstop)
+    ibTP = f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
     [ibTPa, ibTPb] = f_tpPair(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
     ibBw := na
     ibBr := na
@@ -1168,7 +1170,7 @@ if runIB and ib_placed and not ib_placed[1] and not na(ib_e1) and not na(ib_zsto
     if showFibs
         f_drawFibs(ib_rL, ib_rng, color.new(color.teal, 0), ibFib)
     if showRR
-        [bw2, br2, lb2] = f_drawRR(ib_dir, ib_e1, ib_zstop, ibTPa, ibTPb, ibQa1, ibQb1, color.new(color.teal, 0), "IB",
+        [bw2, br2, lb2] = f_drawRR(ib_dir, ib_e1, ib_zstop, ibTP, ibTPa, ibTPb, ibQa1, ibQb1, color.new(color.teal, 0), "IB",
              (ib_useAdd and ibSz2 >= 1) ? ib_e2 : na, ib_useAdd ? ibQa2 : 0.0, ib_useAdd ? ibQb2 : 0.0)
         ibBw := bw2
         ibBr := br2
@@ -1185,12 +1187,7 @@ var table info = na
 if showInfo and barstate.islast
     tgtTxt = scaleOut ? "Targets: half @ " + tp1Sel + ", rest @ " + tp2Sel + " (same stop)"
          : "Target: ORB L " + orbTpL + " / S " + orbTpS + " ; IB " + ibTpL
-    szTxt  = sizeMode == "Fixed contracts" ? "Size: fixed " + str.tostring(math.max(orbQty, minQty), "#") + " ORB / " + str.tostring(math.max(ibQty, minQty), "#") + " IB per setup"
-         : compounding ? "Size: " + str.tostring(riskPct, "#.##") + "% of the day's EQUITY - compounds daily"
-         : sizeMode == "Risk $ per setup" ? "Size: $" + str.tostring(riskDlr, "#") + " risk per setup (flat)"
-         : "Size: " + str.tostring(riskPct, "#.##") + "% of a fixed $" + str.tostring(acctSize, "#")
-    minTxt = "Min " + str.tostring(minQty) + " contracts/setup; avg-down splits them"
-    info := table.new(position.top_right, 1, 16, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
+    info := table.new(position.top_right, 1, 14, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
     table.cell(info, 0, 0,  "BREAK-THEN-PULLBACK  (ORB + IB)",                    text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 1,  "Ranges: ORB 09:30-09:45 | IB 09:30-10:30 (ET)",      text_color = color.white,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 2,  "Direction: low-first = LONG, high-first = SHORT",     text_color = color.white,  text_size = size.small, text_halign = text.align_left)
@@ -1200,13 +1197,11 @@ if showInfo and barstate.islast
     table.cell(info, 0, 6,  "Stop: shallow = range extreme | deeper = 75% line",   text_color = color.white,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 7,  tgtTxt,                                               text_color = color.white,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 8,  "Avg-down: 2nd unit @ 50% (shallow setups)",           text_color = color.silver, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 9,  szTxt,                                                text_color = compounding ? color.lime : color.white, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 10, minTxt,                                               text_color = color.silver, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 11, "One at a time: IB waits for an open ORB to close",    text_color = color.silver, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 12, orbCarry ? "ORB carry ON: unfilled ORB rests past 10:30" : "ORB carry off (unfilled ORB dies at 10:30)", text_color = orbCarry ? color.orange : color.gray, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 13, "Skip double-break days | Flatten 15:30 ET",           text_color = color.silver, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 14, "Toggle Run ORB/IB + weekdays to isolate results",     text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 15, "Odds live in the table; > marks where price is now",  text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 9,  "One at a time: IB waits for an open ORB to close",    text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 13, orbCarry ? "ORB carry ON: unfilled ORB rests past 10:30" : "ORB carry off (unfilled ORB dies at 10:30)", text_color = orbCarry ? color.orange : color.gray, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 10, "Skip double-break days | Flatten 15:30 ET",           text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 11, "Toggle Run ORB/IB + weekdays to isolate results",     text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 12, "Odds live in the table; > marks where price is now",  text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
 
 // ---------------------------------------------------------------- Probability table
 // Columns: N = sample size, Reach = how often that starting point is even reached, then the odds of price trading
