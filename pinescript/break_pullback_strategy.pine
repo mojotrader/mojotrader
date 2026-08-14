@@ -437,10 +437,10 @@ var bool  or_oppBroke = false
 var float or_tp1 = na            // first-half target (scale-out); na when the whole position uses one target
 var float orbSz1 = na
 var float orbSz2 = na
-var float orbA1 = 0              // unit 1: contracts exiting at target 1 / running to target 2
-var float orbB1 = 0
-var float orbA2 = 0              // unit 2 (average-down): same split
-var float orbB2 = 0
+var float orbQa1 = 0.0              // unit 1: contracts exiting at target 1 / running to target 2
+var float orbQb1 = 0.0
+var float orbQa2 = 0.0              // unit 2 (average-down): same split
+var float orbQb2 = 0.0
 
 if newSession
     or_rH := na
@@ -464,10 +464,10 @@ if newSession
     or_tp1 := na
     orbSz1 := na
     orbSz2 := na
-    orbA1 := 0
-    orbB1 := 0
-    orbA2 := 0
-    orbB2 := 0
+    orbQa1 := 0.0
+    orbQb1 := 0.0
+    orbQa2 := 0.0
+    orbQb2 := 0.0
 if or_inR
     if na(or_rH) or high > or_rH
         or_rH := high
@@ -504,10 +504,10 @@ if or_rDone and not na(or_rH) and or_rH > or_rL
             orbSz2 := orbU == 2 ? math.floor(orbTot / 2) * 1.0 : 0.0
         [oa1, ob1] = f_tpSplit(orbSz1, false)
         [oa2, ob2] = f_tpSplit(orbSz2, true)
-        orbA1 := oa1
-        orbB1 := ob1
-        orbA2 := oa2
-        orbB2 := ob2
+        orbQa1 := oa1
+        orbQb1 := ob1
+        orbQa2 := oa2
+        orbQb2 := ob2
 or_useAdd = orbAvg and or_shallow and not na(or_e2)
 // break by selected type
 or_brk = orbBreak == "Wick (touch)" ? ((or_dir == 1 and high >= or_rH) or (or_dir == -1 and low <= or_rL)) : ((or_dir == 1 and close > or_rH) or (or_dir == -1 and close < or_rL))
@@ -563,23 +563,23 @@ if orbBE and not or_beDone and (or_f1 or or_f2) and not or_closed
 // is zero and the unit exits in one piece, exactly as before.
 if not na(or_curStop)
     if or_dir == 1
-        if orbA1 > 0
-            strategy.exit("ORLx1",  from_entry = "ORL",  qty = orbA1, stop = or_curStop, limit = or_tp1)
-        if orbB1 > 0
-            strategy.exit("ORLx",   from_entry = "ORL",  qty = orbB1, stop = or_curStop, limit = or_curTP)
-        if orbA2 > 0
-            strategy.exit("ORL2x1", from_entry = "ORL2", qty = orbA2, stop = or_curStop, limit = or_tp1)
-        if orbB2 > 0
-            strategy.exit("ORL2x",  from_entry = "ORL2", qty = orbB2, stop = or_curStop, limit = or_curTP)
+        if orbQa1 > 0
+            strategy.exit("ORLx1",  from_entry = "ORL",  qty = orbQa1, stop = or_curStop, limit = or_tp1)
+        if orbQb1 > 0
+            strategy.exit("ORLx",   from_entry = "ORL",  qty = orbQb1, stop = or_curStop, limit = or_curTP)
+        if orbQa2 > 0
+            strategy.exit("ORL2x1", from_entry = "ORL2", qty = orbQa2, stop = or_curStop, limit = or_tp1)
+        if orbQb2 > 0
+            strategy.exit("ORL2x",  from_entry = "ORL2", qty = orbQb2, stop = or_curStop, limit = or_curTP)
     else
-        if orbA1 > 0
-            strategy.exit("ORSx1",  from_entry = "ORS",  qty = orbA1, stop = or_curStop, limit = or_tp1)
-        if orbB1 > 0
-            strategy.exit("ORSx",   from_entry = "ORS",  qty = orbB1, stop = or_curStop, limit = or_curTP)
-        if orbA2 > 0
-            strategy.exit("ORS2x1", from_entry = "ORS2", qty = orbA2, stop = or_curStop, limit = or_tp1)
-        if orbB2 > 0
-            strategy.exit("ORS2x",  from_entry = "ORS2", qty = orbB2, stop = or_curStop, limit = or_curTP)
+        if orbQa1 > 0
+            strategy.exit("ORSx1",  from_entry = "ORS",  qty = orbQa1, stop = or_curStop, limit = or_tp1)
+        if orbQb1 > 0
+            strategy.exit("ORSx",   from_entry = "ORS",  qty = orbQb1, stop = or_curStop, limit = or_curTP)
+        if orbQa2 > 0
+            strategy.exit("ORS2x1", from_entry = "ORS2", qty = orbQa2, stop = or_curStop, limit = or_tp1)
+        if orbQb2 > 0
+            strategy.exit("ORS2x",  from_entry = "ORS2", qty = orbQb2, stop = or_curStop, limit = or_curTP)
 if (or_f1 or or_f2) and not or_closed and not na(or_curStop)
     if or_dir == 1 and (low <= or_curStop or high >= or_curTP)
         or_closed := true
@@ -727,10 +727,10 @@ var bool  ib_missed = false      // the IB pullback was reached while an ORB tra
 var float ib_tp1 = na            // first-half target (scale-out); na when the whole position uses one target
 var float ibSz1 = na
 var float ibSz2 = na
-var float ibA1 = 0               // unit 1: contracts exiting at target 1 / running to target 2
-var float ibB1 = 0
-var float ibA2 = 0               // unit 2 (average-down): same split
-var float ibB2 = 0
+var float ibQa1 = 0.0               // unit 1: contracts exiting at target 1 / running to target 2
+var float ibQb1 = 0.0
+var float ibQa2 = 0.0               // unit 2 (average-down): same split
+var float ibQb2 = 0.0
 
 if newSession
     ib_rH := na
@@ -755,10 +755,10 @@ if newSession
     ib_tp1 := na
     ibSz1 := na
     ibSz2 := na
-    ibA1 := 0
-    ibB1 := 0
-    ibA2 := 0
-    ibB2 := 0
+    ibQa1 := 0.0
+    ibQb1 := 0.0
+    ibQa2 := 0.0
+    ibQb2 := 0.0
 if ib_inR
     if na(ib_rH) or high > ib_rH
         ib_rH := high
@@ -795,10 +795,10 @@ if ib_rDone and not na(ib_rH) and ib_rH > ib_rL
             ibSz2 := ibU == 2 ? math.floor(ibTot / 2) * 1.0 : 0.0
         [ia1, ib1] = f_tpSplit(ibSz1, false)
         [ia2, ib2] = f_tpSplit(ibSz2, true)
-        ibA1 := ia1
-        ibB1 := ib1
-        ibA2 := ia2
-        ibB2 := ib2
+        ibQa1 := ia1
+        ibQb1 := ib1
+        ibQa2 := ia2
+        ibQb2 := ib2
 // INTERACTION: an OPEN ORB trade always keeps priority - the IB order is held back (either direction, so the two
 // can never stack risk or hedge each other). The IB is not cancelled, only delayed: the moment the ORB closes
 // (target, stop or the flip of its own exit) the IB limit goes in, provided price has NOT already traded through
@@ -856,23 +856,23 @@ if ibBE and not ib_beDone and (ib_f1 or ib_f2) and not ib_closed
         ib_beDone := true
 if not na(ib_curStop)
     if ib_dir == 1
-        if ibA1 > 0
-            strategy.exit("IBLx1",  from_entry = "IBL",  qty = ibA1, stop = ib_curStop, limit = ib_tp1)
-        if ibB1 > 0
-            strategy.exit("IBLx",   from_entry = "IBL",  qty = ibB1, stop = ib_curStop, limit = ib_curTP)
-        if ibA2 > 0
-            strategy.exit("IBL2x1", from_entry = "IBL2", qty = ibA2, stop = ib_curStop, limit = ib_tp1)
-        if ibB2 > 0
-            strategy.exit("IBL2x",  from_entry = "IBL2", qty = ibB2, stop = ib_curStop, limit = ib_curTP)
+        if ibQa1 > 0
+            strategy.exit("IBLx1",  from_entry = "IBL",  qty = ibQa1, stop = ib_curStop, limit = ib_tp1)
+        if ibQb1 > 0
+            strategy.exit("IBLx",   from_entry = "IBL",  qty = ibQb1, stop = ib_curStop, limit = ib_curTP)
+        if ibQa2 > 0
+            strategy.exit("IBL2x1", from_entry = "IBL2", qty = ibQa2, stop = ib_curStop, limit = ib_tp1)
+        if ibQb2 > 0
+            strategy.exit("IBL2x",  from_entry = "IBL2", qty = ibQb2, stop = ib_curStop, limit = ib_curTP)
     else
-        if ibA1 > 0
-            strategy.exit("IBSx1",  from_entry = "IBS",  qty = ibA1, stop = ib_curStop, limit = ib_tp1)
-        if ibB1 > 0
-            strategy.exit("IBSx",   from_entry = "IBS",  qty = ibB1, stop = ib_curStop, limit = ib_curTP)
-        if ibA2 > 0
-            strategy.exit("IBS2x1", from_entry = "IBS2", qty = ibA2, stop = ib_curStop, limit = ib_tp1)
-        if ibB2 > 0
-            strategy.exit("IBS2x",  from_entry = "IBS2", qty = ibB2, stop = ib_curStop, limit = ib_curTP)
+        if ibQa1 > 0
+            strategy.exit("IBSx1",  from_entry = "IBS",  qty = ibQa1, stop = ib_curStop, limit = ib_tp1)
+        if ibQb1 > 0
+            strategy.exit("IBSx",   from_entry = "IBS",  qty = ibQb1, stop = ib_curStop, limit = ib_curTP)
+        if ibQa2 > 0
+            strategy.exit("IBS2x1", from_entry = "IBS2", qty = ibQa2, stop = ib_curStop, limit = ib_tp1)
+        if ibQb2 > 0
+            strategy.exit("IBS2x",  from_entry = "IBS2", qty = ibQb2, stop = ib_curStop, limit = ib_curTP)
 if (ib_f1 or ib_f2) and not ib_closed and not na(ib_curStop)
     if ib_dir == 1 and (low <= ib_curStop or high >= ib_curTP)
         ib_closed := true
@@ -1139,8 +1139,8 @@ if runORB and or_placed and not or_placed[1] and not na(or_e1) and not na(or_zst
     if showFibs
         f_drawFibs(or_rL, or_rng, color.new(color.orange, 0), orbFib)
     if showRR
-        [bw, br, lb] = f_drawRR(or_dir, or_e1, or_zstop, orTPa, orTPb, orbA1, orbB1, color.new(color.orange, 0), "ORB",
-             (or_useAdd and orbSz2 >= 1) ? or_e2 : na, or_useAdd ? orbA2 : 0, or_useAdd ? orbB2 : 0)
+        [bw, br, lb] = f_drawRR(or_dir, or_e1, or_zstop, orTPa, orTPb, orbQa1, orbQb1, color.new(color.orange, 0), "ORB",
+             (or_useAdd and orbSz2 >= 1) ? or_e2 : na, or_useAdd ? orbQa2 : 0.0, or_useAdd ? orbQb2 : 0.0)
         orbBw := bw
         orbBr := br
         orbLb := lb
@@ -1164,8 +1164,8 @@ if runIB and ib_placed and not ib_placed[1] and not na(ib_e1) and not na(ib_zsto
     if showFibs
         f_drawFibs(ib_rL, ib_rng, color.new(color.teal, 0), ibFib)
     if showRR
-        [bw2, br2, lb2] = f_drawRR(ib_dir, ib_e1, ib_zstop, ibTPa, ibTPb, ibA1, ibB1, color.new(color.teal, 0), "IB",
-             (ib_useAdd and ibSz2 >= 1) ? ib_e2 : na, ib_useAdd ? ibA2 : 0, ib_useAdd ? ibB2 : 0)
+        [bw2, br2, lb2] = f_drawRR(ib_dir, ib_e1, ib_zstop, ibTPa, ibTPb, ibQa1, ibQb1, color.new(color.teal, 0), "IB",
+             (ib_useAdd and ibSz2 >= 1) ? ib_e2 : na, ib_useAdd ? ibQa2 : 0.0, ib_useAdd ? ibQb2 : 0.0)
         ibBw := bw2
         ibBr := br2
         ibLb := lb2
