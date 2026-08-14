@@ -47,7 +47,14 @@
 //
 // NOTE: a Pine strategy nets all orders into ONE position (no hedging). The hold-back rule above means ORB and IB
 //   are never open at the same time, so the netting never merges two different setups' positions.
-strategy("Break-then-Pullback (ORB + IB)", overlay = true, pyramiding = 6, max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500,
+// PRICE SCALE: scale = scale.right binds the script to the chart's own price axis, so every level, box, fib and
+//   label lives in price/bar coordinates on that axis and squeezes with it when you compress either axis. This
+//   only sets the DEFAULT for a newly added copy - TradingView stores a per-instance scale pin in the saved
+//   chart, and that pin wins. If an existing copy is pinned elsewhere (a separate scale, or "No Scale", which
+//   normalises the script to the visible window and makes it drift as you pan), remove it from the chart and add
+//   it again, or set the legend's ... menu -> Pin to scale -> Right.
+strategy("Break-then-Pullback (ORB + IB)", overlay = true, scale = scale.right,
+     pyramiding = 6, max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500,
      initial_capital = 30000, margin_long = 0, margin_short = 0,
      default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
      commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
