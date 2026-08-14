@@ -25,15 +25,23 @@
 //      so 1.5 puts the stop two thirds of the way and makes the trade 1:1.5. A target-derived stop
 //      only applies to a LEVEL target — an R-multiple target is a multiple OF the stop, so deriving
 //      the stop from it would be circular.
-//   4) BIAS FLIP — with "Close the trade if the 4h bias no longer agrees" on, an open position is
-//      closed at market the moment a 4h close turns the bias against it.
+//      TIGHT-STOP GUARD: a target-derived stop can land INSIDE the sweeping candle, which is a stop
+//      sitting in the middle of the very wick that just ran. "If the stop lands inside the sweeping
+//      candle" skips those setups (default), widens the stop out to the wick, or allows them.
+//   4) STACKING — with "Max stacked trades" above 1, a fresh setup is taken while earlier ones are
+//      still open, and each new entry moves the PREVIOUS trade's stop to its own breakeven. So with
+//      three running, the first two sit at breakeven and only the newest carries its original risk.
+//      Same direction only, and each trade is sized independently, so N stacked trades risk N times
+//      the per-trade risk until the breakevens take hold.
+//   5) BIAS FLIP — with "Close the trade if the 4h bias no longer agrees" on, open positions are
+//      closed at market the moment a 4h close turns the bias against them.
 //
 //   The sweep is defined against the PREVIOUS CHART BAR, so putting this on a 5m chart tests a 5m
 //   sweep and on a 1h chart a 1h sweep. 15m is what it was written for.
 //   Validate before trading; this is an idea to backtest.
 
 strategy("MTF 15m Sweep — 4h bias + sweep", overlay = true,
-     pyramiding = 1, max_lines_count = 500, max_boxes_count = 200, max_labels_count = 200,
+     pyramiding = 5, max_lines_count = 500, max_boxes_count = 200, max_labels_count = 200,
      initial_capital = 1000000, margin_long = 0, margin_short = 0,
      default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
      commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
@@ -42,7 +50,8 @@ strategy("MTF 15m Sweep — 4h bias + sweep", overlay = true,
 gB       = "1) 4h bias"
 htfTf    = input.timeframe("240", "Bias timeframe", group = gB)
 htfMode  = input.string("Break or failed break", "Bias rule",
-     options = ["Break or failed break", "Break only", "Failed break only", "Close vs previous close", "Close vs previous midpoint"], group = gB)
+     options = ["Break or failed break", "Break only", "Failed break only", "Close vs previous close", "Close vs previous midpoint"], group = gB,
+     tooltip = "Break or failed break: both clauses together. Break only: the bias comes solely from a CLOSE beyond the previous candle and a rejection says nothing. Failed break only: the bias comes solely from a REJECTION and a clean break says nothing. Splitting them shows which mechanism carries the edge.")
 undecided= input.string("Carry the previous bias", "Candles the rule cannot decide",
      options = ["Carry the previous bias", "Bigger sweep wins", "Leave unmarked"], group = gB,
      tooltip = "Inside candles and candles that took both sides have no signal of their own. Carrying the previous bias keeps one in force at all times; Leave unmarked stands the strategy down until a candle decides.")
@@ -53,7 +62,7 @@ gS       = "2) Sweep"
 slBufTk  = input.float(0, "Stop buffer beyond the sweep extreme (ticks)", 0, step = 1, group = gS,
      tooltip = "Pushes the stop past the sweeping candle's wick by this many ticks. 0 puts it exactly on the wick.")
 minRtk   = input.float(0, "Skip if the stop is closer than (ticks)", 0, step = 1, group = gS,
-     tooltip = "A sweep whose wick is only a tick or two from the close gives a stop so tight it is noise. 0 disables the filter.")
+     tooltip = "An absolute floor in ticks, on top of the sweeping-candle guard below. 0 disables it.")
 maxRtk   = input.float(0, "Skip if the stop is further than (ticks, 0 = no cap)", 0, step = 1, group = gS)
 
 gE       = "3) Exit"
@@ -63,13 +72,22 @@ tpMode   = input.string("1:1", "Target",
      tooltip = "The first four are multiples of the stop distance. The last two aim at a LEVEL: the far side of the candle that was swept (its high for a long, its low for a short), or the last closed 4h candle's high/low. Scale out needs at least 3 contracts; below that it falls back to a single 3R target.")
 slMode   = input.string("Sweeping candle high / low", "Stop loss",
      options = ["Sweeping candle high / low", "Same distance as the target", "Fraction of the target (set ratio)"], group = gE,
-     tooltip = "Sweeping candle high / low: the wick that did the sweeping — the trade is wrong if price returns through it. Same distance as the target: an equal distance the other side of the fill, forcing a 1:1. Fraction of the target: the stop is the target distance DIVIDED by the ratio below, so a ratio of 1.5 puts the stop two thirds of the way and makes the trade 1:1.5. NOTE the last two only apply to the two LEVEL targets — an R-multiple target is defined AS a multiple of the stop, so deriving the stop from it would be circular, and the wick is used instead.")
+     tooltip = "Sweeping candle high / low: the wick that did the sweeping — the trade is wrong if price returns through it. Same distance as the target: an equal distance the other side of the fill, forcing a 1:1. Fraction of the target: the target distance DIVIDED by the ratio below, so 1.5 puts the stop two thirds of the way and makes the trade 1:1.5. The last two only apply to the two LEVEL targets — an R-multiple target is defined AS a multiple of the stop, so deriving the stop from it would be circular, and the wick is used instead.")
 slRatio  = input.float(1.5, "  Reward : risk for that stop", minval = 0.1, step = 0.1, group = gE,
-     tooltip = "Only used by 'Fraction of the target'. Stop distance = target distance / this. 1.5 gives a 1:1.5 trade, 2 gives 1:2, 1 is identical to 'Same distance as the target'. Above 1 the stop tightens and the trade is stopped out more often for a bigger payoff; below 1 it widens.")
+     tooltip = "Only used by 'Fraction of the target'. Stop distance = target distance / this. 1.5 gives a 1:1.5 trade, 2 gives 1:2, 1 is identical to 'Same distance as the target'.")
+tightMode= input.string("Skip the trade", "If the stop lands inside the sweeping candle",
+     options = ["Skip the trade", "Widen it to the wick", "Allow it"], group = gE,
+     tooltip = "A target-derived stop is set by how far the target sits, so it can end up INSIDE the candle that just swept — a stop in the middle of the wick that has just run, which the next push through the same level takes out. Skip: no trade, and the panel says why. Widen: keep the trade but push the stop out to the wick, which loosens the reward:risk from what the ratio asked for. Allow: leave it, for measuring how much the guard is worth. Only ever applies to a target-derived stop; the wick stop is at the wick by definition.")
 closeFlip= input.bool(true, "Close the trade if the 4h bias no longer agrees", group = gE,
-     tooltip = "Checked on every 4h close. The whole premise is that the trade runs with the higher-timeframe direction, so when that direction changes the reason for holding is gone — the position is closed at market rather than left to its stop.")
+     tooltip = "Checked on every 4h close. The whole premise is that the trade runs with the higher-timeframe direction, so when that direction changes the reason for holding is gone — open positions are closed at market rather than left to their stops.")
 beAt     = input.string("Off", "Move the stop to breakeven at", options = ["Off", "1R", "2R"], group = gE,
-     tooltip = "R-multiple targets only. With a mirrored stop 1R IS the target, so breakeven has nothing to do.")
+     tooltip = "R-multiple targets only. With a target-derived stop 1R IS the target, so breakeven has nothing to do.")
+
+gK        = "4) Stacking"
+maxStack  = input.int(1, "Max stacked trades", 1, 5, group = gK,
+     tooltip = "1 (default) keeps the old behaviour: one trade at a time, a new setup is ignored while a trade is open. Above 1, a fresh setup is taken alongside the open ones. Each trade is sized independently, so N stacked trades risk N times the per-trade risk until the breakevens below take hold.")
+beOnStack = input.bool(true, "Move the previous trade to breakeven when a new one stacks", group = gK,
+     tooltip = "On each new stacked entry the PREVIOUS still-open trade has its stop moved to its own fill price. With three running the first two sit at breakeven and only the newest carries real risk. Off: every stacked trade keeps its original stop, so the risk really is N times over.")
 
 gT       = "Session / timing"
 tz       = input.string("America/New_York", "Timezone", group = gT)
@@ -98,7 +116,7 @@ longCol  = input.color(color.new(#26a69a, 0), "Long color",  group = gV)
 shortCol = input.color(color.new(#ef5350, 0), "Short color", group = gV)
 
 // A LEVEL target names an absolute price; an R-MULTIPLE target is a multiple of the stop distance.
-// That distinction decides which stop choices are even meaningful: mirroring the target distance
+// That distinction decides which stop choices are even meaningful: deriving the stop from the target
 // only works when the target is a level, otherwise stop and target would each define the other.
 levelMode  = tpMode == "Swept candle far side" or tpMode == "Last closed 4h extreme"
 // Both target-derived stops are the same calculation; "Same distance" is just the ratio pinned to 1.
@@ -208,7 +226,37 @@ if newDay
     nDay := 0
 dayOk = maxDay == 0 or nDay < maxDay
 
-// ================================================================ 3) ENTRY
+// ================================================================ 3) TRADE SLOTS
+// Pine nets every order into one position, so a stacked trade cannot be managed through
+// strategy.position_avg_price - that is the average of all of them. Each trade therefore gets its
+// own entry id and its own slot here, and its exits are issued from that id. Five slots is the cap
+// because the strategy() pyramiding setting has to be a constant.
+SLOTS = 5
+
+var array<string> stId   = array.new_string(SLOTS, "")
+var array<int>    stDir  = array.new_int(SLOTS, 0)
+var array<float>  stWick = array.new_float(SLOTS, na)   // sweeping candle extreme, captured at signal
+var array<float>  stTgt  = array.new_float(SLOTS, na)   // level target, captured at signal
+var array<float>  stStop = array.new_float(SLOTS, na)   // live stop, may be moved to breakeven
+var array<float>  stEnt  = array.new_float(SLOTS, na)   // actual fill price
+var array<float>  stR    = array.new_float(SLOTS, na)
+var array<float>  stQty  = array.new_float(SLOTS, na)
+var array<bool>   stOn   = array.new_bool(SLOTS, false) // slot holds a trade (ordered or open)
+var array<bool>   stFill = array.new_bool(SLOTS, false) // that trade has actually filled
+var array<bool>   stBE   = array.new_bool(SLOTS, false)
+var array<bool>   stNew  = array.new_bool(SLOTS, false)  // filled on THIS bar, for the R/R box
+var array<int>    stSeq  = array.new_int(SLOTS, 0)      // opening order, to find the newest
+var int seqNext = 0
+
+f_openIdx(string id) =>
+    int found = -1
+    if strategy.opentrades > 0
+        for i = 0 to strategy.opentrades - 1
+            if strategy.opentrades.entry_id(i) == id
+                found := i
+                break
+    found
+
 f_size(float budget, float ptDist) =>
     perC = ptDist * ptVal
     raw  = perC > 0 ? budget / perC : 0.0
@@ -217,37 +265,90 @@ f_size(float budget, float ptDist) =>
     n := riskPct >= 0.5 and n < 1 ? 1 : n
     n
 
-var int    tDir     = 0
-var float  swpWick  = na    // the sweeping candle's extreme — where the stop goes
-var float  swpLvl   = na    // the level that was swept
-var float  tgtLvl   = na    // absolute target for the level-based modes, snapshotted at the signal
-var float  slLvl    = na
-var float  rDist    = na
-var float  refEnt   = na
-var bool   exitsSet = false
-var bool   beDone   = false
 var string lastSkip = "—"
 
+// ---- reconcile the slots against what the broker actually holds
+int  nOpen  = 0      // slots actually open at the broker
+int  nSlots = 0      // slots holding a trade, including one ordered but not yet filled
+int  liveDir = 0
+for k = 0 to SLOTS - 1
+    array.set(stNew, k, false)
+    if array.get(stOn, k)
+        nSlots += 1
+        idx = f_openIdx(array.get(stId, k))
+        if idx >= 0
+            if not array.get(stFill, k)
+                // first sight of the fill: this is where the trade's real numbers are set
+                ent = strategy.opentrades.entry_price(idx)
+                tgt = array.get(stTgt, k)
+                d   = array.get(stDir, k)
+                wk  = array.get(stWick, k)
+                tD  = d == 1 ? tgt - ent : ent - tgt
+                r   = mirrorStop ? tD / stopRatio : (d == 1 ? ent - wk : wk - ent)
+                sl  = mirrorStop ? (d == 1 ? ent - r : ent + r) : wk
+                // a stop derived from the target can sit inside the sweeping candle
+                if mirrorStop and tightMode == "Widen it to the wick"
+                    wickR = d == 1 ? ent - wk : wk - ent
+                    if wickR > r
+                        r  := wickR
+                        sl := wk
+                tgtOk = not levelMode or (d == 1 ? tgt > ent : tgt < ent)
+                if na(r) or r <= 0 or not tgtOk
+                    // no trade left to manage. Mark it filled so the reconcile above frees the slot
+                    // once the close actually goes through; the stop stays na so no exit is issued.
+                    strategy.close(array.get(stId, k), comment = "fill gapped past the level")
+                    array.set(stFill, k, true)
+                else
+                    array.set(stEnt,  k, ent)
+                    array.set(stR,    k, r)
+                    array.set(stStop, k, sl)
+                    array.set(stFill, k, true)
+                    array.set(stNew,  k, true)
+            nOpen += 1
+            liveDir := array.get(stDir, k)
+        else if array.get(stFill, k)
+            // it filled and is no longer open -> the trade is done, free the slot
+            array.set(stOn, k, false)
+            array.set(stFill, k, false)
+            array.set(stBE, k, false)
+
+// ================================================================ 4) ENTRY
 goLong  = allowLong  and bias ==  1 and sweepLong
 goShort = allowShort and bias == -1 and sweepShort
 
-bool tookNow = false
-if (goLong or goShort) and inSess and not flatten and dayOk and strategy.position_size == 0
+int  tookSlot = -1
+bool tookNow  = false
+if (goLong or goShort) and inSess and not flatten and dayOk
     int   d    = goLong ? 1 : -1
     float wick = d == 1 ? low - slBuf : high + slBuf
-    // level-based targets: the far side of the candle that was just swept, or the last closed 4h
-    // extreme. Snapshotted here — a new 4h candle can close between the signal and the fill.
+    // level target: the far side of the candle just swept, or the last closed 4h extreme.
+    // Snapshotted here — a new 4h candle can close between the signal and the fill.
     float lvl = na
     if tpMode == "Swept candle far side"
         lvl := d == 1 ? high[1] : low[1]
     else if tpMode == "Last closed 4h extreme"
         lvl := d == 1 ? hPrvH : hPrvL
-    // risk is the mirror of the target distance only when the stop is derived from it
-    float risk = mirrorStop ? math.abs(lvl - close) / stopRatio : math.abs(close - wick)
-    float q    = useRiskSize ? f_size(acctSize * riskPct / 100.0, risk) : qtyFixed
+    float wickDist = math.abs(close - wick)
+    float risk     = mirrorStop ? math.abs(lvl - close) / stopRatio : wickDist
+    // the guard, measured at the signal: would the derived stop sit inside the sweeping candle?
+    bool tooTight  = mirrorStop and risk < wickDist
+    if tooTight and tightMode == "Widen it to the wick"
+        risk := wickDist
+    float q = useRiskSize ? f_size(acctSize * riskPct / 100.0, risk) : qtyFixed
+    // a free slot, and stacking room
+    int free = -1
+    for k = 0 to SLOTS - 1
+        if not array.get(stOn, k) and free < 0
+            free := k
     beyond = not levelMode or (not na(lvl) and (d == 1 ? lvl > close : lvl < close))
-    if not beyond
+    if nSlots >= maxStack or free < 0
+        lastSkip := "stack full (" + str.tostring(nSlots) + ")"
+    else if nOpen > 0 and liveDir != d
+        lastSkip := "opposite to the open trade"
+    else if not beyond
         lastSkip := "target already passed"
+    else if tooTight and tightMode == "Skip the trade"
+        lastSkip := "stop inside the sweeping candle"
     else if risk < minR or risk <= 0
         lastSkip := mirrorStop ? "target too close" : "stop too tight"
     else if maxR > 0 and risk > maxR
@@ -255,75 +356,77 @@ if (goLong or goShort) and inSess and not flatten and dayOk and strategy.positio
     else if q < 1
         lastSkip := "size < 1 contract"
     else
-        tDir     := d
-        swpWick  := wick
-        tgtLvl   := lvl
-        swpLvl   := d == 1 ? low[1] : high[1]
-        exitsSet := false
-        beDone   := false
+        // the trade before this one goes to breakeven — the newest keeps the real risk
+        if beOnStack and nOpen > 0
+            int prev = -1
+            int best = -1
+            for k = 0 to SLOTS - 1
+                if array.get(stOn, k) and array.get(stFill, k) and array.get(stSeq, k) > best
+                    best := array.get(stSeq, k)
+                    prev := k
+            if prev >= 0
+                pd = array.get(stDir, prev)
+                pe = array.get(stEnt, prev)
+                ps = array.get(stStop, prev)
+                array.set(stStop, prev, pd == 1 ? math.max(ps, pe) : math.min(ps, pe))
+                array.set(stBE, prev, true)
+
+        seqNext += 1
+        id = (d == 1 ? "L" : "S") + str.tostring(free)
+        array.set(stId,   free, id)
+        array.set(stDir,  free, d)
+        array.set(stWick, free, wick)
+        array.set(stTgt,  free, lvl)
+        array.set(stStop, free, na)
+        array.set(stEnt,  free, na)
+        array.set(stR,    free, na)
+        array.set(stQty,  free, q)
+        array.set(stOn,   free, true)
+        array.set(stFill, free, false)
+        array.set(stBE,   free, false)
+        array.set(stSeq,  free, seqNext)
+        nDay     += 1
+        tookSlot := free
         tookNow  := true
-        nDay     := nDay + 1
         lastSkip := "—"
-        strategy.entry(d == 1 ? "L" : "S", d == 1 ? strategy.long : strategy.short, qty = q)
+        strategy.entry(id, d == 1 ? strategy.long : strategy.short, qty = q)
 
-// ---------------------------------------------------------------- Exits
-// R is measured from the ACTUAL fill to the sweeping candle's extreme, so the multiples are exact
-// rather than approximated off the signal bar's close.
-inPos = strategy.position_size != 0
-if inPos and not exitsSet
-    ent = strategy.position_avg_price
-    // target-derived stop: R is the target distance divided by the ratio (1 for "same distance"),
-    //                      and the stop goes that far the other side of the fill.
-    // wick stop:           R is the distance to the sweeping candle's extreme, which IS the stop.
-    tDist = tDir == 1 ? tgtLvl - ent : ent - tgtLvl
-    r  = mirrorStop ? tDist / stopRatio : (tDir == 1 ? ent - swpWick : swpWick - ent)
-    sl = mirrorStop ? (tDir == 1 ? ent - r : ent + r) : swpWick
-    // a level target still has to sit the right side of the fill even when the stop is the wick
-    tgtOk = not levelMode or (tDir == 1 ? tgtLvl > ent : tgtLvl < ent)
-    if na(r) or r <= 0 or not tgtOk
-        strategy.close_all(comment = "fill gapped past the level")
-    else
-        refEnt   := ent
-        rDist    := r
-        slLvl    := sl
-        exitsSet := true
+// ================================================================ 5) EXITS, PER SLOT
+for k = 0 to SLOTS - 1
+    if array.get(stOn, k) and array.get(stFill, k) and not na(array.get(stStop, k)) and f_openIdx(array.get(stId, k)) >= 0
+        id  = array.get(stId, k)
+        d   = array.get(stDir, k)
+        e   = array.get(stEnt, k)
+        r   = array.get(stR, k)
+        sl  = array.get(stStop, k)
+        tp1 = d == 1 ? e + r     : e - r
+        tp2 = d == 1 ? e + r * 2 : e - r * 2
+        tp3 = d == 1 ? e + r * 3 : e - r * 3
 
-if inPos and exitsSet
-    tp1 = tDir == 1 ? refEnt + rDist     : refEnt - rDist
-    tp2 = tDir == 1 ? refEnt + rDist * 2 : refEnt - rDist * 2
-    tp3 = tDir == 1 ? refEnt + rDist * 3 : refEnt - rDist * 3
+        // breakeven at an R multiple — R-multiple targets only, and never undoing a stack breakeven
+        if beAt != "Off" and not mirrorStop and not array.get(stBE, k)
+            trig = beAt == "1R" ? tp1 : tp2
+            if d == 1 ? high >= trig : low <= trig
+                array.set(stStop, k, d == 1 ? math.max(sl, e) : math.min(sl, e))
+                array.set(stBE, k, true)
+                sl := array.get(stStop, k)
 
-    // breakeven — R-multiple targets only; with a mirrored stop 1R is the target itself
-    if beAt != "Off" and not beDone and not mirrorStop
-        trig = beAt == "1R" ? tp1 : tp2
-        hit  = tDir == 1 ? high >= trig : low <= trig
-        if hit
-            slLvl  := tDir == 1 ? math.max(slLvl, refEnt) : math.min(slLvl, refEnt)
-            beDone := true
+        pos = math.abs(strategy.opentrades.size(f_openIdx(id)))
+        if levelMode
+            strategy.exit("x" + id, from_entry = id, stop = sl, limit = array.get(stTgt, k))
+        else if tpMode == "Scale out 1/3 at 1R, 2R, 3R" and pos >= 3
+            leg = math.floor(pos / 3)
+            strategy.exit("a" + id, from_entry = id, qty = leg, stop = sl, limit = tp1)
+            strategy.exit("b" + id, from_entry = id, qty = leg, stop = sl, limit = tp2)
+            strategy.exit("c" + id, from_entry = id,            stop = sl, limit = tp3)
+        else
+            tgt = tpMode == "1:1" ? tp1 : tpMode == "1:2" ? tp2 : tp3
+            strategy.exit("x" + id, from_entry = id, stop = sl, limit = tgt)
 
-    string eid = tDir == 1 ? "L" : "S"
-    float  pos = math.abs(strategy.position_size)
-    scaleOut   = tpMode == "Scale out 1/3 at 1R, 2R, 3R" and pos >= 3
-    if levelMode
-        strategy.exit("X", from_entry = eid, stop = slLvl, limit = tgtLvl)
-    else if scaleOut
-        float leg = math.floor(pos / 3)
-        strategy.exit("X1", from_entry = eid, qty = leg, stop = slLvl, limit = tp1)
-        strategy.exit("X2", from_entry = eid, qty = leg, stop = slLvl, limit = tp2)
-        strategy.exit("X3", from_entry = eid,            stop = slLvl, limit = tp3)
-    else
-        float tgt = tpMode == "1:1" ? tp1 : tpMode == "1:2" ? tp2 : tp3
-        strategy.exit("X", from_entry = eid, stop = slLvl, limit = tgt)
-
-// The trade exists because the 4h was pointing this way. When the 4h no longer is, the reason for
-// holding it has gone, so it comes off at market rather than being left to its stop. `bias` only
-// moves on a 4h close, so this fires at most once per 4h candle.
-if closeFlip and inPos and tDir != 0 and bias != tDir
+// The trades exist because the 4h was pointing this way. When it no longer is, the reason for
+// holding them has gone, so they come off at market. `bias` only moves on a 4h close.
+if closeFlip and nOpen > 0 and liveDir != 0 and bias != liveDir
     strategy.close_all(comment = "4h bias flipped")
-
-if not inPos and inPos[1]
-    exitsSet := false
-    tDir     := 0
 
 if flatten
     strategy.close_all(comment = "flat")
@@ -332,44 +435,55 @@ if flatten
 bgcolor(showBias and bias != 0 ? color.new(bias == 1 ? longCol : shortCol, biasAlpha) : na, title = "4h bias")
 
 if showSweep and tookNow
+    d = array.get(stDir, tookSlot)
+    c = d == 1 ? longCol : shortCol
+    lvl = d == 1 ? low[1] : high[1]
     // the level ran from the candle that made it to the bar that took it, and stops there
-    line.new(bar_index - 1, swpLvl, bar_index, swpLvl, xloc = xloc.bar_index,
-         color = tDir == 1 ? longCol : shortCol, width = 2, style = line.style_dashed)
-    label.new(bar_index, swpLvl, tDir == 1 ? "sweep ▼" : "sweep ▲", xloc = xloc.bar_index,
-         style = tDir == 1 ? label.style_label_up : label.style_label_down,
-         color = color.new(tDir == 1 ? longCol : shortCol, 80),
-         textcolor = tDir == 1 ? longCol : shortCol, size = size.tiny)
+    line.new(bar_index - 1, lvl, bar_index, lvl, xloc = xloc.bar_index, color = c, width = 2, style = line.style_dashed)
+    label.new(bar_index, lvl, d == 1 ? "sweep ▼" : "sweep ▲", xloc = xloc.bar_index,
+         style = d == 1 ? label.style_label_up : label.style_label_down,
+         color = color.new(c, 80), textcolor = c, size = size.tiny)
 
-if showRR and inPos and not inPos[1] and exitsSet
-    c    = tDir == 1 ? longCol : shortCol
-    mult = tpMode == "1:1" ? 1.0 : tpMode == "1:2" ? 2.0 : 3.0
-    tgt  = levelMode ? tgtLvl : (tDir == 1 ? refEnt + rDist * mult : refEnt - rDist * mult)
-    x2  = bar_index + rrBars
-    box.new(bar_index, tDir == 1 ? tgt : refEnt, x2, tDir == 1 ? refEnt : tgt, xloc = xloc.bar_index,
-         border_color = color.new(c, 60), border_width = 1, bgcolor = color.new(color.green, 85))
-    box.new(bar_index, tDir == 1 ? refEnt : slLvl, x2, tDir == 1 ? slLvl : refEnt, xloc = xloc.bar_index,
-         border_color = color.new(c, 60), border_width = 1, bgcolor = color.new(color.red, 85))
-    label.new(x2, refEnt, (tDir == 1 ? "LONG  " : "SHORT  ") + str.tostring(rDist, "#.##") + (mirrorStop ? " pts risk, 1:" + str.tostring(stopRatio, "#.##") : " pts risk"),
-         xloc = xloc.bar_index, style = label.style_label_left,
-         color = color.new(color.gray, 15), textcolor = color.white, size = size.tiny)
-
-plot(exitsSet and inPos ? slLvl : na, "Stop", color = color.new(color.red, 20), style = plot.style_linebr)
+// one R/R box per trade, drawn on the bar its fill price becomes known
+for k = 0 to SLOTS - 1
+    if showRR and array.get(stNew, k) and not na(array.get(stR, k))
+        d   = array.get(stDir, k)
+        e   = array.get(stEnt, k)
+        r   = array.get(stR, k)
+        sl  = array.get(stStop, k)
+        c   = d == 1 ? longCol : shortCol
+        mult= tpMode == "1:1" ? 1.0 : tpMode == "1:2" ? 2.0 : 3.0
+        tgt = levelMode ? array.get(stTgt, k) : (d == 1 ? e + r * mult : e - r * mult)
+        x2  = bar_index + rrBars
+        box.new(bar_index, d == 1 ? tgt : e, x2, d == 1 ? e : tgt, xloc = xloc.bar_index,
+             border_color = color.new(c, 60), border_width = 1, bgcolor = color.new(color.green, 85))
+        box.new(bar_index, d == 1 ? e : sl, x2, d == 1 ? sl : e, xloc = xloc.bar_index,
+             border_color = color.new(c, 60), border_width = 1, bgcolor = color.new(color.red, 85))
+        label.new(x2, e, (d == 1 ? "LONG  " : "SHORT  ") + str.tostring(r, "#.##") + " pts risk",
+             xloc = xloc.bar_index, style = label.style_label_left,
+             color = color.new(color.gray, 15), textcolor = color.white, size = size.tiny)
 
 // ---------------------------------------------------------------- Panel
-var table dg = table.new(position.bottom_right, 2, 6, border_width = 1)
+var table dg = table.new(position.bottom_right, 2, 7, border_width = 1)
 if showTbl and barstate.islast
     btxt = bias == 1 ? "▲ long" : bias == -1 ? "▼ short" : "— none"
     bcol = bias == 1 ? longCol : bias == -1 ? shortCol : color.gray
-    ptxt = strategy.position_size != 0 ? (tDir == 1 ? "long" : "short") + " @ " + str.tostring(refEnt, "#.##") : "flat"
+    int nBE = 0
+    for k = 0 to SLOTS - 1
+        if array.get(stOn, k) and array.get(stBE, k)
+            nBE += 1
+    ptxt = nOpen == 0 ? "flat" : str.tostring(nOpen) + " " + (liveDir == 1 ? "long" : "short") + (nBE > 0 ? " (" + str.tostring(nBE) + " at BE)" : "")
     table.cell(dg, 0, 0, "MTF 15m sweep", text_color = color.white, bgcolor = color.new(color.gray, 20))
     table.cell(dg, 1, 0, "state",         text_color = color.white, bgcolor = color.new(color.gray, 20))
     table.cell(dg, 0, 1, htfTf + " bias", text_color = color.white)
     table.cell(dg, 1, 1, btxt,            text_color = bcol)
-    table.cell(dg, 0, 2, "position",      text_color = color.white)
+    table.cell(dg, 0, 2, "open",          text_color = color.white)
     table.cell(dg, 1, 2, ptxt,            text_color = color.white)
     table.cell(dg, 0, 3, "target",        text_color = color.white)
     table.cell(dg, 1, 3, tpMode,          text_color = color.white)
     table.cell(dg, 0, 4, "stop from",     text_color = color.white)
     table.cell(dg, 1, 4, mirrorStop ? "target distance / " + str.tostring(stopRatio, "#.##") : "sweeping candle wick", text_color = color.white)
-    table.cell(dg, 0, 5, "last skip",     text_color = color.gray)
-    table.cell(dg, 1, 5, lastSkip,        text_color = color.orange)
+    table.cell(dg, 0, 5, "stack",         text_color = color.white)
+    table.cell(dg, 1, 5, str.tostring(maxStack) + " max" + (beOnStack ? ", prev -> BE" : ""), text_color = color.white)
+    table.cell(dg, 0, 6, "last skip",     text_color = color.gray)
+    table.cell(dg, 1, 6, lastSkip,        text_color = color.orange)

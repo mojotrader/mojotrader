@@ -178,6 +178,24 @@ deriving the stop from it would be circular; the wick is used instead and the pa
 `Minimum / maximum stop distance` filters whichever distance is in play. Breakeven applies to
 R-multiple targets only — with a mirrored stop, 1R *is* the target.
 
+**Tight-stop guard.** A target-derived stop is set by how far the target sits, so it can land
+**inside the candle that just swept** — a stop sitting in the middle of the wick that has only just
+run, which the next push through the same level takes out. `If the stop lands inside the sweeping
+candle` decides: `Skip the trade` (default), `Widen it to the wick` (keeps the trade but loosens the
+reward:risk below what the ratio asked for), or `Allow it` (for measuring what the guard is worth).
+It never applies to the wick stop, which is at the wick by definition.
+
+**Stacking.** `Max stacked trades` defaults to `1` — one trade at a time, a new setup ignored while
+one is open. Above 1, a fresh setup is taken alongside the running ones and, with
+`Move the previous trade to breakeven when a new one stacks` on, **each new entry moves the previous
+trade's stop to its own fill price**. With three running the first two sit at breakeven and only the
+newest carries its original risk.
+
+Pine nets every order into one position, so a stacked trade cannot be managed through the average
+entry price. Each trade therefore gets its own entry id and slot, and its exits are issued from that
+id. Stacking is **same-direction only**, and each trade is sized independently — N stacked trades
+risk N times the per-trade risk until the breakevens take hold.
+
 Either way R is measured from the **actual fill**, not the signal bar's close.
 
 **Bias flip** — `Close the trade if the 4h bias no longer agrees` (on by default) closes an open
