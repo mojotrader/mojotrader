@@ -272,9 +272,9 @@ if (goLong or goShort) and inSess and not flatten and dayOk and strategy.positio
 inPos = strategy.position_size != 0
 if inPos and not exitsSet
     ent = strategy.position_avg_price
-    // mirrored stop: R is the distance to the target, and the stop is that far the other side.
-    // wick stop:     R is the distance to the sweeping candle's extreme, which IS the stop.
-    // derived stop: R is the target distance scaled down by the ratio, placed the other side of the fill
+    // target-derived stop: R is the target distance divided by the ratio (1 for "same distance"),
+    //                      and the stop goes that far the other side of the fill.
+    // wick stop:           R is the distance to the sweeping candle's extreme, which IS the stop.
     tDist = tDir == 1 ? tgtLvl - ent : ent - tgtLvl
     r  = mirrorStop ? tDist / stopRatio : (tDir == 1 ? ent - swpWick : swpWick - ent)
     sl = mirrorStop ? (tDir == 1 ? ent - r : ent + r) : swpWick
