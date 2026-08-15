@@ -1,0 +1,1215 @@
+//@version=6
+// ALN - Asia / London / New York break-then-pullback strategy (run on a 5m chart).
+//
+// THE DAY IS AN OVERNIGHT DAY. It starts at the Asia open (20:00 ET by default) and runs through London and New
+// York to the flatten (16:00 ET by default) - one continuous 20-hour session that crosses midnight. Every time
+// check in the script is measured in MINUTES SINCE THE DAY START, not minutes since midnight, so ranges, cutoffs
+// and the flatten all behave correctly across the date change.
+//
+// TWO TRADE SLOTS, EACH POINTED AT ANY SESSION. Slot A and slot B each pick their range from a dropdown:
+//   Asia (20:00-02:00) | London (02:00-08:00) | New York (08:00-16:00) | Custom (your own window)
+// Default is A = Asia, B = London: the Asian range is traded once it breaks (through London and New York), and
+// the London range is traded once IT breaks (through New York). Point them anywhere - London+NY, Asia+NY, or two
+// custom windows. All four session windows are inputs, so the sessions themselves are yours to define.
+//   NOTE: a slot can only trade AFTER its range has closed, and only before the flatten. The New York range as
+//   given (08:00-16:00) ends exactly at the 16:00 flatten, so to trade a NY range break you must either shorten
+//   the NY window (08:00-10:00) or push the flatten later into the evening.
+//
+// ARMING (both slots, identical logic):
+//   - No bias, no first-extreme rule, no close-position rule. The moment ONE SIDE of the range is breached the
+//     trade is armed in that direction: high breaks -> LONG, low breaks -> SHORT. Break type selectable per slot
+//     ("Wick (touch)" or "Close beyond"). The first side to break sets the direction for the day.
+//
+// ENTRY (selectable per slot):
+//   - "All at 25% pullback"  -> the whole size rests at the 25% retracement of the range (long: the 75% line).
+//   - "All at 50% pullback"  -> the whole size rests at the 50% line (mid-range).
+//   - "Split (avg down)"     -> one unit at the 25% pullback + one unit at the 50% line.
+//   Contracts per level are inputs (default 2 / 2 / 1+1); optional %-of-capital or $-per-setup sizing overrides.
+//
+// STOP: always the OTHER EDGE of the range (long -> range low, short -> range high), shared by both units.
+// TARGET: range edge (0%), or a 10% / 30% / 50% / 100% extension of the range beyond it - long and short apart.
+//
+// SLOT PRIORITY (order-independent, so it works whichever sessions the two slots point at):
+//   - The first slot to EXECUTE owns the day; the other is not taken. (Optionally re-enabled once that trade
+//     closes - off by default, so one range trades per day.)
+//   - A slot that ARMED but never filled gives up its seat when the OTHER slot arms: its resting limits are
+//     cancelled and the newly armed range trades instead. When that happens is selectable - as soon as the other
+//     range breaks (default), as soon as the other range closes, or never.
+//   FILTERS: skip double-break days; optional minimum range size per slot.
+//
+// PROBABILITY TABLE (bottom right) - how often price REACHES each level from a given starting point, walk-forward:
+//   - "From FILL" rows: from the entry fill to the flatten, per range-size bucket.
+//   - "From 25% PB" / "From 50% PB" rows: from the moment price retraces to that fib - the two entry levels.
+//   Columns are the exit menu itself: TP0 / TP10 / TP30 / TP50 / TP100 and SL (the opposite range edge).
+//   The table tints the row you are currently in: the size row of the running setup, and the pullback row for the
+//   depth price has reached ("> " marks it). Nothing is drawn on the chart.
+//
+// NOTE: a Pine strategy nets all orders into ONE position (no hedging). The priority rules above mean the two
+//   slots are never open at the same time, so the netting never merges two different setups' positions.
+strategy("ALN Break-then-Pullback (Asia / London / New York)", overlay = true, pyramiding = 6, max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500,
+     initial_capital = 30000, margin_long = 0, margin_short = 0,
+     default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
+// NOTE: position sizing uses a FIXED account size (see 'Account size $' input) - it does NOT compound with P&L.
+
+// ---------------------------------------------------------------- The trading day (overnight-aware)
+gDay      = "Trading day (crosses midnight)"
+tz        = input.string("America/New_York", "Timezone", options = ["America/New_York", "America/Chicago", "America/Los_Angeles", "Europe/London", "Europe/Berlin", "Asia/Tokyo", "UTC"], group = gDay,
+     tooltip = "Every time in this script is in this timezone. The default session windows below are the standard New-York-time blocks: Asia 20:00-02:00, London 02:00-08:00, New York 08:00-16:00.")
+dayStartH = input.int(20, "Day starts at (hour)",   0, 23, group = gDay,
+     tooltip = "The ALN day rolls over here - the Asia open by default. Everything (range state, the daily loss limit, the HOD/LOD target) resets at this moment, and every cutoff below is measured forward from it, so a day that runs 20:00 -> 16:00 the next date is handled correctly.")
+dayStartM = input.int(0,  "Day starts at (minute)", 0, 59, group = gDay)
+flatH     = input.int(16, "Flatten everything at (hour)",   0, 23, group = gDay,
+     tooltip = "Positions are closed and orders cancelled here - the New York close by default. Must be inside the 24h that follows the day start. Push it later (e.g. 19:55) if you want to trade a New York range break in the evening.")
+flatM     = input.int(0,  "Flatten everything at (minute)", 0, 59, group = gDay)
+
+// ---------------------------------------------------------------- Session windows (edit the sessions themselves here)
+gSess     = "Session windows"
+asiaSess  = input.session("2000-0200", "Asia",     group = gSess, tooltip = "Asian range. Default 20:00-02:00 New York time.")
+londonSess= input.session("0200-0800", "London",   group = gSess, tooltip = "London range. Default 02:00-08:00 New York time.")
+nySess    = input.session("0800-1600", "New York", group = gSess, tooltip = "New York range. Default 08:00-16:00 New York time - note this ends at the default flatten, so shorten it (or move the flatten later) before trading its break.")
+custASess = input.session("0930-0945", "Custom A", group = gSess, tooltip = "Free window for slot A when its range is set to Custom. 0930-0945 reproduces the classic 15-min opening range.")
+custBSess = input.session("0930-1030", "Custom B", group = gSess, tooltip = "Free window for slot B when its range is set to Custom. 0930-1030 reproduces the classic 1-hour initial balance.")
+
+// ---------------------------------------------------------------- Slot A
+gA        = "Slot A"
+runA      = input.bool(true, "Run slot A", group = gA)
+aPick     = input.string("Asia", "Slot A range", options = ["Asia", "London", "New York", "Custom"], group = gA,
+     tooltip = "Which session's high/low slot A trades the break of.")
+aLong     = input.bool(true, "A longs (arm when the range HIGH breaks)", group = gA)
+aShort    = input.bool(true, "A shorts (arm when the range LOW breaks)", group = gA)
+aBreak    = input.string("Wick (touch)", "A break type", options = ["Wick (touch)", "Close beyond"], group = gA,
+     tooltip = "Wick (touch): the setup arms the instant price trades through the level. Close beyond: a bar must CLOSE past it first.")
+aMode     = input.string("Split (avg down): 25% + 50%", "A entry", options = ["All at 25% pullback", "All at 50% pullback", "Split (avg down): 25% + 50%"], group = gA,
+     tooltip = "Where the limit(s) rest after the break. 25% pullback = a 25% retracement of the range from the broken edge (long: the 75% line). 50% = mid-range. Split fires one unit at each, so a deeper pullback averages the position down.")
+aQtyAll   = input.float(2, "  A contracts (single-level modes)", minval = 1, step = 1, group = gA)
+aQty25    = input.float(1, "  A contracts @ 25% (split mode)",   minval = 1, step = 1, group = gA)
+aQty50    = input.float(1, "  A contracts @ 50% (split mode)",   minval = 1, step = 1, group = gA)
+aTpL      = input.string("Ext 30%", "A target - longs",  options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "Ext 100%", "HOD/LOD"], group = gA,
+     tooltip = "Range edge = the broken level itself (0% extension). Ext X% = X% of the range projected beyond that edge. HOD/LOD = the day's extreme so far, measured from the day start.")
+aTpS      = input.string("Ext 30%", "A target - shorts", options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "Ext 100%", "HOD/LOD"], group = gA)
+aBE       = input.bool(false, "A breakeven once the range edge is reclaimed", group = gA)
+aCutH     = input.int(15, "A - stop new entries at (hour)",   0, 23, group = gA,
+     tooltip = "After this clock time an unfilled slot-A limit is cancelled. An open trade is not touched - it runs to its stop, its target or the flatten. Measured inside the current ALN day, so a time before the day start means 'tomorrow'.")
+aCutM     = input.int(0,  "A - stop new entries at (minute)", 0, 59, group = gA)
+aMinRng   = input.float(0, "A - min range (% of price, 0 = off)", minval = 0, step = 0.05, group = gA,
+     tooltip = "Skip slot-A setups whose range is smaller than this % of price (range / range-low * 100). Off by default: the right threshold depends entirely on which session the slot points at - a 6-hour Asian range and a 15-minute opening range are not comparable.")
+
+// ---------------------------------------------------------------- Slot B
+gB        = "Slot B"
+runB      = input.bool(true, "Run slot B", group = gB)
+bPick     = input.string("London", "Slot B range", options = ["Asia", "London", "New York", "Custom"], group = gB)
+bLong     = input.bool(true, "B longs (arm when the range HIGH breaks)", group = gB)
+bShort    = input.bool(true, "B shorts (arm when the range LOW breaks)", group = gB)
+bBreak    = input.string("Wick (touch)", "B break type", options = ["Wick (touch)", "Close beyond"], group = gB)
+bMode     = input.string("Split (avg down): 25% + 50%", "B entry", options = ["All at 25% pullback", "All at 50% pullback", "Split (avg down): 25% + 50%"], group = gB)
+bQtyAll   = input.float(2, "  B contracts (single-level modes)", minval = 1, step = 1, group = gB)
+bQty25    = input.float(1, "  B contracts @ 25% (split mode)",   minval = 1, step = 1, group = gB)
+bQty50    = input.float(1, "  B contracts @ 50% (split mode)",   minval = 1, step = 1, group = gB)
+bTpL      = input.string("Ext 30%", "B target - longs",  options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "Ext 100%", "HOD/LOD"], group = gB)
+bTpS      = input.string("Ext 30%", "B target - shorts", options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "Ext 100%", "HOD/LOD"], group = gB)
+bBE       = input.bool(false, "B breakeven once the range edge is reclaimed", group = gB)
+bCutH     = input.int(15, "B - stop new entries at (hour)",   0, 23, group = gB)
+bCutM     = input.int(0,  "B - stop new entries at (minute)", 0, 59, group = gB)
+bMinRng   = input.float(0, "B - min range (% of price, 0 = off)", minval = 0, step = 0.05, group = gB)
+
+// ---------------------------------------------------------------- How the two slots interact
+gLink     = "Slot priority"
+allowBoth = input.bool(false, "Allow the other slot after a closed trade", group = gLink,
+     tooltip = "OFF (default): once either slot has EXECUTED, the other is skipped for the rest of the day - one range trades per day. ON: when that trade closes the other slot may still take its own setup, provided price has not already traded through its entry level while it was held back.")
+handOver  = input.string("When the other range breaks", "Cancel an unfilled slot", options = ["When the other range breaks", "When the other range closes", "Never (rest to its own cutoff)"], group = gLink,
+     tooltip = "A slot keeps the seat only if it EXECUTES. One that armed but never filled hands over so the other range can trade. 'When the other range breaks' (default): its limits are pulled the moment the other slot arms a setup - a pullback that arrives before that is still taken. 'When the other range closes': pulled as soon as the other range window ends, even if it has not broken yet. 'Never': the unfilled limit rests to its own cutoff and the other slot is skipped while it does.")
+
+// ---------------------------------------------------------------- Trade-day filters (weekday of the NY session)
+gDayF     = "Trade days (weekday at the flatten - the New York date)"
+aMon      = input.bool(true, "A Monday",    group = gDayF)
+aTue      = input.bool(true, "A Tuesday",   group = gDayF)
+aWed      = input.bool(true, "A Wednesday", group = gDayF)
+aThu      = input.bool(true, "A Thursday",  group = gDayF)
+aFri      = input.bool(true, "A Friday",    group = gDayF)
+bMon      = input.bool(true, "B Monday",    group = gDayF)
+bTue      = input.bool(true, "B Tuesday",   group = gDayF)
+bWed      = input.bool(true, "B Wednesday", group = gDayF)
+bThu      = input.bool(true, "B Thursday",  group = gDayF)
+bFri      = input.bool(true, "B Friday",    group = gDayF)
+
+// ---------------------------------------------------------------- Risk sizing (% of a FIXED capital, or a flat $ - no compounding)
+gRisk       = "Risk sizing (optional - overrides the contract counts)"
+useRiskSize = input.bool(false, "Size by risk (else use the contracts per slot above)", group = gRisk,
+     tooltip = "OFF (default): trade exactly the contract counts set in the slot groups - the R/R tool, the strategy orders and the webhook all use them. ON: ignore those counts and size each entry so the setup's risk equals the per-setup risk below, split across its units.")
+acctSize    = input.float(30000, "Account size $ (fixed - NO compounding)", minval = 1, group = gRisk,
+     tooltip = "Sizing uses this constant capital every day; it does NOT grow/shrink with P&L. So the dollar risk per trade is the same every day (no compounding).")
+riskMode    = input.string("% of capital", "Risk per setup measured in", options = ["% of capital", "$ per setup"], group = gRisk,
+     tooltip = "% of capital: the setup risks that percentage of the fixed account size above. $ per setup: the setup risks a flat dollar amount regardless of the account size. Whichever is selected, the other input is ignored.")
+riskPct     = input.float(1.0, "  Risk per setup (% of capital)", minval = 0.1, step = 0.1, group = gRisk,
+     tooltip = "Total risk for one slot's setup, split equally between its entry units. 1% on 30k = $300 = $150 per unit in split mode.")
+riskDlr     = input.float(300, "  Risk per setup ($)", minval = 1, step = 25, group = gRisk,
+     tooltip = "Total dollar risk for one slot's setup, split equally between its entry units. The stop distance then decides the contract count.")
+maxDayPct   = input.float(2.0, "Daily max loss (% of capital, 0 = off)", minval = 0, step = 0.5, group = gRisk,
+     tooltip = "Once the day's loss reaches this % of the account size, open trades are closed and no new trades are taken until the next day start.")
+
+// The $ risk a whole setup may lose, however it was expressed. Every sizing calculation below reads
+// this, so the two inputs never both apply and switching mode changes nothing else.
+setupBudget = riskMode == "$ per setup" ? riskDlr : acctSize * (riskPct / 100.0)
+
+// ---------------------------------------------------------------- Filters
+gFilt     = "Filters"
+noDbl     = input.bool(true, "Skip double-break days (both range sides break)", group = gFilt,
+     tooltip = "If the side OPPOSITE the armed direction also breaks (long: price trades below the range low; short: above the range high), cancel the pending entry and take no trade from that slot. That opposite edge is also the stop, so a double break before the fill is a setup that would have stopped out anyway. On a long six-hour range (Asia) both sides break fairly often - turn this off to see those days.")
+
+// ---------------------------------------------------------------- Automation (PickMyTrade webhook -> Tradovate)
+grpA      = "Automation - PickMyTrade"
+autoOn    = input.bool(false, "Enable webhook alerts", group = grpA,
+     tooltip = "Create ONE alert with condition 'alert() function calls only' and paste PickMyTrade's webhook URL. Verify the JSON fields match PickMyTrade's template. Alerts fire on the NET position; the two slots are never open at the same time, so each alert maps to a single setup.")
+pmtToken  = input.string("", "PickMyTrade token", group = grpA)
+pmtAcct   = input.string("", "Tradovate account id", group = grpA)
+pmtSym    = input.string("MNQ1!", "Broker symbol", group = grpA)
+pmtType   = input.string("market", "Order type", options = ["market", "limit"], group = grpA)
+
+// ---------------------------------------------------------------- Break alerts (manual trading)
+grpBA     = "Break alerts (manual)"
+brkAlerts = input.bool(true, "Alert when a range breaks", group = grpBA,
+     tooltip = "Fires a notification the moment either slot's range breaks, with the direction and the planned entry/stop/target so you can place the trade yourself. Create ONE alert on this strategy with condition 'alert() function calls only'. (Independent of the PickMyTrade automation above.)")
+
+// ---------------------------------------------------------------- Risk/Reward tool
+grpRR     = "Risk / Reward tool"
+showRR    = input.bool(true, "Show risk/reward box at the break", group = grpRR)
+showFibs  = input.bool(true, "Show fib retracement lines (25/50/75)", group = grpRR, tooltip = "Dotted lines only, no text: the 25/50/75 levels of the range. Which one is the entry is shown by the R/R box.")
+showInfo  = input.bool(true, "Show strategy rules panel", group = grpRR)
+ptVal     = input.float(2.0, "$ per point per contract", group = grpRR, tooltip = "MNQ=2, NQ=20, MES=5, ES=50.")
+keepBox   = input.int(0, "Keep R/R boxes for the last N setups (0 = all)", 0, 250, group = grpRR,
+     tooltip = "0 keeps every past setup's boxes and fib lines, so you can scroll back and review the risk/reward of each historical setup. Pine caps a script at 500 boxes and 500 lines, so in practice that is the most recent ~250 setups (~166 if the fib lines are on). Set a small number to keep only the newest setups on the chart.")
+keepLab   = input.int(3, "Keep R/R labels for the last N setups (0 = all)", 0, 250, group = grpRR,
+     tooltip = "The boxes are cheap to look at; the text labels are what makes a chart unreadable when they stack up. This keeps the $ risk/reward label on the newest few setups only, while the boxes stay for the whole history. 0 keeps every label.")
+
+// ---------------------------------------------------------------- Historical probabilities
+grpP      = "Historical probabilities"
+hiLive    = input.bool(true, "Highlight the live setup in the table", group = grpP,
+     tooltip = "Tints the table row you are currently in: the range-size row of the setup that is running, and the pullback row for the depth price has reached so far (25% line, then the 50% line). A > marks the row that is live right now, so the odds you are looking at are the ones that apply.")
+showTable = input.bool(true, "Show probability table", group = grpP)
+tblPos    = input.string("Bottom right", "Table position", options = ["Top right", "Bottom right", "Bottom left", "Top left"], group = grpP)
+bktMode   = input.string("Auto (equal thirds)", "Size buckets", options = ["Auto (equal thirds)", "Manual (%)"], group = grpP,
+     tooltip = "Applies to the size-segmented rows only. Range is measured as % of price (range / range-low * 100) so buckets stay comparable as price drifts over time. Auto: split each slot's own range-% distribution into three equal-count buckets (S/M/L). Manual: use the fixed % thresholds below.")
+aB1       = input.float(0.25, "Manual A small/med split (%)", step = 0.05, group = grpP, tooltip = "Used only in Manual mode. Range-% below this = Small; between the two = Medium; at/above the med/large split = Large.")
+aB2       = input.float(0.40, "Manual A med/large split (%)", step = 0.05, group = grpP)
+bB1       = input.float(0.50, "Manual B small/med split (%)", step = 0.05, group = grpP)
+bB2       = input.float(0.80, "Manual B med/large split (%)", step = 0.05, group = grpP)
+pbSplit   = input.bool(false, "Split the pullback rows by size too", group = grpP,
+     tooltip = "OFF (default): one 'after 25% PB' and one 'after 50% PB' row per slot, pooled across range sizes - the biggest sample, least noise. ON: those rows are repeated per S/M/L bucket (6 rows per slot); useful once you have a few hundred days, misleading before that.")
+autoMode  = bktMode == "Auto (equal thirds)"
+
+// ================================================================ THE DAY MODEL (overnight-aware)
+// Minutes since the day start, wrapping over midnight. Every cutoff is converted into the same measure, so a
+// clock time that falls after midnight is simply a larger number - no comparison ever straddles the date change.
+tod      = hour(time, tz) * 60 + minute(time, tz)
+dayAnchor = dayStartH * 60 + dayStartM
+minsIn   = (tod - dayAnchor + 1440) % 1440
+f_since(int h, int m) => ((h * 60 + m) - dayAnchor + 1440) % 1440
+// a flatten set to the day start would leave a zero-length day, so read it as "the full 24h" instead
+flatRaw  = f_since(flatH, flatM)
+flatMins = flatRaw == 0 ? 1440 : flatRaw
+// the day rolls over when minsIn wraps back towards zero (also covers the weekend gap: the first bar of Sunday
+// evening is still "inside" Friday's day until the clock passes the day start again)
+newDay   = na(minsIn[1]) or minsIn < minsIn[1]
+inDay    = minsIn < flatMins
+flatten  = not inDay
+
+// the weekday the day is FILED under is the one at the flatten - i.e. the New York date, so a session that opens
+// Sunday 20:00 counts as Monday
+var int dayDow = na
+if newDay
+    dayDow := dayofweek(time + flatMins * 60000, tz)
+aDayOK = (dayDow == dayofweek.monday and aMon) or (dayDow == dayofweek.tuesday and aTue) or (dayDow == dayofweek.wednesday and aWed) or (dayDow == dayofweek.thursday and aThu) or (dayDow == dayofweek.friday and aFri)
+bDayOK = (dayDow == dayofweek.monday and bMon) or (dayDow == dayofweek.tuesday and bTue) or (dayDow == dayofweek.wednesday and bWed) or (dayDow == dayofweek.thursday and bThu) or (dayDow == dayofweek.friday and bFri)
+
+// the day's extremes (for the HOD/LOD target option)
+var float dHigh = na
+var float dLow  = na
+if newDay
+    dHigh := high
+    dLow  := low
+else
+    dHigh := math.max(nz(dHigh, high), high)
+    dLow  := math.min(nz(dLow, low), low)
+
+// fixed-capital sizing (NO compounding) + daily max-loss halt (today's P&L vs today's start equity)
+var float dayStartEq = na
+if newDay
+    dayStartEq := strategy.equity
+dayPnL    = strategy.equity - dayStartEq              // today's P&L incl. open
+dailyHalt = maxDayPct > 0 and dayPnL <= -(acctSize * maxDayPct / 100.0)
+
+// ---- the session each slot is pointed at -------------------------------------------------------------------
+aSess = aPick == "Asia" ? asiaSess : aPick == "London" ? londonSess : aPick == "New York" ? nySess : custASess
+bSess = bPick == "Asia" ? asiaSess : bPick == "London" ? londonSess : bPick == "New York" ? nySess : custBSess
+a_inR   = not na(time(timeframe.period, aSess, tz))
+a_rDone = not a_inR and a_inR[1]
+b_inR   = not na(time(timeframe.period, bSess, tz))
+b_rDone = not b_inR and b_inR[1]
+
+// position sizer: contracts for a given $ budget and stop distance (points).
+// round: fractional <= .5 -> down, > .5 -> up (2.1-2.5 -> 2, >2.5 -> 3). Min 1 when the unit's risk >= 0.5%.
+f_size(float budget, float ptDist, float unitPct) =>
+    perC = ptDist * ptVal
+    raw  = perC > 0 ? budget / perC : 0.0
+    fr   = raw - math.floor(raw)
+    n = fr > 0.5 ? math.ceil(raw) : math.floor(raw)
+    n := (unitPct >= 0.5 and n < 1) ? 1 : n
+    n
+
+// TP resolver: "Range edge" is the broken level itself; every "Ext" is that much of the range beyond it.
+f_tp(int d, float rH, float rL, float rg, float dHi, float dLo, string tpL, string tpS) =>
+    t   = d == 1 ? tpL : tpS
+    ext = t == "Ext 10%" ? 0.10 : t == "Ext 30%" ? 0.30 : t == "Ext 50%" ? 0.50 : t == "Ext 100%" ? 1.00 : 0.0
+    d == 1 ? (t == "HOD/LOD" ? dHi : rH + ext * rg) : (t == "HOD/LOD" ? dLo : rL - ext * rg)
+
+// the two entry levels of a range, in the armed direction. 25% = a 25% retracement from the broken edge.
+f_p25(int d, float rL, float rg) => rL + (d == 1 ? 0.75 : 0.25) * rg
+f_p50(float rL, float rg) => rL + 0.50 * rg
+
+// ================================================================ Historical-probability stats
+// TWO walk-forward studies are collected (a day is only added to the sample after its flatten, so the numbers
+// shown on any bar never contain data from that day or later):
+//
+//   A) FILL -> flatten, segmented by range size. One record per FILLED trade: did price TOUCH each level between
+//      the fill and the flatten? Range is stored as % of price (range / range-low * 100) so the S/M/L buckets
+//      stay comparable as price drifts over the years. These are the "size" rows of the table.
+//
+//   B) PULLBACK -> flatten. One record per SETUP THAT BROKE its range (whether or not the order was actually
+//      placed - a day where a slot was skipped behind the other one still tells you what price did). It answers:
+//      once price has retraced to the 25% fib, how often does it go on to tag each TP extension? And the same
+//      from the 50% fib - i.e. exactly the two entry levels this strategy uses.
+//      On the very bar that reaches the pullback, a level counts only if the CLOSE is already beyond it - the last
+//      tick of that bar sits past the level, so it was traded after the retrace. From the next bar on, an ordinary
+//      wick touch counts. That keeps the ordering honest without throwing away the entry candle.
+//      The 50% line can only be reached through the 25% line, so the 50% sample is a subset of the 25% one.
+//      The SL column is the opposite range edge - the stop this strategy actually uses - under the same
+//      conditioning, so a row shows the reward AND the risk that follow the pullback.
+f_pct(int hit, int n) => n > 0 ? 100.0 * hit / n : na
+f_pctStr(int hit, int n) =>
+    p = f_pct(hit, n)
+    na(p) ? "-" : str.tostring(p, "#") + "%"
+
+// ---- study A: one record per filled trade. Level order: TP0, TP10, TP30, TP50, TP100, SL(opposite edge) -------
+var tRng   = array.new_float(0)
+var tSlot  = array.new_int(0)
+var tTP0   = array.new_int(0)
+var tTP10  = array.new_int(0)
+var tTP30  = array.new_int(0)
+var tTP50  = array.new_int(0)
+var tTP100 = array.new_int(0)
+var tSL    = array.new_int(0)
+
+f_pushTrade(int s, float rng, bool t0, bool t10, bool t30, bool t50, bool t100, bool sl) =>
+    array.push(tRng,  rng)
+    array.push(tSlot, s)
+    array.push(tTP0,   t0   ? 1 : 0)
+    array.push(tTP10,  t10  ? 1 : 0)
+    array.push(tTP30,  t30  ? 1 : 0)
+    array.push(tTP50,  t50  ? 1 : 0)
+    array.push(tTP100, t100 ? 1 : 0)
+    array.push(tSL,    sl   ? 1 : 0)
+
+// ranges recorded so far for one slot (walk-forward: only days finalized before now)
+f_ranges(int s) =>
+    tmp = array.new_float(0)
+    if array.size(tRng) > 0
+        for i = 0 to array.size(tRng) - 1
+            if array.get(tSlot, i) == s
+                array.push(tmp, array.get(tRng, i))
+    tmp
+
+// tercile boundaries for a slot (na until >=3 samples); in manual mode the caller passes fixed thresholds
+f_b1(array<float> rr) => array.size(rr) < 3 ? na : array.percentile_linear_interpolation(rr, 33.33333)
+f_b2(array<float> rr) => array.size(rr) < 3 ? na : array.percentile_linear_interpolation(rr, 66.66667)
+f_bkt(float rng, float b1, float b2) => (na(b1) or na(b2)) ? 0 : rng < b1 ? 0 : rng < b2 ? 1 : 2
+
+// counts [n, tp0, tp10, tp30, tp50, tp100, sl] for one slot+bucket given the boundaries
+f_seg(int s, int bkt, float b1, float b2) =>
+    nn = 0
+    a0 = 0
+    a1 = 0
+    a2 = 0
+    a3 = 0
+    a4 = 0
+    a5 = 0
+    if array.size(tRng) > 0
+        for i = 0 to array.size(tRng) - 1
+            if array.get(tSlot, i) == s and f_bkt(array.get(tRng, i), b1, b2) == bkt
+                nn := nn + 1
+                a0 := a0 + array.get(tTP0,   i)
+                a1 := a1 + array.get(tTP10,  i)
+                a2 := a2 + array.get(tTP30,  i)
+                a3 := a3 + array.get(tTP50,  i)
+                a4 := a4 + array.get(tTP100, i)
+                a5 := a5 + array.get(tSL,    i)
+    [nn, a0, a1, a2, a3, a4, a5]
+
+// ---- study B: one record per armed setup, conditioned on how deep the pullback went --------------------------
+// Level order used everywhere below: 0 TP0, 1 TP10, 2 TP30, 3 TP50, 4 TP100, 5 SL (the opposite range edge).
+var pbSlot = array.new_int(0)
+var pbRngP = array.new_float(0)
+var pbR25  = array.new_int(0)      // did price retrace to the 25% fib
+var pbR50  = array.new_int(0)      // ... and to the 50% fib
+var pb25_0 = array.new_int(0)      // levels reached from the 25% retrace onward
+var pb25_1 = array.new_int(0)
+var pb25_2 = array.new_int(0)
+var pb25_3 = array.new_int(0)
+var pb25_4 = array.new_int(0)
+var pb25_5 = array.new_int(0)
+var pb50_0 = array.new_int(0)      // levels reached from the 50% retrace onward
+var pb50_1 = array.new_int(0)
+var pb50_2 = array.new_int(0)
+var pb50_3 = array.new_int(0)
+var pb50_4 = array.new_int(0)
+var pb50_5 = array.new_int(0)
+
+f_pbPush(int s, float rngP, bool r25, bool r50, array<bool> h25, array<bool> h50) =>
+    array.push(pbSlot, s)
+    array.push(pbRngP, rngP)
+    array.push(pbR25,  r25 ? 1 : 0)
+    array.push(pbR50,  r50 ? 1 : 0)
+    array.push(pb25_0, array.get(h25, 0) ? 1 : 0)
+    array.push(pb25_1, array.get(h25, 1) ? 1 : 0)
+    array.push(pb25_2, array.get(h25, 2) ? 1 : 0)
+    array.push(pb25_3, array.get(h25, 3) ? 1 : 0)
+    array.push(pb25_4, array.get(h25, 4) ? 1 : 0)
+    array.push(pb25_5, array.get(h25, 5) ? 1 : 0)
+    array.push(pb50_0, array.get(h50, 0) ? 1 : 0)
+    array.push(pb50_1, array.get(h50, 1) ? 1 : 0)
+    array.push(pb50_2, array.get(h50, 2) ? 1 : 0)
+    array.push(pb50_3, array.get(h50, 3) ? 1 : 0)
+    array.push(pb50_4, array.get(h50, 4) ? 1 : 0)
+    array.push(pb50_5, array.get(h50, 5) ? 1 : 0)
+
+// counts for one slot at one pullback depth. depth 0 = reached the 25% fib, 1 = reached the 50% fib.
+// bkt = -1 pools all range sizes; 0/1/2 restricts to the S/M/L bucket defined by b1/b2.
+// Returns [setups armed, setups that reached that pullback, then TP0, TP10, TP30, TP50, TP100, SL counts].
+f_pbSeg(int s, int depth, int bkt, float b1, float b2) =>
+    nAll = 0
+    nn   = 0
+    h0 = 0
+    h1 = 0
+    h2 = 0
+    h3 = 0
+    h4 = 0
+    h5 = 0
+    if array.size(pbSlot) > 0
+        for i = 0 to array.size(pbSlot) - 1
+            if array.get(pbSlot, i) == s and (bkt < 0 or f_bkt(array.get(pbRngP, i), b1, b2) == bkt)
+                nAll := nAll + 1
+                if (depth == 0 ? array.get(pbR25, i) : array.get(pbR50, i)) == 1
+                    nn := nn + 1
+                    h0 := h0 + (depth == 0 ? array.get(pb25_0, i) : array.get(pb50_0, i))
+                    h1 := h1 + (depth == 0 ? array.get(pb25_1, i) : array.get(pb50_1, i))
+                    h2 := h2 + (depth == 0 ? array.get(pb25_2, i) : array.get(pb50_2, i))
+                    h3 := h3 + (depth == 0 ? array.get(pb25_3, i) : array.get(pb50_3, i))
+                    h4 := h4 + (depth == 0 ? array.get(pb25_4, i) : array.get(pb50_4, i))
+                    h5 := h5 + (depth == 0 ? array.get(pb25_5, i) : array.get(pb50_5, i))
+    [nAll, nn, h0, h1, h2, h3, h4, h5]
+
+// ================================================================ SLOT STATE
+// Both slots' state is declared up front so either engine can read the other's flags (the priority rules below
+// are symmetric - whichever slot executes first owns the day, whichever arms last takes the pending seat).
+var float a_rH = na
+var float a_rL = na
+var float a_rng = na
+var bool  a_rdy = false           // range complete and valid
+var int   a_dir = 0
+var float a_e1 = na               // primary entry level
+var float a_e2 = na               // average-down level (na unless split mode)
+var float a_q1 = na
+var float a_q2 = na
+var float a_zstop = na            // stop = the OTHER edge of the range
+var bool  a_broke = false
+var bool  a_placed = false
+var bool  a_f1 = false
+var bool  a_f2 = false
+var float a_avgPx = na
+var float a_curStop = na
+var float a_curTP = na
+var bool  a_beDone = false
+var bool  a_closed = false
+var bool  a_dead = false          // armed but handed its seat to the other slot before it filled
+var bool  a_oppBroke = false
+var bool  a_missed = false        // its entry level traded through while the other slot held the seat
+var int   a_rdyBar = na           // bar its range completed
+var int   a_armBar = na           // bar it armed - the hand-over compares these, so only the slot that armed
+                                  // EARLIER gives up its seat to the one that armed later
+
+var float b_rH = na
+var float b_rL = na
+var float b_rng = na
+var bool  b_rdy = false
+var int   b_dir = 0
+var float b_e1 = na
+var float b_e2 = na
+var float b_q1 = na
+var float b_q2 = na
+var float b_zstop = na
+var bool  b_broke = false
+var bool  b_placed = false
+var bool  b_f1 = false
+var bool  b_f2 = false
+var float b_avgPx = na
+var float b_curStop = na
+var float b_curTP = na
+var bool  b_beDone = false
+var bool  b_closed = false
+var bool  b_dead = false
+var bool  b_oppBroke = false
+var bool  b_missed = false
+var int   b_rdyBar = na
+var int   b_armBar = na
+
+if newDay
+    a_rH := na
+    a_rL := na
+    a_rng := na
+    a_rdy := false
+    a_dir := 0
+    a_e1 := na
+    a_e2 := na
+    a_q1 := na
+    a_q2 := na
+    a_zstop := na
+    a_broke := false
+    a_placed := false
+    a_f1 := false
+    a_f2 := false
+    a_avgPx := na
+    a_curStop := na
+    a_curTP := na
+    a_beDone := false
+    a_closed := false
+    a_dead := false
+    a_oppBroke := false
+    a_missed := false
+    a_rdyBar := na
+    a_armBar := na
+    b_rH := na
+    b_rL := na
+    b_rng := na
+    b_rdy := false
+    b_dir := 0
+    b_e1 := na
+    b_e2 := na
+    b_q1 := na
+    b_q2 := na
+    b_zstop := na
+    b_broke := false
+    b_placed := false
+    b_f1 := false
+    b_f2 := false
+    b_avgPx := na
+    b_curStop := na
+    b_curTP := na
+    b_beDone := false
+    b_closed := false
+    b_dead := false
+    b_oppBroke := false
+    b_missed := false
+    b_rdyBar := na
+    b_armBar := na
+
+// ================================================================ SLOT A ENGINE
+if a_inR
+    a_rH := na(a_rH) ? high : math.max(a_rH, high)
+    a_rL := na(a_rL) ? low  : math.min(a_rL, low)
+if a_rDone and not na(a_rH) and a_rH > a_rL
+    a_rng := a_rH - a_rL
+    a_rdy := true
+    a_rdyBar := bar_index
+
+// ---- ARM: the first side to break sets the direction. No first-extreme rule, no close-position rule. ----
+a_brkUp = a_rdy and (aBreak == "Wick (touch)" ? high >= a_rH : close > a_rH)
+a_brkDn = a_rdy and (aBreak == "Wick (touch)" ? low  <= a_rL : close < a_rL)
+if a_rdy and not a_broke and (a_brkUp or a_brkDn)
+    // a bar that engulfs the whole range breaks both sides at once - take the side it closed on
+    ad = a_brkUp and a_brkDn ? (close >= a_rL + 0.5 * a_rng ? 1 : -1) : a_brkUp ? 1 : -1
+    a_broke := true
+    if (ad == 1 and aLong) or (ad == -1 and aShort)
+        a_dir := ad
+        a_armBar := bar_index
+        ap25 = f_p25(ad, a_rL, a_rng)
+        ap50 = f_p50(a_rL, a_rng)
+        aspl = aMode == "Split (avg down): 25% + 50%"
+        a_e1 := aMode == "All at 50% pullback" ? ap50 : ap25
+        a_e2 := aspl ? ap50 : na
+        a_zstop := ad == 1 ? a_rL : a_rH          // stop = the other edge of the range
+        abud  = setupBudget / (aspl ? 2 : 1)
+        aupct = abud / acctSize * 100.0
+        a_q1 := useRiskSize ? f_size(abud, math.abs(a_e1 - a_zstop), aupct) : (aspl ? aQty25 : aQtyAll)
+        a_q2 := not aspl ? 0.0 : (useRiskSize ? f_size(abud, math.abs(a_e2 - a_zstop), aupct) : aQty50)
+a_useAdd = a_dir != 0 and not na(a_e2) and a_q2 >= 1
+// double-break detection: the opposite range extreme (= the stop level) is violated
+if a_dir == 1 and low < a_rL
+    a_oppBroke := true
+if a_dir == -1 and high > a_rH
+    a_oppBroke := true
+// PRIORITY: the other slot owns the day once it has EXECUTED (see the symmetric block after slot B). While it
+// holds the seat, this slot's entry level trading through means the pullback was missed.
+bTraded = runB and (b_f1 or b_f2)
+bLive   = bTraded and not b_closed
+aBlocked = bLive or (bTraded and not allowBoth)
+aSizeOK = aMinRng <= 0 or (not na(a_rng) and a_rL > 0 and a_rng / a_rL * 100 >= aMinRng)
+aWin = inDay and aDayOK and minsIn <= f_since(aCutH, aCutM) and not dailyHalt and aSizeOK
+if runA and a_dir != 0 and a_broke and not a_placed and not a_closed and bLive and allowBoth and not na(a_e1)
+    if (a_dir == 1 and low <= a_e1) or (a_dir == -1 and high >= a_e1)
+        a_missed := true
+if runA and a_dir != 0 and a_broke and not a_placed and not a_closed and not a_dead and aWin and not flatten and (not noDbl or not a_oppBroke) and a_q1 >= 1 and not aBlocked and not a_missed
+    if a_dir == 1
+        strategy.entry("AL", strategy.long, qty = a_q1, limit = a_e1)
+        if a_useAdd
+            strategy.entry("AL2", strategy.long, qty = a_q2, limit = a_e2)
+    else
+        strategy.entry("AS", strategy.short, qty = a_q1, limit = a_e1)
+        if a_useAdd
+            strategy.entry("AS2", strategy.short, qty = a_q2, limit = a_e2)
+    a_placed := true
+// fills are tracked from the bar AFTER the limit went in - the broker cannot fill an order on the bar that
+// placed it, so a break bar that already dips to the entry level must not be counted as a fill.
+if a_placed and a_placed[1] and not a_closed
+    if a_dir == 1
+        if not a_f1 and low <= a_e1
+            a_f1 := true
+        if a_useAdd and not a_f2 and low <= a_e2
+            a_f2 := true
+    if a_dir == -1
+        if not a_f1 and high >= a_e1
+            a_f1 := true
+        if a_useAdd and not a_f2 and high >= a_e2
+            a_f2 := true
+a_firstFill = (a_f1 or a_f2) and not (a_f1[1] or a_f2[1])
+if a_f1 or a_f2
+    a_avgPx := a_f1 and a_f2 ? (a_e1 * a_q1 + a_e2 * a_q2) / (a_q1 + a_q2) : a_f1 ? a_e1 : a_e2
+if a_firstFill
+    a_curStop := a_zstop
+    a_curTP := f_tp(a_dir, a_rH, a_rL, a_rng, dHigh, dLow, aTpL, aTpS)
+    a_beDone := false
+if aBE and not a_beDone and (a_f1 or a_f2) and not a_closed
+    if a_dir == 1 and high >= a_rH
+        a_curStop := math.max(a_curStop, a_avgPx)
+        a_beDone := true
+    if a_dir == -1 and low <= a_rL
+        a_curStop := math.min(a_curStop, a_avgPx)
+        a_beDone := true
+if not na(a_curStop)
+    strategy.exit("ALx",  from_entry = "AL",  stop = a_curStop, limit = a_curTP)
+    strategy.exit("AL2x", from_entry = "AL2", stop = a_curStop, limit = a_curTP)
+    strategy.exit("ASx",  from_entry = "AS",  stop = a_curStop, limit = a_curTP)
+    strategy.exit("AS2x", from_entry = "AS2", stop = a_curStop, limit = a_curTP)
+if (a_f1 or a_f2) and not a_closed and not na(a_curStop)
+    if a_dir == 1 and (low <= a_curStop or high >= a_curTP)
+        a_closed := true
+    if a_dir == -1 and (high >= a_curStop or low <= a_curTP)
+        a_closed := true
+// while the other slot holds the seat, this one must not have a resting order - the two are never live together.
+// The order is pulled rather than left to fill behind the other trade; with "allow the other slot after a closed
+// trade" on, the limit goes back in once that trade is done (unless its level traded through in the meantime).
+if runA and aBlocked and a_placed and not (a_f1 or a_f2)
+    strategy.cancel("AL")
+    strategy.cancel("AL2")
+    strategy.cancel("AS")
+    strategy.cancel("AS2")
+    a_placed := false
+// cancel resting entries once the window closes unfilled, or done/flat/off/double-break.
+// (The hand-over to the other slot is handled after both engines - the other slot's break is not known yet.)
+if a_closed or a_dead or flatten or not runA or (noDbl and a_oppBroke) or ((not aWin) and not (a_f1 or a_f2))
+    strategy.cancel("AL")
+    strategy.cancel("AL2")
+    strategy.cancel("AS")
+    strategy.cancel("AS2")
+
+// ---- slot A study A: from the fill to the flatten, did price touch each level? ----
+var bool  a_trk    = false
+var int   a_tdir   = 0
+var float aL_tp0   = na
+var float aL_tp10  = na
+var float aL_tp30  = na
+var float aL_tp50  = na
+var float aL_tp100 = na
+var float aL_sl    = na
+var bool  aR_tp0   = false
+var bool  aR_tp10  = false
+var bool  aR_tp30  = false
+var bool  aR_tp50  = false
+var bool  aR_tp100 = false
+var bool  aR_sl    = false
+if newDay
+    a_trk := false
+if a_firstFill and not na(a_rng)
+    a_trk    := true
+    a_tdir   := a_dir
+    aL_tp0   := a_dir == 1 ? a_rH : a_rL
+    aL_tp10  := a_dir == 1 ? a_rH + 0.10*a_rng : a_rL - 0.10*a_rng
+    aL_tp30  := a_dir == 1 ? a_rH + 0.30*a_rng : a_rL - 0.30*a_rng
+    aL_tp50  := a_dir == 1 ? a_rH + 0.50*a_rng : a_rL - 0.50*a_rng
+    aL_tp100 := a_dir == 1 ? a_rH + 1.00*a_rng : a_rL - 1.00*a_rng
+    aL_sl    := a_dir == 1 ? a_rL : a_rH
+    aR_tp0   := false
+    aR_tp10  := false
+    aR_tp30  := false
+    aR_tp50  := false
+    aR_tp100 := false
+    aR_sl    := false
+if a_trk
+    if a_tdir == 1
+        aR_tp0   := aR_tp0   or high >= aL_tp0
+        aR_tp10  := aR_tp10  or high >= aL_tp10
+        aR_tp30  := aR_tp30  or high >= aL_tp30
+        aR_tp50  := aR_tp50  or high >= aL_tp50
+        aR_tp100 := aR_tp100 or high >= aL_tp100
+        aR_sl    := aR_sl    or low  <= aL_sl
+    else
+        aR_tp0   := aR_tp0   or low  <= aL_tp0
+        aR_tp10  := aR_tp10  or low  <= aL_tp10
+        aR_tp30  := aR_tp30  or low  <= aL_tp30
+        aR_tp50  := aR_tp50  or low  <= aL_tp50
+        aR_tp100 := aR_tp100 or low  <= aL_tp100
+        aR_sl    := aR_sl    or high >= aL_sl
+    if flatten
+        f_pushTrade(0, a_rng / a_rL * 100, aR_tp0, aR_tp10, aR_tp30, aR_tp50, aR_tp100, aR_sl)
+        a_trk := false
+
+// ---- slot A study B: armed -> 25% / 50% pullback -> which levels print from there, filed at the flatten ----
+var bool  aP_act  = false
+var int   aP_dir  = 0
+var float aP_rngP = na
+var float aP_p25  = na
+var float aP_p50  = na
+var bool  aP_r25  = false
+var bool  aP_r50  = false
+var aP_lv  = array.new_float(6, na)      // 0 TP0, 1 TP10, 2 TP30, 3 TP50, 4 TP100, 5 SL
+var aP_h25 = array.new_bool(6, false)
+var aP_h50 = array.new_bool(6, false)
+if newDay
+    aP_act := false
+if a_broke and not a_broke[1] and a_dir != 0 and not na(a_rng) and a_rL > 0
+    aP_act  := true
+    aP_dir  := a_dir
+    aP_rngP := a_rng / a_rL * 100
+    aP_p25  := f_p25(a_dir, a_rL, a_rng)
+    aP_p50  := f_p50(a_rL, a_rng)
+    aP_r25  := false
+    aP_r50  := false
+    array.set(aP_lv, 0, a_dir == 1 ? a_rH : a_rL)
+    array.set(aP_lv, 1, a_dir == 1 ? a_rH + 0.10*a_rng : a_rL - 0.10*a_rng)
+    array.set(aP_lv, 2, a_dir == 1 ? a_rH + 0.30*a_rng : a_rL - 0.30*a_rng)
+    array.set(aP_lv, 3, a_dir == 1 ? a_rH + 0.50*a_rng : a_rL - 0.50*a_rng)
+    array.set(aP_lv, 4, a_dir == 1 ? a_rH + 1.00*a_rng : a_rL - 1.00*a_rng)
+    array.set(aP_lv, 5, a_dir == 1 ? a_rL : a_rH)
+    for k = 0 to 5
+        array.set(aP_h25, k, false)
+        array.set(aP_h50, k, false)
+if aP_act
+    up    = aP_dir == 1
+    new25 = false
+    new50 = false
+    if not aP_r25 and (up ? low <= aP_p25 : high >= aP_p25)
+        aP_r25 := true
+        new25  := true
+    if not aP_r50 and (up ? low <= aP_p50 : high >= aP_p50)
+        aP_r50 := true
+        new50  := true
+    // On the bar that REACHES the pullback the touch must be confirmed by the CLOSE: the last tick of that bar is
+    // beyond the level, so it traded there after the retrace low/high. Later bars count an ordinary wick touch.
+    for k = 0 to 5
+        lv   = array.get(aP_lv, k)
+        isTp = k <= 4
+        wick = isTp ? (up ? high >= lv : low <= lv) : (up ? low <= lv : high >= lv)
+        cls  = isTp ? (up ? close >= lv : close <= lv) : (up ? close <= lv : close >= lv)
+        if aP_r25 and (new25 ? cls : wick)
+            array.set(aP_h25, k, true)
+        if aP_r50 and (new50 ? cls : wick)
+            array.set(aP_h50, k, true)
+    if flatten
+        f_pbPush(0, aP_rngP, aP_r25, aP_r50, aP_h25, aP_h50)
+        aP_act := false
+
+// ================================================================ SLOT B ENGINE
+if b_inR
+    b_rH := na(b_rH) ? high : math.max(b_rH, high)
+    b_rL := na(b_rL) ? low  : math.min(b_rL, low)
+if b_rDone and not na(b_rH) and b_rH > b_rL
+    b_rng := b_rH - b_rL
+    b_rdy := true
+    b_rdyBar := bar_index
+
+// ---- ARM: same rule as slot A - the first side to break sets the direction ----
+b_brkUp = b_rdy and (bBreak == "Wick (touch)" ? high >= b_rH : close > b_rH)
+b_brkDn = b_rdy and (bBreak == "Wick (touch)" ? low  <= b_rL : close < b_rL)
+if b_rdy and not b_broke and (b_brkUp or b_brkDn)
+    bd = b_brkUp and b_brkDn ? (close >= b_rL + 0.5 * b_rng ? 1 : -1) : b_brkUp ? 1 : -1
+    b_broke := true
+    if (bd == 1 and bLong) or (bd == -1 and bShort)
+        b_dir := bd
+        b_armBar := bar_index
+        bp25 = f_p25(bd, b_rL, b_rng)
+        bp50 = f_p50(b_rL, b_rng)
+        bspl = bMode == "Split (avg down): 25% + 50%"
+        b_e1 := bMode == "All at 50% pullback" ? bp50 : bp25
+        b_e2 := bspl ? bp50 : na
+        b_zstop := bd == 1 ? b_rL : b_rH          // stop = the other edge of the range
+        bbud  = setupBudget / (bspl ? 2 : 1)
+        bupct = bbud / acctSize * 100.0
+        b_q1 := useRiskSize ? f_size(bbud, math.abs(b_e1 - b_zstop), bupct) : (bspl ? bQty25 : bQtyAll)
+        b_q2 := not bspl ? 0.0 : (useRiskSize ? f_size(bbud, math.abs(b_e2 - b_zstop), bupct) : bQty50)
+b_useAdd = b_dir != 0 and not na(b_e2) and b_q2 >= 1
+if b_dir == 1 and low < b_rL
+    b_oppBroke := true
+if b_dir == -1 and high > b_rH
+    b_oppBroke := true
+// PRIORITY, the mirror of slot A's: slot A owns the day once it has EXECUTED.
+aTraded = runA and (a_f1 or a_f2)
+aLive   = aTraded and not a_closed
+bBlocked = aLive or (aTraded and not allowBoth)
+bSizeOK = bMinRng <= 0 or (not na(b_rng) and b_rL > 0 and b_rng / b_rL * 100 >= bMinRng)
+bWin = inDay and bDayOK and minsIn <= f_since(bCutH, bCutM) and not dailyHalt and bSizeOK
+if runB and b_dir != 0 and b_broke and not b_placed and not b_closed and aLive and allowBoth and not na(b_e1)
+    if (b_dir == 1 and low <= b_e1) or (b_dir == -1 and high >= b_e1)
+        b_missed := true
+if runB and b_dir != 0 and b_broke and not b_placed and not b_closed and not b_dead and bWin and not flatten and (not noDbl or not b_oppBroke) and b_q1 >= 1 and not bBlocked and not b_missed
+    if b_dir == 1
+        strategy.entry("BL", strategy.long, qty = b_q1, limit = b_e1)
+        if b_useAdd
+            strategy.entry("BL2", strategy.long, qty = b_q2, limit = b_e2)
+    else
+        strategy.entry("BS", strategy.short, qty = b_q1, limit = b_e1)
+        if b_useAdd
+            strategy.entry("BS2", strategy.short, qty = b_q2, limit = b_e2)
+    b_placed := true
+// same as slot A: a limit only becomes fillable on the bar after it was placed
+if b_placed and b_placed[1] and not b_closed
+    if b_dir == 1
+        if not b_f1 and low <= b_e1
+            b_f1 := true
+        if b_useAdd and not b_f2 and low <= b_e2
+            b_f2 := true
+    if b_dir == -1
+        if not b_f1 and high >= b_e1
+            b_f1 := true
+        if b_useAdd and not b_f2 and high >= b_e2
+            b_f2 := true
+b_firstFill = (b_f1 or b_f2) and not (b_f1[1] or b_f2[1])
+if b_f1 or b_f2
+    b_avgPx := b_f1 and b_f2 ? (b_e1 * b_q1 + b_e2 * b_q2) / (b_q1 + b_q2) : b_f1 ? b_e1 : b_e2
+if b_firstFill
+    b_curStop := b_zstop
+    b_curTP := f_tp(b_dir, b_rH, b_rL, b_rng, dHigh, dLow, bTpL, bTpS)
+    b_beDone := false
+if bBE and not b_beDone and (b_f1 or b_f2) and not b_closed
+    if b_dir == 1 and high >= b_rH
+        b_curStop := math.max(b_curStop, b_avgPx)
+        b_beDone := true
+    if b_dir == -1 and low <= b_rL
+        b_curStop := math.min(b_curStop, b_avgPx)
+        b_beDone := true
+if not na(b_curStop)
+    strategy.exit("BLx",  from_entry = "BL",  stop = b_curStop, limit = b_curTP)
+    strategy.exit("BL2x", from_entry = "BL2", stop = b_curStop, limit = b_curTP)
+    strategy.exit("BSx",  from_entry = "BS",  stop = b_curStop, limit = b_curTP)
+    strategy.exit("BS2x", from_entry = "BS2", stop = b_curStop, limit = b_curTP)
+if (b_f1 or b_f2) and not b_closed and not na(b_curStop)
+    if b_dir == 1 and (low <= b_curStop or high >= b_curTP)
+        b_closed := true
+    if b_dir == -1 and (high >= b_curStop or low <= b_curTP)
+        b_closed := true
+// mirror of slot A: no resting order while slot A holds the seat
+if runB and bBlocked and b_placed and not (b_f1 or b_f2)
+    strategy.cancel("BL")
+    strategy.cancel("BL2")
+    strategy.cancel("BS")
+    strategy.cancel("BS2")
+    b_placed := false
+if b_closed or b_dead or flatten or not runB or (noDbl and b_oppBroke) or ((not bWin) and not (b_f1 or b_f2))
+    strategy.cancel("BL")
+    strategy.cancel("BL2")
+    strategy.cancel("BS")
+    strategy.cancel("BS2")
+
+// ---- HAND-OVER: a slot that armed but never executed gives its seat to the other one ----
+// Order-independent, so it does not matter which session each slot points at. The two arming bars are compared,
+// so only the slot that armed EARLIER hands over - otherwise a range that broke hours ago (Asia at 02:30) and one
+// that just broke (London at 09:00) would each read "the other one broke" and cancel each other. A slot that has
+// actually FILLED never gives up its seat, and on the rare same-bar tie slot A keeps it.
+aArmed = not na(a_armBar)
+bArmed = not na(b_armBar)
+giveWayA = runB and (handOver == "When the other range breaks" ? (aArmed and bArmed and b_armBar > a_armBar) : handOver == "When the other range closes" ? (aArmed and b_rdy and b_rdyBar > a_armBar) : false)
+giveWayB = runA and (handOver == "When the other range breaks" ? (aArmed and bArmed and a_armBar >= b_armBar) : handOver == "When the other range closes" ? (bArmed and a_rdy and a_rdyBar >= b_armBar) : false)
+if runA and giveWayA and not a_closed and not a_dead and not (a_f1 or a_f2)
+    strategy.cancel("AL")
+    strategy.cancel("AL2")
+    strategy.cancel("AS")
+    strategy.cancel("AS2")
+    a_dead := true
+if runB and giveWayB and not b_closed and not b_dead and not (b_f1 or b_f2)
+    strategy.cancel("BL")
+    strategy.cancel("BL2")
+    strategy.cancel("BS")
+    strategy.cancel("BS2")
+    b_dead := true
+
+// ---- slot B study A: from the fill to the flatten, did price touch each level? ----
+var bool  b_trk    = false
+var int   b_tdir   = 0
+var float bL_tp0   = na
+var float bL_tp10  = na
+var float bL_tp30  = na
+var float bL_tp50  = na
+var float bL_tp100 = na
+var float bL_sl    = na
+var bool  bR_tp0   = false
+var bool  bR_tp10  = false
+var bool  bR_tp30  = false
+var bool  bR_tp50  = false
+var bool  bR_tp100 = false
+var bool  bR_sl    = false
+if newDay
+    b_trk := false
+if b_firstFill and not na(b_rng)
+    b_trk    := true
+    b_tdir   := b_dir
+    bL_tp0   := b_dir == 1 ? b_rH : b_rL
+    bL_tp10  := b_dir == 1 ? b_rH + 0.10*b_rng : b_rL - 0.10*b_rng
+    bL_tp30  := b_dir == 1 ? b_rH + 0.30*b_rng : b_rL - 0.30*b_rng
+    bL_tp50  := b_dir == 1 ? b_rH + 0.50*b_rng : b_rL - 0.50*b_rng
+    bL_tp100 := b_dir == 1 ? b_rH + 1.00*b_rng : b_rL - 1.00*b_rng
+    bL_sl    := b_dir == 1 ? b_rL : b_rH
+    bR_tp0   := false
+    bR_tp10  := false
+    bR_tp30  := false
+    bR_tp50  := false
+    bR_tp100 := false
+    bR_sl    := false
+if b_trk
+    if b_tdir == 1
+        bR_tp0   := bR_tp0   or high >= bL_tp0
+        bR_tp10  := bR_tp10  or high >= bL_tp10
+        bR_tp30  := bR_tp30  or high >= bL_tp30
+        bR_tp50  := bR_tp50  or high >= bL_tp50
+        bR_tp100 := bR_tp100 or high >= bL_tp100
+        bR_sl    := bR_sl    or low  <= bL_sl
+    else
+        bR_tp0   := bR_tp0   or low  <= bL_tp0
+        bR_tp10  := bR_tp10  or low  <= bL_tp10
+        bR_tp30  := bR_tp30  or low  <= bL_tp30
+        bR_tp50  := bR_tp50  or low  <= bL_tp50
+        bR_tp100 := bR_tp100 or low  <= bL_tp100
+        bR_sl    := bR_sl    or high >= bL_sl
+    if flatten
+        f_pushTrade(1, b_rng / b_rL * 100, bR_tp0, bR_tp10, bR_tp30, bR_tp50, bR_tp100, bR_sl)
+        b_trk := false
+
+// ---- slot B study B: armed -> 25% / 50% pullback -> which levels print from there, filed at the flatten ----
+var bool  bP_act  = false
+var int   bP_dir  = 0
+var float bP_rngP = na
+var float bP_p25  = na
+var float bP_p50  = na
+var bool  bP_r25  = false
+var bool  bP_r50  = false
+var bP_lv  = array.new_float(6, na)      // 0 TP0, 1 TP10, 2 TP30, 3 TP50, 4 TP100, 5 SL
+var bP_h25 = array.new_bool(6, false)
+var bP_h50 = array.new_bool(6, false)
+if newDay
+    bP_act := false
+if b_broke and not b_broke[1] and b_dir != 0 and not na(b_rng) and b_rL > 0
+    bP_act  := true
+    bP_dir  := b_dir
+    bP_rngP := b_rng / b_rL * 100
+    bP_p25  := f_p25(b_dir, b_rL, b_rng)
+    bP_p50  := f_p50(b_rL, b_rng)
+    bP_r25  := false
+    bP_r50  := false
+    array.set(bP_lv, 0, b_dir == 1 ? b_rH : b_rL)
+    array.set(bP_lv, 1, b_dir == 1 ? b_rH + 0.10*b_rng : b_rL - 0.10*b_rng)
+    array.set(bP_lv, 2, b_dir == 1 ? b_rH + 0.30*b_rng : b_rL - 0.30*b_rng)
+    array.set(bP_lv, 3, b_dir == 1 ? b_rH + 0.50*b_rng : b_rL - 0.50*b_rng)
+    array.set(bP_lv, 4, b_dir == 1 ? b_rH + 1.00*b_rng : b_rL - 1.00*b_rng)
+    array.set(bP_lv, 5, b_dir == 1 ? b_rL : b_rH)
+    for k = 0 to 5
+        array.set(bP_h25, k, false)
+        array.set(bP_h50, k, false)
+if bP_act
+    up    = bP_dir == 1
+    new25 = false
+    new50 = false
+    if not bP_r25 and (up ? low <= bP_p25 : high >= bP_p25)
+        bP_r25 := true
+        new25  := true
+    if not bP_r50 and (up ? low <= bP_p50 : high >= bP_p50)
+        bP_r50 := true
+        new50  := true
+    for k = 0 to 5
+        lv   = array.get(bP_lv, k)
+        isTp = k <= 4
+        wick = isTp ? (up ? high >= lv : low <= lv) : (up ? low <= lv : high >= lv)
+        cls  = isTp ? (up ? close >= lv : close <= lv) : (up ? close <= lv : close >= lv)
+        if bP_r25 and (new25 ? cls : wick)
+            array.set(bP_h25, k, true)
+        if bP_r50 and (new50 ? cls : wick)
+            array.set(bP_h50, k, true)
+    if flatten
+        f_pbPush(1, bP_rngP, bP_r25, bP_r50, bP_h25, bP_h50)
+        bP_act := false
+
+// ---------------------------------------------------------------- Flatten + daily max-loss halt
+if flatten and strategy.position_size != 0
+    strategy.close_all(comment = "Day flat")
+if dailyHalt
+    strategy.close_all(comment = "Daily max loss")
+    strategy.cancel_all()
+
+// ---------------------------------------------------------------- Automation: PickMyTrade webhook JSON (net position)
+f_pmt(string act, float q, float slp, float tpp) =>
+    '{"token":"' + pmtToken + '","account_id":"' + pmtAcct + '","symbol":"' + pmtSym +
+      '","action":"' + act + '","quantity":' + str.tostring(q) +
+      ',"order_type":"' + pmtType +
+      '","sl":' + str.tostring(math.round_to_mintick(slp)) +
+      ',"tp":' + str.tostring(math.round_to_mintick(tpp)) + '}'
+liveA    = (a_f1 or a_f2) and not a_closed
+autoStop = liveA ? a_curStop : b_curStop
+autoTP   = liveA ? a_curTP  : b_curTP
+autoQty  = math.abs(strategy.position_size)   // actual net contracts (respects % sizing)
+buyNow   = strategy.position_size > 0 and (strategy.position_size[1] <= 0 or strategy.position_size > strategy.position_size[1])
+sellNow  = strategy.position_size < 0 and (strategy.position_size[1] >= 0 or strategy.position_size < strategy.position_size[1])
+closeNow = flatten and strategy.position_size[1] != 0
+if autoOn and buyNow
+    alert(f_pmt("buy",  autoQty, autoStop, autoTP), alert.freq_once_per_bar)
+if autoOn and sellNow
+    alert(f_pmt("sell", autoQty, autoStop, autoTP), alert.freq_once_per_bar)
+if autoOn and closeNow
+    alert(f_pmt("close", 0, 0.0, 0.0), alert.freq_once_per_bar)
+
+// ---------------------------------------------------------------- Break alerts (fire once when each range breaks)
+if brkAlerts and runA and a_dir != 0 and a_broke and not a_broke[1]
+    aTPa = f_tp(a_dir, a_rH, a_rL, a_rng, dHigh, dLow, aTpL, aTpS)
+    alert(aPick + " BREAK  " + (a_dir == 1 ? "LONG" : "SHORT") +
+         "  | broke " + str.tostring(math.round_to_mintick(a_dir == 1 ? a_rH : a_rL)) +
+         "  | entry " + str.tostring(math.round_to_mintick(a_e1)) + " x" + str.tostring(a_q1, "#.#") +
+         (a_useAdd ? "  + " + str.tostring(math.round_to_mintick(a_e2)) + " x" + str.tostring(a_q2, "#.#") : "") +
+         "  | stop " + str.tostring(math.round_to_mintick(a_zstop)) +
+         "  | target " + str.tostring(math.round_to_mintick(aTPa)), alert.freq_once_per_bar)
+if brkAlerts and runB and b_dir != 0 and b_broke and not b_broke[1]
+    bTPa = f_tp(b_dir, b_rH, b_rL, b_rng, dHigh, dLow, bTpL, bTpS)
+    alert(bPick + " BREAK  " + (b_dir == 1 ? "LONG" : "SHORT") +
+         "  | broke " + str.tostring(math.round_to_mintick(b_dir == 1 ? b_rH : b_rL)) +
+         "  | entry " + str.tostring(math.round_to_mintick(b_e1)) + " x" + str.tostring(b_q1, "#.#") +
+         (b_useAdd ? "  + " + str.tostring(math.round_to_mintick(b_e2)) + " x" + str.tostring(b_q2, "#.#") : "") +
+         "  | stop " + str.tostring(math.round_to_mintick(b_zstop)) +
+         "  | target " + str.tostring(math.round_to_mintick(bTPa)), alert.freq_once_per_bar)
+
+// ---------------------------------------------------------------- Risk/Reward + fib tool
+// Drawn when the ENTRY ORDER IS ACTUALLY PLACED, so a break that any filter rejects - wrong weekday, range too
+// small, past the cutoff, double-break day, daily loss halt, sizing under one contract, or a slot skipped because
+// the other one traded - draws nothing at all.
+// ANCHORING: y is price and x is BAR INDEX, both fixed at creation. The box is one bar wide to begin with and its
+// right edge is extended bar by bar while the setup is live, so it always covers real bars.
+var array<box>   dBox = array.new<box>()
+var array<line>  dLin = array.new<line>()
+var array<label> dLab = array.new<label>()
+
+f_trimDraws() =>
+    if keepBox > 0
+        while array.size(dBox) > keepBox * 2
+            box.delete(array.shift(dBox))
+        while array.size(dLin) > keepBox * 3
+            line.delete(array.shift(dLin))
+    if keepLab > 0
+        while array.size(dLab) > keepLab
+            label.delete(array.shift(dLab))
+
+// q = contracts on this entry. ent2/q2 describe the average-down unit when one is armed - it gets no box of its
+// own, its numbers ride along in the label so the chart stays readable.
+f_drawRR(int d, float ent, float zstop, float ptp, float q, color sigCol, string tag, float ent2, float q2) =>
+    riskUsd = math.abs(ent - zstop) * ptVal * q
+    rewUsd  = math.abs(ptp - ent) * ptVal * q
+    risk1   = math.abs(ent - zstop) * ptVal
+    rew1    = math.abs(ptp - ent) * ptVal
+    rrr = riskUsd > 0 ? rewUsd / riskUsd : na
+    bw = box.new(bar_index, d == 1 ? ptp : ent, bar_index + 1, d == 1 ? ent : ptp, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.green, 82))
+    br = box.new(bar_index, d == 1 ? ent : zstop, bar_index + 1, d == 1 ? zstop : ent, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.red, 82))
+    txt = tag + "  " + str.tostring(q, "#.#") + " contract" + (q == 1 ? "" : "s") +
+         "  Risk $" + str.tostring(riskUsd, "#") + " | Reward $" + str.tostring(rewUsd, "#") + " (" + str.tostring(rrr, "#.##") + "R)" +
+         "\n1 contract: Risk $" + str.tostring(risk1, "#") + " | Reward $" + str.tostring(rew1, "#")
+    if not na(ent2) and q2 > 0
+        totR = riskUsd + math.abs(ent2 - zstop) * ptVal * q2
+        totW = rewUsd  + math.abs(ptp - ent2)  * ptVal * q2
+        txt := txt + "\n+ avg-down " + str.tostring(q2, "#.#") + " @ " + str.tostring(math.round_to_mintick(ent2)) +
+             "  ->  setup total Risk $" + str.tostring(totR, "#") + " | Reward $" + str.tostring(totW, "#") +
+             " (" + str.tostring(totR > 0 ? totW / totR : na, "#.##") + "R)"
+    lb = label.new(bar_index + 1, ent, txt, xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.gray, 15), textcolor = color.white, size = size.small)
+    array.push(dBox, bw)
+    array.push(dBox, br)
+    array.push(dLab, lb)
+    [bw, br, lb]
+
+f_drawFibs(float rL, float rg, color sigCol, array<line> dest) =>
+    array.clear(dest)
+    for i = 1 to 3
+        y = rL + i * 0.25 * rg
+        ln = line.new(bar_index, y, bar_index + 1, y, xloc = xloc.bar_index, color = color.new(sigCol, 35), style = line.style_dotted, width = 1)
+        array.push(dest, ln)
+        array.push(dLin, ln)
+
+// stretch the live setup's drawings to the current bar; prices stay exactly where they were set
+f_grow(box bw, box br, label lb, array<line> fib) =>
+    if not na(bw)
+        box.set_right(bw, bar_index)
+        box.set_right(br, bar_index)
+        label.set_x(lb, bar_index)
+    if array.size(fib) > 0
+        for i = 0 to array.size(fib) - 1
+            line.set_x2(array.get(fib, i), bar_index)
+
+var box   aBw = na
+var box   aBr = na
+var label aLb = na
+var bool  aGrow = false
+var array<line> aFib = array.new<line>()
+if runA and a_placed and not a_placed[1] and not na(a_e1) and not na(a_zstop)
+    aTP = f_tp(a_dir, a_rH, a_rL, a_rng, dHigh, dLow, aTpL, aTpS)
+    aBw := na
+    aBr := na
+    aLb := na
+    if showFibs
+        f_drawFibs(a_rL, a_rng, color.new(color.orange, 0), aFib)
+    if showRR
+        [bw, br, lb] = f_drawRR(a_dir, a_e1, a_zstop, aTP, a_q1, color.new(color.orange, 0), aPick, a_useAdd ? a_e2 : na, a_useAdd ? a_q2 : 0)
+        aBw := bw
+        aBr := br
+        aLb := lb
+    aGrow := true
+    f_trimDraws()
+if aGrow
+    f_grow(aBw, aBr, aLb, aFib)
+    if a_closed or a_dead or flatten or (not (a_f1 or a_f2) and not aWin)
+        aGrow := false
+
+var box   bBw = na
+var box   bBr = na
+var label bLb = na
+var bool  bGrow = false
+var array<line> bFib = array.new<line>()
+if runB and b_placed and not b_placed[1] and not na(b_e1) and not na(b_zstop)
+    bTP = f_tp(b_dir, b_rH, b_rL, b_rng, dHigh, dLow, bTpL, bTpS)
+    bBw := na
+    bBr := na
+    bLb := na
+    if showFibs
+        f_drawFibs(b_rL, b_rng, color.new(color.teal, 0), bFib)
+    if showRR
+        [bw2, br2, lb2] = f_drawRR(b_dir, b_e1, b_zstop, bTP, b_q1, color.new(color.teal, 0), bPick, b_useAdd ? b_e2 : na, b_useAdd ? b_q2 : 0)
+        bBw := bw2
+        bBr := br2
+        bLb := lb2
+    bGrow := true
+    f_trimDraws()
+if bGrow
+    f_grow(bBw, bBr, bLb, bFib)
+    if b_closed or b_dead or flatten or (not (b_f1 or b_f2) and not bWin)
+        bGrow := false
+
+// ---------------------------------------------------------------- Strategy rules panel (top-right)
+f_hhmm(int h, int m) => str.tostring(h) + ":" + (m < 10 ? "0" : "") + str.tostring(m)
+f_modeTxt(string md, float qAll, float q25, float q50) => md == "All at 25% pullback" ? str.tostring(qAll, "#.#") + " @ 25%" : md == "All at 50% pullback" ? str.tostring(qAll, "#.#") + " @ 50%" : str.tostring(q25, "#.#") + " @ 25% + " + str.tostring(q50, "#.#") + " @ 50%"
+var table info = na
+if showInfo and barstate.islast
+    info := table.new(position.top_right, 1, 12, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
+    table.cell(info, 0, 0,  "ALN BREAK-THEN-PULLBACK",                                      text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 1,  "Day " + f_hhmm(dayStartH, dayStartM) + " -> flat " + f_hhmm(flatH, flatM) + "  (" + tz + ")", text_color = color.white, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 2,  "Sessions: A " + asiaSess + " | L " + londonSess + " | NY " + nySess, text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 3,  "Slot A: " + (runA ? aPick + " " + aSess : "off"),               text_color = color.orange, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 4,  "   entry " + f_modeTxt(aMode, aQtyAll, aQty25, aQty50) + " | TP L " + aTpL + " / S " + aTpS, text_color = color.orange, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 5,  "Slot B: " + (runB ? bPick + " " + bSess : "off"),               text_color = color.teal,   text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 6,  "   entry " + f_modeTxt(bMode, bQtyAll, bQty25, bQty50) + " | TP L " + bTpL + " / S " + bTpS, text_color = color.teal,   text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 7,  "ARM on the break: high breaks = LONG, low = SHORT",             text_color = color.white,  text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 8,  "Stop: the OTHER edge of the range (both units)",                text_color = color.white,  text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 9,  "First slot to EXECUTE owns the day" + (allowBoth ? " (until it closes)" : ""), text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 10, "Unfilled slot cancelled: " + str.lower(handOver),               text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 11, (noDbl ? "Skip double-break days | " : "") + "Odds in the table; > = live row", text_color = color.aqua, text_size = size.small, text_halign = text.align_left)
+
+// ---------------------------------------------------------------- Probability table
+tPos  = tblPos == "Top right" ? position.top_right : tblPos == "Bottom left" ? position.bottom_left : tblPos == "Top left" ? position.top_left : position.bottom_right
+tRows = 8 + (pbSplit ? 12 : 4)
+
+var table probTbl = na
+
+f_tblRow(int row, string lbl, int nn, string reach, int t0, int t1, int t2, int t3, int t4, int sl, color txt, color bg) =>
+    table.cell(probTbl, 0, row, lbl,               text_color = txt,          bgcolor = bg, text_size = size.normal, text_halign = text.align_left)
+    table.cell(probTbl, 1, row, str.tostring(nn),  text_color = color.white,  bgcolor = bg, text_size = size.normal)
+    table.cell(probTbl, 2, row, reach,             text_color = color.silver, bgcolor = bg, text_size = size.normal)
+    table.cell(probTbl, 3, row, f_pctStr(t0, nn),  text_color = color.lime,   bgcolor = bg, text_size = size.normal)
+    table.cell(probTbl, 4, row, f_pctStr(t1, nn),  text_color = color.lime,   bgcolor = bg, text_size = size.normal)
+    table.cell(probTbl, 5, row, f_pctStr(t2, nn),  text_color = color.lime,   bgcolor = bg, text_size = size.normal)
+    table.cell(probTbl, 6, row, f_pctStr(t3, nn),  text_color = color.lime,   bgcolor = bg, text_size = size.normal)
+    table.cell(probTbl, 7, row, f_pctStr(t4, nn),  text_color = color.lime,   bgcolor = bg, text_size = size.normal)
+    table.cell(probTbl, 8, row, f_pctStr(sl, nn),  text_color = color.red,    bgcolor = bg, text_size = size.normal)
+
+// where we are right now, used to tint the row that applies (nothing is drawn on the chart)
+cNow = color.new(color.blue, 40)      // the row that is live on this bar
+cWas = color.new(color.blue, 78)      // a depth price has already passed through
+cOff = color.black
+
+if showTable and barstate.islast
+    if na(probTbl)
+        probTbl := table.new(tPos, 9, tRows, bgcolor = color.black, border_color = color.new(color.white, 70), border_width = 1, frame_color = color.white, frame_width = 1)
+    // live state per slot: 0 = not in play, 1 = broke, 2 = at the 25% pullback, 3 = at the 50% pullback
+    stA  = array.from(aP_act ? (aP_r50 ? 3 : aP_r25 ? 2 : 1) : 0, bP_act ? (bP_r50 ? 3 : bP_r25 ? 2 : 1) : 0)
+    rgA  = array.from(aP_act ? aP_rngP : na, bP_act ? bP_rngP : na)
+    filA = array.from(((a_f1 or a_f2) and not a_closed) ? 1 : 0, ((b_f1 or b_f2) and not b_closed) ? 1 : 0)
+    nmA  = array.from(aPick, bPick)
+    hdr  = array.from("From FILL - by range size", "N", "Reach", "TP0", "TP10", "TP30", "TP50", "TP100", "SL")
+    for c = 0 to 8
+        table.cell(probTbl, c, 0, array.get(hdr, c), text_color = color.black, bgcolor = color.white, text_size = size.normal, text_halign = c == 0 ? text.align_left : text.align_center)
+    // ---- section 1: from the fill, segmented by range size ----
+    for s = 0 to 1
+        rr = f_ranges(s)
+        b1 = autoMode ? f_b1(rr) : (s == 0 ? aB1 : bB1)
+        b2 = autoMode ? f_b2(rr) : (s == 0 ? aB2 : bB2)
+        nm = array.get(nmA, s)
+        s1 = na(b1) ? "?" : str.tostring(b1, "#.##") + "%"
+        s2 = na(b2) ? "?" : str.tostring(b2, "#.##") + "%"
+        for bkt = 0 to 2
+            [nn, a0, a1, a2, a3, a4, a5] = f_seg(s, bkt, b1, b2)
+            here = hiLive and array.get(stA, s) > 0 and not na(array.get(rgA, s)) and f_bkt(array.get(rgA, s), b1, b2) == bkt
+            inTr = here and array.get(filA, s) == 1
+            lbl  = (inTr ? "> " : "") + (bkt == 0 ? nm + " S <" + s1 : bkt == 1 ? nm + " M " + s1 + "-" + s2 : nm + " L >=" + s2)
+            f_tblRow(s * 3 + bkt + 1, lbl, nn, "-", a0, a1, a2, a3, a4, a5, color.white, inTr ? cNow : here ? cWas : cOff)
+    // ---- section 2: from the 25% / 50% pullback (the two entry levels) ----
+    hdr2 = array.from("From PULLBACK", "N", "Reach", "TP0", "TP10", "TP30", "TP50", "TP100", "SL")
+    for c = 0 to 8
+        table.cell(probTbl, c, 7, array.get(hdr2, c), text_color = color.black, bgcolor = color.new(color.aqua, 20), text_size = size.normal, text_halign = c == 0 ? text.align_left : text.align_center)
+    for s = 0 to 1
+        rr2 = f_ranges(s)
+        c1  = autoMode ? f_b1(rr2) : (s == 0 ? aB1 : bB1)
+        c2  = autoMode ? f_b2(rr2) : (s == 0 ? aB2 : bB2)
+        nm2 = array.get(nmA, s)
+        st  = array.get(stA, s)
+        for d = 0 to 1
+            // the deepest pullback price has reached is "now"; a shallower one it already passed is tinted faintly
+            depthOn = hiLive and (d == 0 ? st >= 2 : st >= 3)
+            isNow   = hiLive and (d == 0 ? st == 2 : st == 3)
+            if pbSplit
+                for bkt = 0 to 2
+                    [nAll, nn, h0, h1, h2, h3, h4, h5] = f_pbSeg(s, d, bkt, c1, c2)
+                    same = depthOn and not na(array.get(rgA, s)) and f_bkt(array.get(rgA, s), c1, c2) == bkt
+                    szn  = bkt == 0 ? "S" : bkt == 1 ? "M" : "L"
+                    lbl  = ((same and isNow) ? "> " : "") + nm2 + " " + szn + " from " + (d == 0 ? "25%" : "50%") + " PB"
+                    f_tblRow(8 + s * 6 + bkt * 2 + d, lbl, nn, f_pctStr(nn, nAll), h0, h1, h2, h3, h4, h5, d == 0 ? color.aqua : color.yellow, (same and isNow) ? cNow : same ? cWas : cOff)
+            else
+                [nAll, nn, h0, h1, h2, h3, h4, h5] = f_pbSeg(s, d, -1, c1, c2)
+                lbl = (isNow ? "> " : "") + nm2 + " from " + (d == 0 ? "25%" : "50%") + " pullback"
+                f_tblRow(8 + s * 2 + d, lbl, nn, f_pctStr(nn, nAll), h0, h1, h2, h3, h4, h5, d == 0 ? color.aqua : color.yellow, isNow ? cNow : depthOn ? cWas : cOff)
+
+// ---------------------------------------------------------------- Visuals
+plot(runA and not na(a_rH) ? a_rH : na, "A range High", color = color.new(color.orange, 0),  style = plot.style_linebr)
+plot(runA and not na(a_rL) ? a_rL : na, "A range Low",  color = color.new(color.orange, 45), style = plot.style_linebr)
+plot(runA and a_dir != 0 and not na(a_e1) ? a_e1 : na,  "A Entry",   color = color.new(color.yellow, 0),  style = plot.style_linebr)
+plot(runA and a_useAdd ? a_e2 : na,                     "A Entry 2", color = color.new(color.yellow, 40), style = plot.style_linebr)
+plot(runB and not na(b_rH) ? b_rH : na, "B range High", color = color.new(color.teal, 0),  style = plot.style_linebr)
+plot(runB and not na(b_rL) ? b_rL : na, "B range Low",  color = color.new(color.teal, 45), style = plot.style_linebr)
+plot(runB and b_dir != 0 and not na(b_e1) ? b_e1 : na,  "B Entry",   color = color.new(color.aqua, 0),  style = plot.style_linebr)
+plot(runB and b_useAdd ? b_e2 : na,                     "B Entry 2", color = color.new(color.aqua, 40), style = plot.style_linebr)
+bgcolor(a_inR and runA ? color.new(color.orange, 92) : b_inR and runB ? color.new(color.teal, 92) : na, title = "Range windows")
