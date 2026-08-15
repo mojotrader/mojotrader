@@ -163,6 +163,7 @@ nothing at all. The tool exists so the same question can be put to another symbo
 
 
 ## Strategies
+
 ### `pinescript/session_reversal_strategy.pine`
 Session Reversal Strategy — the tradeable form of the above: fade (or follow) the driver session's
 sweep of the previous session's range, targeting a configurable fraction of the way back across it.
