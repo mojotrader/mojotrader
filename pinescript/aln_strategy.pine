@@ -267,6 +267,16 @@ f_tp(int d, float rH, float rL, float rg, float dHi, float dLo, string tpL, stri
 f_p25(int d, float rL, float rg) => rL + (d == 1 ? 0.75 : 0.25) * rg
 f_p50(float rL, float rg) => rL + 0.50 * rg
 
+// Did price trade to a level? isTp orients it as a target (above for a long), else as a stop (below for a long).
+// ON THE ENTRY BAR the level must be confirmed by the CLOSE. That bar's high/low includes the run that happened
+// BEFORE the entry existed - the break itself - so an ordinary wick touch there would count price action the
+// trade never saw. From the next bar on, a wick touch counts normally.
+f_touch(bool onFill, bool isTp, int dir, float lv) =>
+    up   = dir == 1
+    wick = isTp ? (up ? high >= lv : low <= lv) : (up ? low <= lv : high >= lv)
+    cls  = isTp ? (up ? close >= lv : close <= lv) : (up ? close <= lv : close >= lv)
+    na(lv) ? false : onFill ? cls : wick
+
 // ================================================================ Historical-probability stats
 // TWO walk-forward studies are collected (a day is only added to the sample after its flatten, so the numbers
 // shown on any bar never contain data from that day or later):
@@ -433,6 +443,7 @@ var bool  a_closed = false
 var bool  a_dead = false          // armed but handed its seat to the other slot before it filled
 var bool  a_oppBroke = false
 var bool  a_missed = false        // its entry level traded through while the other slot held the seat
+var int   a_fillBar = na          // bar the first unit filled
 var int   a_rdyBar = na           // bar its range completed
 var int   a_armBar = na           // bar it armed - the hand-over compares these, so only the slot that armed
                                   // EARLIER gives up its seat to the one that armed later
@@ -459,6 +470,7 @@ var bool  b_closed = false
 var bool  b_dead = false
 var bool  b_oppBroke = false
 var bool  b_missed = false
+var int   b_fillBar = na
 var int   b_rdyBar = na
 var int   b_armBar = na
 
@@ -485,6 +497,7 @@ if newDay
     a_dead := false
     a_oppBroke := false
     a_missed := false
+    a_fillBar := na
     a_rdyBar := na
     a_armBar := na
     b_rH := na
@@ -509,6 +522,7 @@ if newDay
     b_dead := false
     b_oppBroke := false
     b_missed := false
+    b_fillBar := na
     b_rdyBar := na
     b_armBar := na
 
@@ -587,11 +601,17 @@ if a_firstFill
     a_curStop := a_zstop
     a_curTP := f_tp(a_dir, a_rH, a_rL, a_rng, dHigh, dLow, aTpL, aTpS)
     a_beDone := false
-if aBE and not a_beDone and (a_f1 or a_f2) and not a_closed
-    if a_dir == 1 and high >= a_rH
+    a_fillBar := bar_index
+// BREAKEVEN: only from the bar AFTER the entry, and only while price is on the profitable side of the average
+// entry. The entry bar itself is the pullback bar - it has already traded beyond the range edge (that IS the
+// break), so testing it would arm breakeven the instant the limit fills. And a breakeven stop set while price
+// sits the wrong side of the entry is already breached when it is placed: the broker then exits at market on the
+// next bar, at the entry price, which is exactly what a "stopped at breakeven before the trade moved" fill is.
+if aBE and not a_beDone and (a_f1 or a_f2) and not a_closed and bar_index > nz(a_fillBar, bar_index)
+    if a_dir == 1 and high >= a_rH and close > a_avgPx
         a_curStop := math.max(a_curStop, a_avgPx)
         a_beDone := true
-    if a_dir == -1 and low <= a_rL
+    if a_dir == -1 and low <= a_rL and close < a_avgPx
         a_curStop := math.min(a_curStop, a_avgPx)
         a_beDone := true
 if not na(a_curStop)
@@ -599,10 +619,11 @@ if not na(a_curStop)
     strategy.exit("AL2x", from_entry = "AL2", stop = a_curStop, limit = a_curTP)
     strategy.exit("ASx",  from_entry = "AS",  stop = a_curStop, limit = a_curTP)
     strategy.exit("AS2x", from_entry = "AS2", stop = a_curStop, limit = a_curTP)
+// the trade is done once price reaches the stop or the target (entry-bar touches must close beyond - see f_touch,
+// otherwise the break bar's own excursion marks the trade finished and cancels the average-down unit under it)
 if (a_f1 or a_f2) and not a_closed and not na(a_curStop)
-    if a_dir == 1 and (low <= a_curStop or high >= a_curTP)
-        a_closed := true
-    if a_dir == -1 and (high >= a_curStop or low <= a_curTP)
+    aOnFill = bar_index == nz(a_fillBar, -1)
+    if f_touch(aOnFill, false, a_dir, a_curStop) or f_touch(aOnFill, true, a_dir, a_curTP)
         a_closed := true
 // while the other slot holds the seat, this one must not have a resting order - the two are never live together.
 // The order is pulled rather than left to fill behind the other trade; with "allow the other slot after a closed
@@ -654,20 +675,13 @@ if a_firstFill and not na(a_rng)
     aR_tp100 := false
     aR_sl    := false
 if a_trk
-    if a_tdir == 1
-        aR_tp0   := aR_tp0   or high >= aL_tp0
-        aR_tp10  := aR_tp10  or high >= aL_tp10
-        aR_tp30  := aR_tp30  or high >= aL_tp30
-        aR_tp50  := aR_tp50  or high >= aL_tp50
-        aR_tp100 := aR_tp100 or high >= aL_tp100
-        aR_sl    := aR_sl    or low  <= aL_sl
-    else
-        aR_tp0   := aR_tp0   or low  <= aL_tp0
-        aR_tp10  := aR_tp10  or low  <= aL_tp10
-        aR_tp30  := aR_tp30  or low  <= aL_tp30
-        aR_tp50  := aR_tp50  or low  <= aL_tp50
-        aR_tp100 := aR_tp100 or low  <= aL_tp100
-        aR_sl    := aR_sl    or high >= aL_sl
+    aOnF = bar_index == nz(a_fillBar, -1)
+    aR_tp0   := aR_tp0   or f_touch(aOnF, true,  a_tdir, aL_tp0)
+    aR_tp10  := aR_tp10  or f_touch(aOnF, true,  a_tdir, aL_tp10)
+    aR_tp30  := aR_tp30  or f_touch(aOnF, true,  a_tdir, aL_tp30)
+    aR_tp50  := aR_tp50  or f_touch(aOnF, true,  a_tdir, aL_tp50)
+    aR_tp100 := aR_tp100 or f_touch(aOnF, true,  a_tdir, aL_tp100)
+    aR_sl    := aR_sl    or f_touch(aOnF, false, a_tdir, aL_sl)
     if flatten
         f_pushTrade(0, a_rng / a_rL * 100, aR_tp0, aR_tp10, aR_tp30, aR_tp50, aR_tp100, aR_sl)
         a_trk := false
@@ -798,11 +812,13 @@ if b_firstFill
     b_curStop := b_zstop
     b_curTP := f_tp(b_dir, b_rH, b_rL, b_rng, dHigh, dLow, bTpL, bTpS)
     b_beDone := false
-if bBE and not b_beDone and (b_f1 or b_f2) and not b_closed
-    if b_dir == 1 and high >= b_rH
+    b_fillBar := bar_index
+// same as slot A: breakeven only after the entry bar, and only from the profitable side of the average entry
+if bBE and not b_beDone and (b_f1 or b_f2) and not b_closed and bar_index > nz(b_fillBar, bar_index)
+    if b_dir == 1 and high >= b_rH and close > b_avgPx
         b_curStop := math.max(b_curStop, b_avgPx)
         b_beDone := true
-    if b_dir == -1 and low <= b_rL
+    if b_dir == -1 and low <= b_rL and close < b_avgPx
         b_curStop := math.min(b_curStop, b_avgPx)
         b_beDone := true
 if not na(b_curStop)
@@ -811,9 +827,8 @@ if not na(b_curStop)
     strategy.exit("BSx",  from_entry = "BS",  stop = b_curStop, limit = b_curTP)
     strategy.exit("BS2x", from_entry = "BS2", stop = b_curStop, limit = b_curTP)
 if (b_f1 or b_f2) and not b_closed and not na(b_curStop)
-    if b_dir == 1 and (low <= b_curStop or high >= b_curTP)
-        b_closed := true
-    if b_dir == -1 and (high >= b_curStop or low <= b_curTP)
+    bOnFill = bar_index == nz(b_fillBar, -1)
+    if f_touch(bOnFill, false, b_dir, b_curStop) or f_touch(bOnFill, true, b_dir, b_curTP)
         b_closed := true
 // mirror of slot A: no resting order while slot A holds the seat
 if runB and bBlocked and b_placed and not (b_f1 or b_f2)
@@ -883,20 +898,13 @@ if b_firstFill and not na(b_rng)
     bR_tp100 := false
     bR_sl    := false
 if b_trk
-    if b_tdir == 1
-        bR_tp0   := bR_tp0   or high >= bL_tp0
-        bR_tp10  := bR_tp10  or high >= bL_tp10
-        bR_tp30  := bR_tp30  or high >= bL_tp30
-        bR_tp50  := bR_tp50  or high >= bL_tp50
-        bR_tp100 := bR_tp100 or high >= bL_tp100
-        bR_sl    := bR_sl    or low  <= bL_sl
-    else
-        bR_tp0   := bR_tp0   or low  <= bL_tp0
-        bR_tp10  := bR_tp10  or low  <= bL_tp10
-        bR_tp30  := bR_tp30  or low  <= bL_tp30
-        bR_tp50  := bR_tp50  or low  <= bL_tp50
-        bR_tp100 := bR_tp100 or low  <= bL_tp100
-        bR_sl    := bR_sl    or high >= bL_sl
+    bOnF = bar_index == nz(b_fillBar, -1)
+    bR_tp0   := bR_tp0   or f_touch(bOnF, true,  b_tdir, bL_tp0)
+    bR_tp10  := bR_tp10  or f_touch(bOnF, true,  b_tdir, bL_tp10)
+    bR_tp30  := bR_tp30  or f_touch(bOnF, true,  b_tdir, bL_tp30)
+    bR_tp50  := bR_tp50  or f_touch(bOnF, true,  b_tdir, bL_tp50)
+    bR_tp100 := bR_tp100 or f_touch(bOnF, true,  b_tdir, bL_tp100)
+    bR_sl    := bR_sl    or f_touch(bOnF, false, b_tdir, bL_sl)
     if flatten
         f_pushTrade(1, b_rng / b_rL * 100, bR_tp0, bR_tp10, bR_tp30, bR_tp50, bR_tp100, bR_sl)
         b_trk := false
