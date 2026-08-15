@@ -1,42 +1,47 @@
 //@version=6
-// MTF 1m Entry — run on a 1-MINUTE chart. Same 4h bias and 15m sweep as mtf_15m_sweep_strategy,
-// but the entry is qualified on the 1m chart instead of firing on the 15m sweep alone.
+// MTF Entry Trigger — 4h bias + 15m sweep + a lower-timeframe entry trigger. Same bias and sweep as
+// mtf_15m_sweep_strategy, but the entry is qualified on a faster candle instead of firing on the
+// 15m sweep alone. ALL THREE TIMEFRAMES ARE INPUTS and are aggregated from the chart's own bars, so
+// none of them depends on how TradingView aligns its higher-timeframe grids. Run the chart at or
+// below the entry timeframe — a 1m trigger cannot be built out of 5m bars.
 //
-//   1) BIAS — every 4h candle is classified against the candle before it; the bias in force is the
-//      one from the last CLOSED 4h candle. Break and failed break are selectable together or apart:
-//        BREAK        — closes ABOVE the previous 4h high -> long | BELOW its low -> short
+//   1) BIAS (default 4h) — every bias candle is classified against the candle before it; the bias in
+//      force is the one from the last CLOSED bias candle. Break and failed break are selectable
+//      together or apart:
+//        BREAK        — closes ABOVE the previous high -> long | BELOW its low -> short
 //        FAILED BREAK — took the previous LOW but failed to close below  -> long
 //                       took the previous HIGH but failed to close above -> short
 //      Inside / two-sided candles carry the previous bias forward. EVERY trade follows that bias.
-//   2) SWEEP — a 15m candle that takes the PREVIOUS 15m candle's extreme and CLOSES BACK INSIDE IT.
-//      Both 4h and 15m candles are aggregated from the 1m bars, so nothing depends on how
-//      TradingView aligns its higher-timeframe grids.
-//   3) ENTRY — THE SETUP IS ONLY VALID ONCE THAT 15m CANDLE HAS CLOSED. The trigger must have
-//      occurred on the 1m chart INSIDE that candle. Five models, each testable on its own:
-//        FVG         — a 1m fair value gap in the trade direction
-//        iFVG        — a 1m gap AGAINST the trade that price then closed through, inverting it
-//        MSS         — a 1m close beyond the last swing point (above the swing high for a long)
+//   2) SWEEP (default 15m) — a sweep candle takes the PREVIOUS sweep candle's extreme and CLOSES
+//      BACK INSIDE IT. A poke that closes beyond is a break, not a sweep.
+//   3) ENTRY (default 1m) — THE SETUP IS ONLY VALID ONCE THE SWEEP CANDLE HAS CLOSED. The trigger
+//      must have occurred on the ENTRY timeframe INSIDE that candle. Five models, each testable on
+//      its own:
+//        FVG         — an entry-timeframe fair value gap in the trade direction
+//        iFVG        — an entry-timeframe gap AGAINST the trade that price then closed through
+//        MSS         — an entry-timeframe close beyond the last swing point (above the swing high
+//                      for a long), swings taken from entry-timeframe pivots
 //        FVG + MSS   — both
 //        iFVG + MSS  — both
 //      If the selected trigger is not present inside the sweep candle, NO TRADE is taken.
-//      Entry is market on the first 1m bar after the 15m close, filled at the next bar's open.
-//   4) EXIT — R-multiple (1:1 / 1:2 / 1:3 / scale out) off the stop, or a LEVEL (the swept 15m
-//      candle's far side, or the last closed 4h extreme). The stop is the 15m sweep candle's wick,
-//      or the target distance mirrored around the fill. R is measured from the ACTUAL fill.
-//   5) BIAS FLIP — optionally close at market when a 4h close turns the bias against the trade.
+//      Entry is market on the first bar after the sweep close, filled at the next bar's open.
+//   4) EXIT — R-multiple (1:1 / 1:2 / 1:3 / scale out) off the stop, or a LEVEL (the swept sweep
+//      candle's far side, or the last closed bias-candle extreme). The stop is the sweep candle's
+//      wick, or the target distance mirrored around the fill. R is measured from the ACTUAL fill.
+//   5) BIAS FLIP — optionally close at market when a bias close turns the bias against the trade.
 //
-//   All of the 1m annotations — FVG, iFVG, MSS and the 15m sweep candle box — are drawn only on a
-//   chart faster than the sweep timeframe, and only for a candle that actually produced a sweep.
+//   The trigger annotations — FVG, iFVG, MSS and the sweep candle box — are drawn only when the
+//   chart can actually build the entry candles, and only for a candle that produced a trade.
 //   Validate before trading; this is an idea to backtest.
 
-strategy("MTF 1m Entry — 4h bias + 15m sweep + 1m trigger", overlay = true,
+strategy("MTF Entry Trigger — bias + sweep + LTF trigger", overlay = true,
      pyramiding = 1, max_lines_count = 500, max_boxes_count = 500, max_labels_count = 500,
      initial_capital = 1000000, margin_long = 0, margin_short = 0,
      default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
      commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
 
 // ---------------------------------------------------------------- Inputs
-gB       = "1) 4h bias"
+gB       = "1) Bias"
 htfTf    = input.timeframe("240", "Bias timeframe", group = gB)
 htfMode  = input.string("Break or failed break", "Bias rule",
      options = ["Break or failed break", "Break only", "Failed break only", "Close vs previous close", "Close vs previous midpoint"], group = gB,
@@ -46,30 +51,32 @@ undecided= input.string("Carry the previous bias", "Candles the rule cannot deci
 allowLong  = input.bool(true, "Take longs",  group = gB)
 allowShort = input.bool(true, "Take shorts", group = gB)
 
-gS       = "2) 15m sweep"
+gS       = "2) Sweep"
 mtfTf    = input.timeframe("15", "Sweep timeframe", group = gS,
-     tooltip = "Aggregated from the chart's bars. The setup only becomes valid once this candle has CLOSED, so the 1m trigger inside it is judged in hindsight rather than live.")
+     tooltip = "Aggregated from the chart's bars, so it does not depend on TradingView's higher-timeframe grid. The setup only becomes valid once this candle has CLOSED, so the entry trigger inside it is judged in hindsight rather than live.")
 slBufTk  = input.float(0, "Stop buffer beyond the sweep wick (ticks)", 0, step = 1, group = gS)
 minRtk   = input.float(0, "Skip if the stop is closer than (ticks)", 0, step = 1, group = gS)
 maxRtk   = input.float(0, "Skip if the stop is further than (ticks, 0 = no cap)", 0, step = 1, group = gS)
 
-gX       = "3) 1m entry trigger"
+gX       = "3) Entry trigger"
+ltfTf    = input.timeframe("1", "Entry timeframe", group = gX,
+     tooltip = "The candles the FVG / iFVG / MSS are read from. Aggregated from the chart's bars like the other two, so all three timeframes are independent of the chart you happen to be on. It must be at or below the sweep timeframe, and the chart must be at or below it - a 1m entry cannot be built from 5m bars.")
 entModel = input.string("FVG", "Trigger required inside the sweep candle",
      options = ["FVG", "iFVG", "MSS", "FVG + MSS", "iFVG + MSS"], group = gX,
-     tooltip = "FVG: a 1m gap in the trade direction. iFVG: a 1m gap AGAINST the trade that price then closed through, inverting it into support (long) or resistance (short). MSS: a 1m close beyond the last swing point. The two combinations need both present. If the selected trigger did not occur inside the sweep candle, no trade is taken - that is the whole point of the model.")
-swLeft   = input.int(1, "Swing pivot — left bars",  1, 10, group = gX)
-swRight  = input.int(1, "Swing pivot — right bars", 1, 10, group = gX,
-     tooltip = "1/1 is the classic 3-bar swing, the fastest structure read on a 1m chart.")
+     tooltip = "All three are measured in ENTRY-timeframe candles. FVG: a gap in the trade direction. iFVG: a gap AGAINST the trade that price then closed through, inverting it into support (long) or resistance (short). MSS: a close beyond the last swing point. The two combinations need both present. If the selected trigger did not occur inside the sweep candle, no trade is taken - that is the whole point of the model.")
+swLeft   = input.int(1, "Swing pivot — left candles",  1, 10, group = gX)
+swRight  = input.int(1, "Swing pivot — right candles", 1, 10, group = gX,
+     tooltip = "1/1 is the classic 3-bar swing. Measured in ENTRY-timeframe candles, not chart bars.")
 
 gE       = "4) Exit"
 tpMode   = input.string("1:1", "Target",
      options = ["1:1", "1:2", "1:3", "Scale out 1/3 at 1R, 2R, 3R",
-                "Swept 15m candle far side", "Last closed 4h extreme"], group = gE,
-     tooltip = "The first four are multiples of the stop distance. The last two aim at a LEVEL: the far side of the 15m candle whose level was swept, or the last closed 4h candle's high/low.")
-slMode   = input.string("15m sweep candle wick", "Stop loss",
-     options = ["15m sweep candle wick", "Same distance as the target"], group = gE,
-     tooltip = "15m sweep candle wick: the extreme of the 15m candle that did the sweeping. Same distance as the target: an equal distance the other side of the fill, forcing a 1:1 - only meaningful for a LEVEL target, since an R-multiple target is a multiple OF the stop.")
-closeFlip= input.bool(true, "Close the trade if the 4h bias no longer agrees", group = gE)
+                "Swept candle far side", "Last closed bias-candle extreme"], group = gE,
+     tooltip = "The first four are multiples of the stop distance. The last two aim at a LEVEL: the far side of the sweep-timeframe candle whose level was taken, or the last closed bias candle's high/low.")
+slMode   = input.string("Sweep candle wick", "Stop loss",
+     options = ["Sweep candle wick", "Same distance as the target"], group = gE,
+     tooltip = "Sweep candle wick: the extreme of the sweep-timeframe candle that did the sweeping. Same distance as the target: an equal distance the other side of the fill, forcing a 1:1 - only meaningful for a LEVEL target, since an R-multiple target is a multiple OF the stop.")
+closeFlip= input.bool(true, "Close the trade if the bias no longer agrees", group = gE)
 beAt     = input.string("Off", "Move the stop to breakeven at", options = ["Off", "1R", "2R"], group = gE)
 
 gT       = "Session / timing"
@@ -89,10 +96,10 @@ qtyFixed    = input.float(3, "Contracts (fixed sizing)", minval = 1, group = gZ)
 ptVal       = input.float(2.0, "$ per point per contract", group = gZ, tooltip = "MNQ=2, NQ=20, MES=5, ES=50.")
 
 gV        = "Visuals"
-showBias  = input.bool(true, "Shade the 4h bias (green long / red short)", group = gV)
+showBias  = input.bool(true, "Shade the bias (green long / red short)", group = gV)
 biasAlpha = input.int(88, "Bias shade transparency", 60, 98, group = gV)
-showSwpBox= input.bool(true, "Box the 15m sweep candle", group = gV)
-showTrig  = input.bool(true, "Draw the 1m FVG / iFVG / MSS", group = gV)
+showSwpBox= input.bool(true, "Box the sweep candle", group = gV)
+showTrig  = input.bool(true, "Draw the FVG / iFVG / MSS", group = gV)
 showRR    = input.bool(true, "Show the risk/reward box", group = gV)
 rrBars    = input.int(30, "R/R box width (bars)", 1, 400, group = gV)
 showTbl   = input.bool(true, "Show the panel", group = gV)
@@ -100,20 +107,23 @@ longCol   = input.color(color.new(#26a69a, 0), "Long color",  group = gV)
 shortCol  = input.color(color.new(#ef5350, 0), "Short color", group = gV)
 ifvgCol   = input.color(color.new(#7e57c2, 0), "iFVG color",  group = gV)
 
-levelMode  = tpMode == "Swept 15m candle far side" or tpMode == "Last closed 4h extreme"
+levelMode  = tpMode == "Swept candle far side" or tpMode == "Last closed bias-candle extreme"
 mirrorStop = levelMode and slMode == "Same distance as the target"
 needFvg    = entModel == "FVG"  or entModel == "FVG + MSS"
 needIfvg   = entModel == "iFVG" or entModel == "iFVG + MSS"
 needMss    = entModel == "MSS"  or entModel == "FVG + MSS" or entModel == "iFVG + MSS"
-// the 1m layer only means anything on a chart faster than the sweep candle
-tierLtf    = timeframe.in_seconds() < timeframe.in_seconds(mtfTf)
+// the entry layer only means anything when the chart can actually build those candles
+chartSec   = timeframe.in_seconds()
+ltfSec     = timeframe.in_seconds(ltfTf)
+mtfSec     = timeframe.in_seconds(mtfTf)
+tierLtf    = chartSec <= ltfSec and ltfSec < mtfSec
 
 tickSz = syminfo.mintick
 slBuf  = slBufTk * tickSz
 minR   = minRtk  * tickSz
 maxR   = maxRtk  * tickSz
 
-// ================================================================ 1) 4h BIAS
+// ================================================================ 1) BIAS
 f_biasRaw(float c1, float h1, float l1, float c2, float h2, float l2) =>
     int b = 0
     if not na(c1) and not na(h2) and not na(l2)
@@ -189,32 +199,24 @@ else
     hCurH := na(hCurH) ? high : math.max(hCurH, high)
     hCurL := na(hCurL) ? low  : math.min(hCurL, low)
 
-// ================================================================ 2) 1m TRIGGERS, ACCUMULATED
-// Everything the 1m chart produces inside the DEVELOPING 15m candle is recorded here, for BOTH
-// directions. Which direction matters is not known until that candle closes and the sweep is
-// judged, so recording only the current bias would lose the setup whenever the 4h flips mid-candle.
+// ================================================================ 2) ENTRY-TF TRIGGERS, ACCUMULATED
+// Everything the ENTRY timeframe produces inside the DEVELOPING sweep candle is recorded here, for
+// BOTH directions. Which direction matters is not known until that candle closes and the sweep is
+// judged, so recording only the current bias would lose the setup whenever the bias flips
+// mid-candle. Entry candles are aggregated from the chart's bars exactly like the bias and sweep
+// candles, so all three timeframes are independent of the chart this happens to run on.
 mtfT   = time(mtfTf)
 newMtf = not na(mtfT) and (na(mtfT[1]) or mtfT != mtfT[1])
+ltfT   = time(ltfTf)
+newLtf = not na(ltfT) and (na(ltfT[1]) or ltfT != ltfT[1])
 
-// FVG on the chart timeframe, confirmed on this bar
-bullFVG = high[2] < low        // gap between bar[2] high and this bar's low
-bearFVG = low[2]  > high       // gap between bar[2] low  and this bar's high
-
-// swing pivots, for the market structure shift
-ph = ta.pivothigh(swLeft, swRight)
-pl = ta.pivotlow(swLeft, swRight)
+// the last swing points seen on the entry timeframe, for the market structure shift
 var float swH = na
 var float swL = na
 var bool  swHBroken = false
 var bool  swLBroken = false
-if not na(ph)
-    swH := ph
-    swHBroken := false
-if not na(pl)
-    swL := pl
-    swLBroken := false
 
-// accumulators, reset at the start of every 15m candle
+// accumulators, reset at the start of every sweep candle
 var bool  aFvgL = false
 var bool  aFvgS = false
 var float aFvgLTop = na
@@ -243,12 +245,121 @@ var float oppBearBot = na
 var float oppBullTop = na      // a bullish gap; a close BELOW its bottom inverts it bearish
 var float oppBullBot = na
 
-// developing 15m candle
+// ---- entry-timeframe candles, aggregated from the chart's bars
+// A rolling window of the CLOSED entry candles is kept so the gap and the pivots can be measured in
+// entry candles rather than chart bars. LCAP only has to cover the widest pivot (10 + 10 + 1) and
+// the three candles a gap spans.
+LCAP = 60
+var float lCurH = na
+var float lCurL = na
+var bool  lCurValid = false
+var array<float> lHi = array.new_float()
+var array<float> lLo = array.new_float()
+var array<float> lCl = array.new_float()
+var array<int>   lBr = array.new_int()      // the chart bar each entry candle closed on
+
+// This runs BEFORE the sweep close-out below on purpose. When the two timeframes line up, the last
+// entry candle of a sweep candle closes on the very bar that starts the next sweep candle — read it
+// first and it lands in the candle it belongs to, read it after and the reset has already wiped it.
+if newLtf
+    if lCurValid
+        array.push(lHi, lCurH)
+        array.push(lLo, lCurL)
+        array.push(lCl, close[1])          // first bar of a new candle -> close[1] closed the old one
+        array.push(lBr, bar_index - 1)
+        if array.size(lHi) > LCAP
+            array.shift(lHi)
+            array.shift(lLo)
+            array.shift(lCl)
+            array.shift(lBr)
+        n   = array.size(lHi)
+        eHi = array.get(lHi, n - 1)
+        eLo = array.get(lLo, n - 1)
+        eCl = array.get(lCl, n - 1)
+        eBr = array.get(lBr, n - 1)
+
+        // fair value gap: the candle two back never overlapped this one
+        if n >= 3
+            aHi = array.get(lHi, n - 3)
+            aLo = array.get(lLo, n - 3)
+            if aHi < eLo
+                aFvgL := true
+                aFvgLTop := eLo
+                aFvgLBot := aHi
+                aFvgLBar := eBr
+                oppBullTop := eLo          // the same gap is the raw material for a bearish iFVG
+                oppBullBot := aHi
+            if aLo > eHi
+                aFvgS := true
+                aFvgSTop := aLo
+                aFvgSBot := eHi
+                aFvgSBar := eBr
+                oppBearTop := aLo
+                oppBearBot := eHi
+
+        // inversions: a close through an opposite gap flips it to our side
+        if not na(oppBearTop) and eCl > oppBearTop
+            aIfvgL := true
+            aIfvgLTop := oppBearTop
+            aIfvgLBot := oppBearBot
+            aIfvgLBar := eBr
+            oppBearTop := na
+            oppBearBot := na
+        if not na(oppBullBot) and eCl < oppBullBot
+            aIfvgS := true
+            aIfvgSTop := oppBullTop
+            aIfvgSBot := oppBullBot
+            aIfvgSBar := eBr
+            oppBullTop := na
+            oppBullBot := na
+
+        // swing pivots, measured in entry candles - the candidate sits swRight candles back and is
+        // only confirmable now that the candles to its right exist
+        cand = n - 1 - swRight
+        if cand >= swLeft
+            pvH = array.get(lHi, cand)
+            pvL = array.get(lLo, cand)
+            bool isPH = true
+            bool isPL = true
+            for k = cand - swLeft to cand + swRight
+                if k != cand
+                    if array.get(lHi, k) >= pvH
+                        isPH := false
+                    if array.get(lLo, k) <= pvL
+                        isPL := false
+            if isPH
+                swH := pvH
+                swHBroken := false
+            if isPL
+                swL := pvL
+                swLBroken := false
+
+        // market structure shift: the first entry-candle close beyond the last swing point
+        if not na(swH) and not swHBroken and eCl > swH
+            aMssL := true
+            aMssLLvl := swH
+            aMssLBar := eBr
+        if not na(swL) and not swLBroken and eCl < swL
+            aMssS := true
+            aMssSLvl := swL
+            aMssSBar := eBr
+        if not na(swH) and eCl > swH
+            swHBroken := true
+        if not na(swL) and eCl < swL
+            swLBroken := true
+    lCurH := high
+    lCurL := low
+    lCurValid := not barstate.isfirst
+else
+    lCurH := na(lCurH) ? high : math.max(lCurH, high)
+    lCurL := na(lCurL) ? low  : math.min(lCurL, low)
+
+// developing sweep candle
 var float mCurH = na
 var float mCurL = na
 var int   mCurStart = na
 var bool  mCurValid = false
-// the 15m candle that just closed, and the one before it
+// the sweep-timeframe candle that just closed, and the one before it
 var float cH = na
 var float cL = na
 var float cC = na
@@ -259,9 +370,9 @@ var float pH = na
 var float pL = na
 var bool  haveP = false
 
-// What the CLOSED candle produced, in the swept direction. The accumulators are reset the moment
-// that candle closes so the new one starts clean, which would wipe them before the entry block
-// below ever runs - so the relevant side is copied out here first.
+// What the CLOSED sweep candle produced, in the swept direction. The accumulators are reset the
+// moment that candle closes so the new one starts clean, which would wipe them before the entry
+// block further down ever runs - so the relevant side is copied out here first.
 var bool  cHasFvg  = false
 var float cFvgTop  = na
 var float cFvgBot  = na
@@ -274,7 +385,7 @@ var bool  cHasMss  = false
 var float cMssLvl  = na
 var int   cMssBar  = na
 
-// ---- close out the 15m candle and judge the sweep
+// ---- close out the sweep candle and judge the sweep
 bool sweptNow = false
 int  swpDir   = 0
 if newMtf
@@ -330,55 +441,6 @@ else
     mCurH := na(mCurH) ? high : math.max(mCurH, high)
     mCurL := na(mCurL) ? low  : math.min(mCurL, low)
 
-// ---- record this bar's triggers into the DEVELOPING candle (after the close-out above, so a bar
-//      that starts a new 15m candle contributes to the new one, not the one just judged)
-if not na(mCurStart) and bar_index >= mCurStart
-    if bar_index >= 2                       // high[2] / low[2] must exist for a gap
-        // gaps in each direction
-        if bullFVG
-            aFvgL := true
-            aFvgLTop := low
-            aFvgLBot := high[2]
-            aFvgLBar := bar_index
-            oppBullTop := low          // this same gap is the raw material for a bearish iFVG
-            oppBullBot := high[2]
-        if bearFVG
-            aFvgS := true
-            aFvgSTop := low[2]
-            aFvgSBot := high
-            aFvgSBar := bar_index
-            oppBearTop := low[2]
-            oppBearBot := high
-        // inversions: a close through an opposite gap flips it to our side
-        if not na(oppBearTop) and close > oppBearTop
-            aIfvgL := true
-            aIfvgLTop := oppBearTop
-            aIfvgLBot := oppBearBot
-            aIfvgLBar := bar_index
-            oppBearTop := na
-            oppBearBot := na
-        if not na(oppBullBot) and close < oppBullBot
-            aIfvgS := true
-            aIfvgSTop := oppBullTop
-            aIfvgSBot := oppBullBot
-            aIfvgSBar := bar_index
-            oppBullTop := na
-            oppBullBot := na
-        // market structure shift: the first close beyond the last swing point
-        if not na(swH) and not swHBroken and close > swH
-            aMssL := true
-            aMssLLvl := swH
-            aMssLBar := bar_index
-        if not na(swL) and not swLBroken and close < swL
-            aMssS := true
-            aMssSLvl := swL
-            aMssSBar := bar_index
-
-if not na(swH) and close > swH
-    swHBroken := true
-if not na(swL) and close < swL
-    swLBroken := true
-
 // ---------------------------------------------------------------- Session / day gates
 inSess  = not useSess or not na(time(timeframe.period, sess, tz))
 tod     = hour(time, tz) * 60 + minute(time, tz)
@@ -420,19 +482,23 @@ var float  swpBoxH  = na
 var float  swpBoxL  = na
 
 bool tookNow = false
-if sweptNow and inSess and not flatten and dayOk and strategy.position_size == 0
+if not tierLtf and barstate.islast
+    lastSkip := "entry timeframe unusable here"
+// a chart too slow to build the entry candles would silently degrade them into chart bars, so the
+// model is switched off rather than run on the wrong candles
+if sweptNow and tierLtf and inSess and not flatten and dayOk and strategy.position_size == 0
     int d = swpDir
-    // did the required 1m trigger happen inside the candle that just closed?
+    // did the required trigger happen inside the candle that just closed?
     hasFvg  = cHasFvg
     hasIfvg = cHasIfvg
     hasMss  = cHasMss
     trigOk  = (not needFvg or hasFvg) and (not needIfvg or hasIfvg) and (not needMss or hasMss)
 
-    float wick = d == 1 ? cL - slBuf : cH + slBuf      // the 15m sweep candle's own extreme
+    float wick = d == 1 ? cL - slBuf : cH + slBuf      // the sweep candle's own extreme
     float lvl  = na
-    if tpMode == "Swept 15m candle far side"
+    if tpMode == "Swept candle far side"
         lvl := d == 1 ? pH : pL                        // far side of the candle whose level was taken
-    else if tpMode == "Last closed 4h extreme"
+    else if tpMode == "Last closed bias-candle extreme"
         lvl := d == 1 ? hPrvH : hPrvL
     float risk = mirrorStop ? math.abs(lvl - close) : math.abs(close - wick)
     float q    = useRiskSize ? f_size(acctSize * riskPct / 100.0, risk) : qtyFixed
@@ -507,7 +573,7 @@ if inPos and exitsSet
         strategy.exit("X", from_entry = eid, stop = slLvl, limit = tgt)
 
 if closeFlip and inPos and tDir != 0 and bias != tDir
-    strategy.close_all(comment = "4h bias flipped")
+    strategy.close_all(comment = "bias flipped")
 
 if not inPos and inPos[1]
     exitsSet := false
@@ -517,47 +583,50 @@ if flatten
     strategy.close_all(comment = "flat")
 
 // ================================================================ VISUALS
-bgcolor(showBias and bias != 0 ? color.new(bias == 1 ? longCol : shortCol, biasAlpha) : na, title = "4h bias")
+bgcolor(showBias and bias != 0 ? color.new(bias == 1 ? longCol : shortCol, biasAlpha) : na, title = "Bias")
 
-// Everything below is the 1m layer, and it is drawn only once a sweep candle has actually produced
-// a trade — annotating every 1m gap on the chart would bury the setup in noise.
+// Everything below is the entry-timeframe layer, and it is drawn only once a sweep candle has
+// actually produced a trade — annotating every gap on the chart would bury the setup in noise.
 if tierLtf and tookNow
     c = tDir == 1 ? longCol : shortCol
     if showSwpBox
         box.new(swpBoxS, swpBoxH, swpBoxE, swpBoxL, xloc = xloc.bar_index,
              border_color = color.new(c, 30), border_width = 2, bgcolor = color.new(c, 92))
         label.new(swpBoxE, tDir == 1 ? swpBoxL : swpBoxH,
-             (tDir == 1 ? "15m sweep ▼" : "15m sweep ▲") + "  " + entModel,
+             mtfTf + (tDir == 1 ? " sweep ▼" : " sweep ▲") + "  " + entModel,
              xloc = xloc.bar_index, style = tDir == 1 ? label.style_label_up : label.style_label_down,
              color = color.new(c, 80), textcolor = c, size = size.tiny)
         // the level that was taken, from the candle that made it to the bar that took it
         line.new(swpBoxS, swpLvl, swpBoxE, swpLvl, xloc = xloc.bar_index,
              color = c, width = 2, style = line.style_dashed)
     if showTrig
+        // one entry candle is this many chart bars wide, so the marks keep their shape whatever
+        // combination of chart and entry timeframe is running
+        int w = math.max(1, int(math.round(ltfSec * 1.0 / math.max(chartSec, 1))))
         if tookFvg
             ft = cFvgTop
             fb = cFvgBot
             fx = cFvgBar
-            box.new(fx - 2, ft, fx + 6, fb, xloc = xloc.bar_index,
+            box.new(fx - 2 * w, ft, fx + 4 * w, fb, xloc = xloc.bar_index,
                  border_color = color.new(c, 40), border_width = 1, bgcolor = color.new(c, 80),
                  text = "FVG", text_size = size.tiny, text_color = c, text_halign = text.align_right)
         if tookIfvg
             it = cIfvgTop
             ib = cIfvgBot
             ix = cIfvgBar
-            box.new(ix - 2, it, ix + 6, ib, xloc = xloc.bar_index,
+            box.new(ix - 2 * w, it, ix + 4 * w, ib, xloc = xloc.bar_index,
                  border_color = color.new(ifvgCol, 20), border_width = 1, border_style = line.style_dashed,
                  bgcolor = color.new(ifvgCol, 86),
                  text = "iFVG", text_size = size.tiny, text_color = ifvgCol, text_halign = text.align_right)
         if tookMss
             ml = cMssLvl
             mx = cMssBar
-            line.new(mx - 6, ml, mx + 4, ml, xloc = xloc.bar_index, color = c, width = 1, style = line.style_dotted)
+            line.new(mx - 5 * w, ml, mx + 3 * w, ml, xloc = xloc.bar_index, color = c, width = 1, style = line.style_dotted)
             label.new(mx, ml, "MSS", xloc = xloc.bar_index,
                  style = tDir == 1 ? label.style_label_down : label.style_label_up,
                  color = color.new(c, 85), textcolor = c, size = size.tiny)
 
-// the risk/reward box lives on the 1m chart now, drawn on the bar the fill price becomes known
+// the risk/reward box lives on the entry layer, drawn on the bar the fill price becomes known
 if tierLtf and showRR and inPos and not inPos[1] and exitsSet
     c    = tDir == 1 ? longCol : shortCol
     mult = tpMode == "1:1" ? 1.0 : tpMode == "1:2" ? 2.0 : 3.0
@@ -575,7 +644,7 @@ plot(exitsSet and inPos ? slLvl : na, "Stop", color = color.new(color.red, 20), 
 
 // ---------------------------------------------------------------- Panel
 f_yn(bool b) => b ? "✔" : "—"
-var table dg = table.new(position.bottom_right, 2, 7, border_width = 1)
+var table dg = table.new(position.bottom_right, 2, 8, border_width = 1)
 if showTbl and barstate.islast
     btxt = bias == 1 ? "▲ long" : bias == -1 ? "▼ short" : "— none"
     bcol = bias == 1 ? longCol : bias == -1 ? shortCol : color.gray
@@ -583,23 +652,30 @@ if showTbl and barstate.islast
     // what the DEVELOPING candle has produced so far, in the bias direction
     dv = bias == 1 ? 1 : -1
     ctxt = f_yn(dv == 1 ? aFvgL : aFvgS) + " FVG   " + f_yn(dv == 1 ? aIfvgL : aIfvgS) + " iFVG   " + f_yn(dv == 1 ? aMssL : aMssS) + " MSS"
-    table.cell(dg, 0, 0, "MTF 1m entry", text_color = color.white, bgcolor = color.new(color.gray, 20))
+    table.cell(dg, 0, 0, "MTF entry trigger", text_color = color.white, bgcolor = color.new(color.gray, 20))
     table.cell(dg, 1, 0, "state",        text_color = color.white, bgcolor = color.new(color.gray, 20))
-    table.cell(dg, 0, 1, htfTf + " bias", text_color = color.white)
-    table.cell(dg, 1, 1, btxt,            text_color = bcol)
-    table.cell(dg, 0, 2, "trigger",      text_color = color.white)
-    table.cell(dg, 1, 2, entModel,       text_color = color.white)
-    table.cell(dg, 0, 3, "this " + mtfTf + " candle", text_color = color.white)
-    table.cell(dg, 1, 3, ctxt,           text_color = color.silver)
-    table.cell(dg, 0, 4, "position",     text_color = color.white)
-    table.cell(dg, 1, 4, ptxt,           text_color = color.white)
-    table.cell(dg, 0, 5, "stop from",    text_color = color.white)
-    table.cell(dg, 1, 5, mirrorStop ? "mirrored target distance" : "15m sweep candle wick", text_color = color.white)
-    table.cell(dg, 0, 6, "last skip",    text_color = color.gray)
-    table.cell(dg, 1, 6, lastSkip,       text_color = color.orange)
+    table.cell(dg, 0, 1, "bias / sweep / entry", text_color = color.white)
+    table.cell(dg, 1, 1, htfTf + " / " + mtfTf + " / " + ltfTf + (tierLtf ? "" : "  ⚠"),
+         text_color = tierLtf ? color.silver : color.orange)
+    table.cell(dg, 0, 2, htfTf + " bias", text_color = color.white)
+    table.cell(dg, 1, 2, btxt,            text_color = bcol)
+    table.cell(dg, 0, 3, "trigger",      text_color = color.white)
+    table.cell(dg, 1, 3, entModel,       text_color = color.white)
+    table.cell(dg, 0, 4, "this " + mtfTf + " candle", text_color = color.white)
+    table.cell(dg, 1, 4, ctxt,           text_color = color.silver)
+    table.cell(dg, 0, 5, "position",     text_color = color.white)
+    table.cell(dg, 1, 5, ptxt,           text_color = color.white)
+    table.cell(dg, 0, 6, "stop from",    text_color = color.white)
+    table.cell(dg, 1, 6, mirrorStop ? "mirrored target distance" : mtfTf + " sweep wick", text_color = color.white)
+    table.cell(dg, 0, 7, "last skip",    text_color = color.gray)
+    table.cell(dg, 1, 7, lastSkip,       text_color = color.orange)
 
-// this model needs a chart faster than the sweep candle; on 15m the "1m trigger" is meaningless
+// The entry layer only exists if the chart can build the entry candles AND those candles are faster
+// than the sweep candle. Either failure would silently produce no trades, so it says so out loud.
 if barstate.islast and not tierLtf
-    label.new(bar_index, high, "Put this on a chart FASTER than " + mtfTf + " — 1m is what it is for",
+    string why = "Entry timeframe " + ltfTf + " must be FASTER than the sweep timeframe " + mtfTf + "."
+    if chartSec > ltfSec
+        why := "chart is " + timeframe.period + ", too slow to build " + ltfTf + " entry candles — drop to " + ltfTf + " or faster."
+    label.new(bar_index, high, "No trades: " + why,
          xloc = xloc.bar_index, style = label.style_label_down,
          color = color.new(color.orange, 10), textcolor = color.white, size = size.small)

@@ -141,16 +141,31 @@ once it has fully closed.
 ## Strategies
 
 ### `pinescript/mtf_1m_entry_strategy.pine`
-MTF 1m Entry — same 4h bias and 15m sweep as the 15m strategy, but the entry is **qualified on the
-1m chart** instead of firing on the sweep alone. **Run it on a 1-minute chart.**
+MTF Entry Trigger — same bias and sweep as the 15m strategy, but the entry is **qualified on a
+faster candle** instead of firing on the sweep alone.
 
-**The setup only becomes valid once the 15m sweep candle has closed.** The 1m trigger has to have
-occurred *inside* that candle, so it is judged in hindsight rather than live — which is what makes
-the model testable at all. Entry is market on the first 1m bar after the close.
+**All three timeframes are inputs** and independent of each other:
+
+| input | group | default |
+| --- | --- | --- |
+| `Bias timeframe` | 1) Bias | `240` (4h) |
+| `Sweep timeframe` | 2) Sweep | `15` |
+| `Entry timeframe` | 3) Entry trigger | `1` |
+
+All three are **aggregated from the chart's own bars**, so none of them depends on how TradingView
+aligns its higher-timeframe grid. That aggregation is also the constraint: the chart has to be at or
+below the entry timeframe (a 1m trigger cannot be built out of 5m bars), and the entry timeframe has
+to be strictly faster than the sweep timeframe. If either fails, the strategy **takes no trades** and
+says why in a label and in the panel's `bias / sweep / entry` row — it does not quietly fall back to
+chart bars.
+
+**The setup only becomes valid once the sweep candle has closed.** The trigger has to have occurred
+*inside* that candle, so it is judged in hindsight rather than live — which is what makes the model
+testable at all. Entry is market on the first bar after the close.
 
 **Five trigger models**, each selectable on its own so they can be compared:
 
-| `Trigger required inside the sweep candle` | what has to happen on the 1m |
+| `Trigger required inside the sweep candle` | what has to happen on the entry timeframe |
 | --- | --- |
 | `FVG` | a gap in the trade direction |
 | `iFVG` | a gap *against* the trade that price then closed through, inverting it |
@@ -158,23 +173,30 @@ the model testable at all. Entry is market on the first 1m bar after the close.
 | `FVG + MSS` | both |
 | `iFVG + MSS` | both |
 
+Gaps span three **entry candles**, and the swing pivots the MSS is measured against are
+`Swing pivot — left/right candles` of the **entry timeframe**, not chart bars — so switching the
+chart from 1m to 10s does not change a single signal.
+
 **If the selected trigger is not present inside the sweep candle, no trade is taken** — the panel
 reports `no <model> in the sweep candle`. That is the whole point of the model.
 
-Triggers are recorded for **both directions** as the 15m candle develops, because which one matters
+Triggers are recorded for **both directions** as the sweep candle develops, because which one matters
 is not known until the candle closes and the sweep is judged; recording only the current bias would
-lose the setup whenever the 4h flips mid-candle. The relevant side is snapshotted at the close,
-before the accumulators reset for the next candle.
+lose the setup whenever the bias flips mid-candle. The relevant side is snapshotted at the close,
+before the accumulators reset for the next candle. The entry-candle layer is deliberately evaluated
+*before* the sweep close-out: when the two timeframes line up, the last entry candle of a sweep
+candle closes on the very bar that starts the next one, and reading it afterwards would file it
+under the wrong candle.
 
-**Exits** are the 15m strategy's: R-multiple off the stop, or a level (the swept 15m candle's far
-side, or the last closed 4h extreme), with the stop on the 15m sweep candle's wick or mirrored from
-the target. R is measured from the actual fill.
+**Exits** are the 15m strategy's: R-multiple off the stop, or a level (`Swept candle far side` or
+`Last closed bias-candle extreme`), with the stop on the sweep candle's wick or mirrored from the
+target. R is measured from the actual fill.
 
-**On the chart** — the 4h bias shading stays on every timeframe. Everything else is the 1m layer and
-is drawn only on a chart faster than the sweep timeframe, and only for a candle that actually
-produced a trade: the **15m sweep candle boxed**, the level it took, the FVG / iFVG box, the MSS
-line, and the **risk/reward box** (which lives here rather than on the 15m chart). Annotating every
-1m gap would bury the setup in noise.
+**On the chart** — the bias shading stays on every timeframe. Everything else is the entry layer and
+is drawn only for a candle that actually produced a trade: the **sweep candle boxed**, the level it
+took, the FVG / iFVG box, the MSS line, and the **risk/reward box** (which lives here rather than on
+the sweep chart). The marks scale with the entry candle's width in chart bars. Annotating every gap
+would bury the setup in noise.
 
 ### `pinescript/mtf_15m_sweep_strategy.pine`
 MTF 15m Sweep — the plain version of the setup, and the baseline the confirmation variants should
