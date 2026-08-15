@@ -140,6 +140,42 @@ once it has fully closed.
 
 ## Strategies
 
+### `pinescript/mtf_1m_entry_strategy.pine`
+MTF 1m Entry — same 4h bias and 15m sweep as the 15m strategy, but the entry is **qualified on the
+1m chart** instead of firing on the sweep alone. **Run it on a 1-minute chart.**
+
+**The setup only becomes valid once the 15m sweep candle has closed.** The 1m trigger has to have
+occurred *inside* that candle, so it is judged in hindsight rather than live — which is what makes
+the model testable at all. Entry is market on the first 1m bar after the close.
+
+**Five trigger models**, each selectable on its own so they can be compared:
+
+| `Trigger required inside the sweep candle` | what has to happen on the 1m |
+| --- | --- |
+| `FVG` | a gap in the trade direction |
+| `iFVG` | a gap *against* the trade that price then closed through, inverting it |
+| `MSS` | a close beyond the last swing point |
+| `FVG + MSS` | both |
+| `iFVG + MSS` | both |
+
+**If the selected trigger is not present inside the sweep candle, no trade is taken** — the panel
+reports `no <model> in the sweep candle`. That is the whole point of the model.
+
+Triggers are recorded for **both directions** as the 15m candle develops, because which one matters
+is not known until the candle closes and the sweep is judged; recording only the current bias would
+lose the setup whenever the 4h flips mid-candle. The relevant side is snapshotted at the close,
+before the accumulators reset for the next candle.
+
+**Exits** are the 15m strategy's: R-multiple off the stop, or a level (the swept 15m candle's far
+side, or the last closed 4h extreme), with the stop on the 15m sweep candle's wick or mirrored from
+the target. R is measured from the actual fill.
+
+**On the chart** — the 4h bias shading stays on every timeframe. Everything else is the 1m layer and
+is drawn only on a chart faster than the sweep timeframe, and only for a candle that actually
+produced a trade: the **15m sweep candle boxed**, the level it took, the FVG / iFVG box, the MSS
+line, and the **risk/reward box** (which lives here rather than on the 15m chart). Annotating every
+1m gap would bury the setup in noise.
+
 ### `pinescript/mtf_15m_sweep_strategy.pine`
 MTF 15m Sweep — the plain version of the setup, and the baseline the confirmation variants should
 be measured against. **Run it on a 15-minute chart.** No 1m layer, no FVG, no MSS.
