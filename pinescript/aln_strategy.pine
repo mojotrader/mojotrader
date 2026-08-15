@@ -26,8 +26,14 @@
 //   - "Split (avg down)"     -> one unit at the 25% pullback + one unit at the 50% line.
 //   Contracts per level are inputs (default 2 / 2 / 1+1); optional %-of-capital or $-per-setup sizing overrides.
 //
-// STOP: always the OTHER EDGE of the range (long -> range low, short -> range high), shared by both units.
+// STOP (selectable per slot, shared by both units): a retracement from the broken edge - the opposite edge
+//   (100%), 75%, or 50% (mid-range). A stop has to sit deeper than the deepest entry, so a 50% stop is raised to
+//   75% when the entry itself uses the 50% line; the rules panel always shows what is actually in force.
 // TARGET: range edge (0%), or a 10% / 30% / 50% / 100% extension of the range beyond it - long and short apart.
+//
+// SEQUENCE FILTER (optional, per slot, off by default): only trade the direction the range built. Low made
+//   first -> longs only; high made first -> shorts only. It vetoes the direction the break chose rather than
+//   waiting for a second break, so a first break that disagrees with the sequence means no trade that day.
 //
 // SLOT PRIORITY (order-independent, so it works whichever sessions the two slots point at):
 //   - The first slot to EXECUTE owns the day; the other is not taken. (Optionally re-enabled once that trade
@@ -85,6 +91,10 @@ aMode     = input.string("Split (avg down): 25% + 50%", "A entry", options = ["A
 aQtyAll   = input.float(2, "  A contracts (single-level modes)", minval = 1, step = 1, group = gA)
 aQty25    = input.float(1, "  A contracts @ 25% (split mode)",   minval = 1, step = 1, group = gA)
 aQty50    = input.float(1, "  A contracts @ 50% (split mode)",   minval = 1, step = 1, group = gA)
+aSL       = input.string("Opposite edge (100%)", "A stop", options = ["Opposite edge (100%)", "75% retracement", "50% retracement (mid)"], group = gA,
+     tooltip = "How far back into the range the stop sits, measured as a retracement from the broken edge - the same scale the entries use. Opposite edge (100%): the far side of the range. 75%: three quarters of the way back (long: the 25% line; short: the 75% line). 50%: mid-range. A stop must sit deeper than the deepest entry, so with a 50% entry (that includes split mode) a 50% stop is raised to 75% automatically - the rules panel shows what is actually being used.")
+aSeq      = input.bool(false, "A sequence filter: low first = longs only, high first = shorts only", group = gA,
+     tooltip = "Looks at which extreme the range built FIRST. Low first -> only a long is allowed that day; high first -> only a short. The break still sets the direction as usual - this only vetoes it, so if the first side to break disagrees with the sequence, no trade is taken that day. If a single bar made both extremes the order is unknowable and the filter does not veto. Off by default.")
 aTpL      = input.string("Ext 30%", "A target - longs",  options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "Ext 100%", "HOD/LOD"], group = gA,
      tooltip = "Range edge = the broken level itself (0% extension). Ext X% = X% of the range projected beyond that edge. HOD/LOD = the day's extreme so far, measured from the day start.")
 aTpS      = input.string("Ext 30%", "A target - shorts", options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "Ext 100%", "HOD/LOD"], group = gA)
@@ -106,6 +116,10 @@ bMode     = input.string("Split (avg down): 25% + 50%", "B entry", options = ["A
 bQtyAll   = input.float(2, "  B contracts (single-level modes)", minval = 1, step = 1, group = gB)
 bQty25    = input.float(1, "  B contracts @ 25% (split mode)",   minval = 1, step = 1, group = gB)
 bQty50    = input.float(1, "  B contracts @ 50% (split mode)",   minval = 1, step = 1, group = gB)
+bSL       = input.string("Opposite edge (100%)", "B stop", options = ["Opposite edge (100%)", "75% retracement", "50% retracement (mid)"], group = gB,
+     tooltip = "As slot A: the stop as a retracement from the broken edge. A 50% stop is raised to 75% when the entry itself uses the 50% line (including split mode).")
+bSeq      = input.bool(false, "B sequence filter: low first = longs only, high first = shorts only", group = gB,
+     tooltip = "As slot A: low first -> longs only, high first -> shorts only. Vetoes the direction the break chose; it does not wait for a second break.")
 bTpL      = input.string("Ext 30%", "B target - longs",  options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "Ext 100%", "HOD/LOD"], group = gB)
 bTpS      = input.string("Ext 30%", "B target - shorts", options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "Ext 100%", "HOD/LOD"], group = gB)
 bBE       = input.bool(false, "B breakeven once the range edge is reclaimed", group = gB)
@@ -152,10 +166,21 @@ maxDayPct   = input.float(2.0, "Daily max loss (% of capital, 0 = off)", minval 
 // this, so the two inputs never both apply and switching mode changes nothing else.
 setupBudget = riskMode == "$ per setup" ? riskDlr : acctSize * (riskPct / 100.0)
 
+// ---- stop depth per slot, as a retracement from the broken edge -------------------------------------------
+// The stop has to sit DEEPER than the deepest entry or it is at (or the wrong side of) the fill. Modes that use
+// the 50% line - "All at 50%" and split - therefore raise a 50% stop to 75%. That is the only case that moves.
+f_slDepth(string s) => s == "50% retracement (mid)" ? 0.50 : s == "75% retracement" ? 0.75 : 1.00
+aEntryDepth = aMode == "All at 25% pullback" ? 0.25 : 0.50
+bEntryDepth = bMode == "All at 25% pullback" ? 0.25 : 0.50
+aSLd = math.max(f_slDepth(aSL), aEntryDepth == 0.50 ? 0.75 : 0.50)
+bSLd = math.max(f_slDepth(bSL), bEntryDepth == 0.50 ? 0.75 : 0.50)
+aSLtxt = (aSLd == 1.0 ? "opposite edge" : str.tostring(aSLd * 100, "#") + "% retracement") + (aSLd != f_slDepth(aSL) ? " (raised - entry at 50%)" : "")
+bSLtxt = (bSLd == 1.0 ? "opposite edge" : str.tostring(bSLd * 100, "#") + "% retracement") + (bSLd != f_slDepth(bSL) ? " (raised - entry at 50%)" : "")
+
 // ---------------------------------------------------------------- Filters
 gFilt     = "Filters"
 noDbl     = input.bool(true, "Skip double-break days (both range sides break)", group = gFilt,
-     tooltip = "If the side OPPOSITE the armed direction also breaks (long: price trades below the range low; short: above the range high), cancel the pending entry and take no trade from that slot. That opposite edge is also the stop, so a double break before the fill is a setup that would have stopped out anyway. On a long six-hour range (Asia) both sides break fairly often - turn this off to see those days.")
+     tooltip = "If the side OPPOSITE the armed direction also breaks (long: price trades below the range low; short: above the range high), cancel the pending entry and take no trade from that slot. With the stop at the opposite edge that break is a setup that would have stopped out anyway; with a 75% or 50% stop it would already have stopped out before getting there. On a long six-hour range (Asia) both sides break fairly often - turn this off to see those days.")
 
 // ---------------------------------------------------------------- Automation (PickMyTrade webhook -> Tradovate)
 grpA      = "Automation - PickMyTrade"
@@ -263,8 +288,11 @@ f_tp(int d, float rH, float rL, float rg, float dHi, float dLo, string tpL, stri
     ext = t == "Ext 10%" ? 0.10 : t == "Ext 30%" ? 0.30 : t == "Ext 50%" ? 0.50 : t == "Ext 100%" ? 1.00 : 0.0
     d == 1 ? (t == "HOD/LOD" ? dHi : rH + ext * rg) : (t == "HOD/LOD" ? dLo : rL - ext * rg)
 
+// a level inside the range at a given RETRACEMENT DEPTH from the broken edge - the scale everything here uses.
+// long (broke the high): depth 0 = the high, 0.25 = the 25% pullback, 1 = the range low. Short is the mirror.
+f_lvl(int d, float rL, float rg, float depth) => rL + (d == 1 ? 1.0 - depth : depth) * rg
 // the two entry levels of a range, in the armed direction. 25% = a 25% retracement from the broken edge.
-f_p25(int d, float rL, float rg) => rL + (d == 1 ? 0.75 : 0.25) * rg
+f_p25(int d, float rL, float rg) => f_lvl(d, rL, rg, 0.25)
 f_p50(float rL, float rg) => rL + 0.50 * rg
 
 // Did price trade to a level? isTp orients it as a target (above for a long), else as a stop (below for a long).
@@ -443,6 +471,8 @@ var bool  a_closed = false
 var bool  a_dead = false          // armed but handed its seat to the other slot before it filled
 var bool  a_oppBroke = false
 var bool  a_missed = false        // its entry level traded through while the other slot held the seat
+var int   a_rHbar = na            // bar that made the range high / low - the sequence filter reads these
+var int   a_rLbar = na
 var int   a_fillBar = na          // bar the first unit filled
 var int   a_rdyBar = na           // bar its range completed
 var int   a_armBar = na           // bar it armed - the hand-over compares these, so only the slot that armed
@@ -470,6 +500,8 @@ var bool  b_closed = false
 var bool  b_dead = false
 var bool  b_oppBroke = false
 var bool  b_missed = false
+var int   b_rHbar = na
+var int   b_rLbar = na
 var int   b_fillBar = na
 var int   b_rdyBar = na
 var int   b_armBar = na
@@ -497,6 +529,8 @@ if newDay
     a_dead := false
     a_oppBroke := false
     a_missed := false
+    a_rHbar := na
+    a_rLbar := na
     a_fillBar := na
     a_rdyBar := na
     a_armBar := na
@@ -522,14 +556,21 @@ if newDay
     b_dead := false
     b_oppBroke := false
     b_missed := false
+    b_rHbar := na
+    b_rLbar := na
     b_fillBar := na
     b_rdyBar := na
     b_armBar := na
 
 // ================================================================ SLOT A ENGINE
+// a strict > / < keeps the FIRST bar that made each extreme, which is what the sequence filter asks about
 if a_inR
-    a_rH := na(a_rH) ? high : math.max(a_rH, high)
-    a_rL := na(a_rL) ? low  : math.min(a_rL, low)
+    if na(a_rH) or high > a_rH
+        a_rH := high
+        a_rHbar := bar_index
+    if na(a_rL) or low < a_rL
+        a_rL := low
+        a_rLbar := bar_index
 if a_rDone and not na(a_rH) and a_rH > a_rL
     a_rng := a_rH - a_rL
     a_rdy := true
@@ -542,7 +583,11 @@ if a_rdy and not a_broke and (a_brkUp or a_brkDn)
     // a bar that engulfs the whole range breaks both sides at once - take the side it closed on
     ad = a_brkUp and a_brkDn ? (close >= a_rL + 0.5 * a_rng ? 1 : -1) : a_brkUp ? 1 : -1
     a_broke := true
-    if (ad == 1 and aLong) or (ad == -1 and aShort)
+    // sequence filter: low built first -> longs only, high first -> shorts only. A single bar holding both
+    // extremes leaves the order unknown, so it does not veto. The break still picks the direction; this only
+    // says yes or no to it, which is why a disagreeing break means no trade that day.
+    aSeqOK = not aSeq or na(a_rHbar) or na(a_rLbar) or a_rHbar == a_rLbar or (ad == 1 ? a_rLbar < a_rHbar : a_rHbar < a_rLbar)
+    if ((ad == 1 and aLong) or (ad == -1 and aShort)) and aSeqOK
         a_dir := ad
         a_armBar := bar_index
         ap25 = f_p25(ad, a_rL, a_rng)
@@ -550,7 +595,7 @@ if a_rdy and not a_broke and (a_brkUp or a_brkDn)
         aspl = aMode == "Split (avg down): 25% + 50%"
         a_e1 := aMode == "All at 50% pullback" ? ap50 : ap25
         a_e2 := aspl ? ap50 : na
-        a_zstop := ad == 1 ? a_rL : a_rH          // stop = the other edge of the range
+        a_zstop := f_lvl(ad, a_rL, a_rng, aSLd)   // stop at the selected retracement depth
         abud  = setupBudget / (aspl ? 2 : 1)
         aupct = abud / acctSize * 100.0
         a_q1 := useRiskSize ? f_size(abud, math.abs(a_e1 - a_zstop), aupct) : (aspl ? aQty25 : aQtyAll)
@@ -667,7 +712,7 @@ if a_firstFill and not na(a_rng)
     aL_tp30  := a_dir == 1 ? a_rH + 0.30*a_rng : a_rL - 0.30*a_rng
     aL_tp50  := a_dir == 1 ? a_rH + 0.50*a_rng : a_rL - 0.50*a_rng
     aL_tp100 := a_dir == 1 ? a_rH + 1.00*a_rng : a_rL - 1.00*a_rng
-    aL_sl    := a_dir == 1 ? a_rL : a_rH
+    aL_sl    := f_lvl(a_dir, a_rL, a_rng, aSLd)
     aR_tp0   := false
     aR_tp10  := false
     aR_tp30  := false
@@ -712,7 +757,7 @@ if a_broke and not a_broke[1] and a_dir != 0 and not na(a_rng) and a_rL > 0
     array.set(aP_lv, 2, a_dir == 1 ? a_rH + 0.30*a_rng : a_rL - 0.30*a_rng)
     array.set(aP_lv, 3, a_dir == 1 ? a_rH + 0.50*a_rng : a_rL - 0.50*a_rng)
     array.set(aP_lv, 4, a_dir == 1 ? a_rH + 1.00*a_rng : a_rL - 1.00*a_rng)
-    array.set(aP_lv, 5, a_dir == 1 ? a_rL : a_rH)
+    array.set(aP_lv, 5, f_lvl(a_dir, a_rL, a_rng, aSLd))
     for k = 0 to 5
         array.set(aP_h25, k, false)
         array.set(aP_h50, k, false)
@@ -743,8 +788,12 @@ if aP_act
 
 // ================================================================ SLOT B ENGINE
 if b_inR
-    b_rH := na(b_rH) ? high : math.max(b_rH, high)
-    b_rL := na(b_rL) ? low  : math.min(b_rL, low)
+    if na(b_rH) or high > b_rH
+        b_rH := high
+        b_rHbar := bar_index
+    if na(b_rL) or low < b_rL
+        b_rL := low
+        b_rLbar := bar_index
 if b_rDone and not na(b_rH) and b_rH > b_rL
     b_rng := b_rH - b_rL
     b_rdy := true
@@ -756,7 +805,8 @@ b_brkDn = b_rdy and (bBreak == "Wick (touch)" ? low  <= b_rL : close < b_rL)
 if b_rdy and not b_broke and (b_brkUp or b_brkDn)
     bd = b_brkUp and b_brkDn ? (close >= b_rL + 0.5 * b_rng ? 1 : -1) : b_brkUp ? 1 : -1
     b_broke := true
-    if (bd == 1 and bLong) or (bd == -1 and bShort)
+    bSeqOK = not bSeq or na(b_rHbar) or na(b_rLbar) or b_rHbar == b_rLbar or (bd == 1 ? b_rLbar < b_rHbar : b_rHbar < b_rLbar)
+    if ((bd == 1 and bLong) or (bd == -1 and bShort)) and bSeqOK
         b_dir := bd
         b_armBar := bar_index
         bp25 = f_p25(bd, b_rL, b_rng)
@@ -764,7 +814,7 @@ if b_rdy and not b_broke and (b_brkUp or b_brkDn)
         bspl = bMode == "Split (avg down): 25% + 50%"
         b_e1 := bMode == "All at 50% pullback" ? bp50 : bp25
         b_e2 := bspl ? bp50 : na
-        b_zstop := bd == 1 ? b_rL : b_rH          // stop = the other edge of the range
+        b_zstop := f_lvl(bd, b_rL, b_rng, bSLd)   // stop at the selected retracement depth
         bbud  = setupBudget / (bspl ? 2 : 1)
         bupct = bbud / acctSize * 100.0
         b_q1 := useRiskSize ? f_size(bbud, math.abs(b_e1 - b_zstop), bupct) : (bspl ? bQty25 : bQtyAll)
@@ -890,7 +940,7 @@ if b_firstFill and not na(b_rng)
     bL_tp30  := b_dir == 1 ? b_rH + 0.30*b_rng : b_rL - 0.30*b_rng
     bL_tp50  := b_dir == 1 ? b_rH + 0.50*b_rng : b_rL - 0.50*b_rng
     bL_tp100 := b_dir == 1 ? b_rH + 1.00*b_rng : b_rL - 1.00*b_rng
-    bL_sl    := b_dir == 1 ? b_rL : b_rH
+    bL_sl    := f_lvl(b_dir, b_rL, b_rng, bSLd)
     bR_tp0   := false
     bR_tp10  := false
     bR_tp30  := false
@@ -935,7 +985,7 @@ if b_broke and not b_broke[1] and b_dir != 0 and not na(b_rng) and b_rL > 0
     array.set(bP_lv, 2, b_dir == 1 ? b_rH + 0.30*b_rng : b_rL - 0.30*b_rng)
     array.set(bP_lv, 3, b_dir == 1 ? b_rH + 0.50*b_rng : b_rL - 0.50*b_rng)
     array.set(bP_lv, 4, b_dir == 1 ? b_rH + 1.00*b_rng : b_rL - 1.00*b_rng)
-    array.set(bP_lv, 5, b_dir == 1 ? b_rL : b_rH)
+    array.set(bP_lv, 5, f_lvl(b_dir, b_rL, b_rng, bSLd))
     for k = 0 to 5
         array.set(bP_h25, k, false)
         array.set(bP_h50, k, false)
@@ -1124,7 +1174,7 @@ f_hhmm(int h, int m) => str.tostring(h) + ":" + (m < 10 ? "0" : "") + str.tostri
 f_modeTxt(string md, float qAll, float q25, float q50) => md == "All at 25% pullback" ? str.tostring(qAll, "#.#") + " @ 25%" : md == "All at 50% pullback" ? str.tostring(qAll, "#.#") + " @ 50%" : str.tostring(q25, "#.#") + " @ 25% + " + str.tostring(q50, "#.#") + " @ 50%"
 var table info = na
 if showInfo and barstate.islast
-    info := table.new(position.top_right, 1, 12, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
+    info := table.new(position.top_right, 1, 13, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
     table.cell(info, 0, 0,  "ALN BREAK-THEN-PULLBACK",                                      text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 1,  "Day " + f_hhmm(dayStartH, dayStartM) + " -> flat " + f_hhmm(flatH, flatM) + "  (" + tz + ")", text_color = color.white, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 2,  "Sessions: A " + asiaSess + " | L " + londonSess + " | NY " + nySess, text_color = color.silver, text_size = size.small, text_halign = text.align_left)
@@ -1133,7 +1183,8 @@ if showInfo and barstate.islast
     table.cell(info, 0, 5,  "Slot B: " + (runB ? bPick + " " + bSess : "off"),               text_color = color.teal,   text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 6,  "   entry " + f_modeTxt(bMode, bQtyAll, bQty25, bQty50) + " | TP L " + bTpL + " / S " + bTpS, text_color = color.teal,   text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 7,  "ARM on the break: high breaks = LONG, low = SHORT",             text_color = color.white,  text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 8,  "Stop: the OTHER edge of the range (both units)",                text_color = color.white,  text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 8,  "Stop A: " + aSLtxt + "  |  B: " + bSLtxt,                       text_color = color.white,  text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 12, "Sequence filter A: " + (aSeq ? "on" : "off") + "  |  B: " + (bSeq ? "on" : "off") + (aSeq or bSeq ? "  (low 1st = long only)" : ""), text_color = aSeq or bSeq ? color.yellow : color.gray, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 9,  "First slot to EXECUTE owns the day" + (allowBoth ? " (until it closes)" : ""), text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 10, "Unfilled slot cancelled: " + str.lower(handOver),               text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 11, (noDbl ? "Skip double-break days | " : "") + "Odds in the table; > = live row", text_color = color.aqua, text_size = size.small, text_halign = text.align_left)
