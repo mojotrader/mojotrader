@@ -1,0 +1,370 @@
+//@version=6
+// Session Reversal Profiler — measures the "one session takes a side of the previous session's
+// range and travels to the other side" idea, live, on whatever chart it is loaded on.
+//
+//   Asia range   -> London is the driver
+//   London range -> New York is the driver
+//
+// For every completed driver session it records:
+//   PATTERN     Engulf (took both sides) | Inside (neither) | Partial Up (high only) | Partial Down (low only)
+//   FIRST       which side was taken first
+//   REVERSED    whether the OPPOSITE side was then reached before the session ended
+//   FADE R      a simulated fade of that sweep, in R
+//
+// The fade is simulated the way it would actually be traded, with no lookahead:
+//   entry   the CLOSE of the first bar that trades beyond the level AND closes back inside it
+//           (a bar that closes beyond is a break, not a sweep, and is skipped)
+//   stop    that same bar's extreme, plus an optional buffer — both already printed at entry
+//   target  the opposite side of the range
+//   a bar that touches the stop and the target together is scored a LOSS
+//
+// The panel accumulates these over the whole loaded history, so the sample size is whatever
+// the chart has bars for — check the "days" figure before reading anything into the rest.
+//
+// WHAT THIS MEASURED ON MNQ 1h, Jan 2023 - Aug 2026 (see research/session_reversal_study.py):
+//   London took a side of Asia on 94% of days but reached the far side on only 27%.
+//   NY took a side of London on 99.8% of days and reached the far side on 49% — a coin flip.
+//   Fading the sweep: London +0.07 R (95% CI -0.13 to +0.31, i.e. indistinguishable from zero,
+//   and 79% of the total came from ONE trade out of 406). NY -0.17 R, reliably negative.
+//   Holding from the sweep to the session close with no stop drifted +1.7 pts on London and
+//   -4.7 pts on NY, against a do-nothing session drift of +4.6 and +5.5 pts.
+//   There was no edge in the concept on that data. This tool exists so the same question can
+//   be asked of another symbol, another period, or another set of session windows — the
+//   numbers below are computed from YOUR chart, not baked in.
+
+indicator("Session Reversal Profiler", "Session Reversal", overlay = true,
+     max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
+
+// ---------------------------------------------------------------- Inputs
+gS      = "Sessions"
+tz      = input.string("America/New_York", "Timezone", group = gS)
+asiaTxt = input.session("2000-0200", "Asia",   group = gS)
+lonTxt  = input.session("0200-0800", "London", group = gS)
+nyTxt   = input.session("0800-1600", "New York", group = gS,
+     tooltip = "Defaults are the ALN profiler's windows. They must not overlap, or the 'driver takes the previous range' question stops meaning anything.")
+
+gT      = "Fade simulation"
+bufTk   = input.float(0, "Stop buffer beyond the sweep wick (ticks)", 0, step = 1, group = gT)
+reqRej  = input.bool(true, "Require the sweep bar to close back inside the range", group = gT,
+     tooltip = "On: only a rejection counts, which is the actual setup. Off: any bar that trades through the level is entered on its close, breaks included - useful for seeing how much the rejection filter is worth.")
+minRR   = input.float(0, "Skip the trade if less than this much R is available", 0, step = 0.25, group = gT)
+
+gV      = "Visuals"
+showBox = input.bool(true, "Draw the session ranges", group = gV)
+showLvl = input.bool(true, "Extend the range levels across the driver session", group = gV)
+showMk  = input.bool(true, "Mark the sweep and the reversal", group = gV)
+showTbl = input.bool(true, "Show the statistics panel", group = gV)
+tblPos  = input.string("Top Right", "Panel position",
+     options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left", "Middle Right"], group = gV)
+showCond= input.bool(true, "Add the NY-conditioned-on-London breakdown", group = gV)
+asiaCol = input.color(#ff9800, "Asia",     group = gV, inline = "c")
+lonCol  = input.color(#2157f3, "London",   group = gV, inline = "c")
+nyCol   = input.color(#ff0037, "New York", group = gV, inline = "c")
+boxAlpha= input.int(92, "Range transparency", 50, 99, group = gV)
+
+buf = bufTk * syminfo.mintick
+
+// ---------------------------------------------------------------- Session plumbing
+f_on(string s) => not na(time(timeframe.period, s, tz))
+asiaOn = f_on(asiaTxt)
+lonOn  = f_on(lonTxt)
+nyOn   = f_on(nyTxt)
+
+// A live session's running high/low, finalised on the bar after it ends.
+type Sess
+    float hi = na
+    float lo = na
+    int   startBar = na
+    float doneHi = na
+    float doneLo = na
+    bool  haveDone = false
+    box   bx = na
+
+method step(Sess s, bool on, bool wasOn, color col, string name) =>
+    if on and not wasOn
+        s.hi := high
+        s.lo := low
+        s.startBar := bar_index
+        if showBox
+            s.bx := box.new(bar_index, high, bar_index, low, xloc = xloc.bar_index,
+                 bgcolor = color.new(col, boxAlpha), border_color = color.new(col, 40),
+                 border_style = line.style_dotted,
+                 text = name, text_size = size.tiny, text_color = color.new(col, 20),
+                 text_halign = text.align_left, text_valign = text.align_top)
+    else if on
+        s.hi := math.max(s.hi, high)
+        s.lo := math.min(s.lo, low)
+        if showBox and not na(s.bx)
+            s.bx.set_top(s.hi)
+            s.bx.set_rightbottom(bar_index, s.lo)
+    else if wasOn
+        s.doneHi := s.hi
+        s.doneLo := s.lo
+        s.haveDone := true
+    s
+
+var Sess asia = Sess.new()
+var Sess lon  = Sess.new()
+var Sess ny   = Sess.new()
+asia.step(asiaOn, asiaOn[1], asiaCol, "Asia")
+lon.step(lonOn, lonOn[1], lonCol, "London")
+ny.step(nyOn, nyOn[1], nyCol, "New York")
+
+// ---------------------------------------------------------------- The pair tracker
+// One of these per relationship. It watches a driver session against a range and simulates
+// the fade. Methods mutate the object, which is how this sidesteps Pine's rule that a
+// function cannot assign to a global.
+type Pair
+    float hi = na
+    float lo = na
+    bool  live = false
+    int   first = 0             // +1 took the high first, -1 took the low first
+    int   firstBar = na
+    bool  tookHi = false
+    bool  tookLo = false
+    bool  reached = false       // got to the opposite side after the first
+    bool  ambig = false         // one bar pierced both sides; intrabar order unknowable
+    int   state = 0             // 0 no trade, 1 open, 2 closed
+    int   dir = 0
+    float entry = na
+    float stop = na
+    float tgt = na
+    float r = na
+    line  hiLn = na
+    line  loLn = na
+
+method arm(Pair p, float hi, float lo, color col) =>
+    p.hi := hi
+    p.lo := lo
+    p.live := not na(hi) and not na(lo)
+    p.first := 0
+    p.firstBar := na
+    p.tookHi := false
+    p.tookLo := false
+    p.reached := false
+    p.ambig := false
+    p.state := 0
+    p.dir := 0
+    p.entry := na
+    p.stop := na
+    p.tgt := na
+    p.r := na
+    if p.live and showLvl
+        p.hiLn := line.new(bar_index, hi, bar_index, hi, xloc = xloc.bar_index,
+             color = color.new(col, 25), width = 1, style = line.style_dashed)
+        p.loLn := line.new(bar_index, lo, bar_index, lo, xloc = xloc.bar_index,
+             color = color.new(col, 25), width = 1, style = line.style_dashed)
+    p
+
+method step(Pair p, color col) =>
+    if p.live
+        if showLvl and not na(p.hiLn)
+            p.hiLn.set_x2(bar_index)
+            p.loLn.set_x2(bar_index)
+        up = high > p.hi
+        dn = low < p.lo
+        p.tookHi := p.tookHi or up
+        p.tookLo := p.tookLo or dn
+
+        if p.first == 0 and (up or dn)
+            if up and dn
+                p.ambig := true
+                p.first := close < open ? 1 : -1     // unknowable; assume it went up first
+                p.reached := true
+            else
+                p.first := up ? 1 : -1
+            p.firstBar := bar_index
+
+            // rejection entry on this bar's close
+            backIn = p.first == 1 ? close <= p.hi : close >= p.lo
+            if backIn or not reqRej
+                d = p.first == 1 ? -1 : 1
+                e = close
+                st = p.first == 1 ? high + buf : low - buf
+                tg = p.first == 1 ? p.lo : p.hi
+                risk = math.abs(e - st)
+                rew = (tg - e) * d
+                if risk > 0 and rew > 0 and rew / risk >= minRR
+                    p.dir := d
+                    p.entry := e
+                    p.stop := st
+                    p.tgt := tg
+                    p.state := 1
+            if showMk
+                label.new(bar_index, p.first == 1 ? high : low,
+                     p.first == 1 ? "▼" : "▲", xloc = xloc.bar_index,
+                     style = p.first == 1 ? label.style_label_down : label.style_label_up,
+                     color = color.new(col, 70), textcolor = col, size = size.tiny,
+                     tooltip = "took the " + (p.first == 1 ? "high" : "low") + " first")
+        else if p.first != 0 and not p.reached
+            if (p.first == 1 and dn) or (p.first == -1 and up)
+                p.reached := true
+                if showMk
+                    label.new(bar_index, p.first == 1 ? low : high,
+                         "✔", xloc = xloc.bar_index,
+                         style = p.first == 1 ? label.style_label_up : label.style_label_down,
+                         color = color.new(color.gray, 70), textcolor = color.silver,
+                         size = size.tiny, tooltip = "reached the opposite side")
+
+        // the trade resolves from the bar AFTER the fill
+        if p.state == 1 and bar_index > p.firstBar
+            hitStop = p.dir == -1 ? high >= p.stop : low <= p.stop
+            hitTgt = p.dir == -1 ? low <= p.tgt : high >= p.tgt
+            if hitStop
+                p.r := -1.0
+                p.state := 2
+            else if hitTgt
+                p.r := math.abs(p.tgt - p.entry) / math.abs(p.entry - p.stop)
+                p.state := 2
+    p
+
+method close_out(Pair p) =>
+    // called on the first bar after the driver session ends; close[1] ended it
+    if p.state == 1
+        p.r := (close[1] - p.entry) * p.dir / math.abs(p.entry - p.stop)
+        p.state := 2
+    p.live := false
+    p
+
+method pattern(Pair p) =>
+    p.tookHi and p.tookLo ? 0 : not p.tookHi and not p.tookLo ? 1 : p.tookHi ? 2 : 3
+
+// ---------------------------------------------------------------- Statistics
+// index 0 = London vs Asia, 1 = NY vs London
+var array<float> nDays  = array.from(0.0, 0.0)
+var array<float> nTook  = array.from(0.0, 0.0)
+var array<float> nReach = array.from(0.0, 0.0)
+var array<float> nAmbig = array.from(0.0, 0.0)
+var array<float> nTrade = array.from(0.0, 0.0)
+var array<float> nWin   = array.from(0.0, 0.0)
+var array<float> sumR   = array.from(0.0, 0.0)
+var array<float> nPat   = array.from(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)  // 4 per pair
+// NY conditioned on what London did to Asia: 4 buckets
+var array<float> cN     = array.from(0.0, 0.0, 0.0, 0.0)
+var array<float> cReach = array.from(0.0, 0.0, 0.0, 0.0)
+var array<float> cTrade = array.from(0.0, 0.0, 0.0, 0.0)
+var array<float> cSumR  = array.from(0.0, 0.0, 0.0, 0.0)
+var int lonPatLast = -1
+
+f_bump(array<float> a, int i, float v) => array.set(a, i, array.get(a, i) + v)
+
+method commit(Pair p, int k) =>
+    f_bump(nDays, k, 1)
+    f_bump(nPat, k * 4 + p.pattern(), 1)
+    if p.first != 0
+        f_bump(nTook, k, 1)
+        if p.reached
+            f_bump(nReach, k, 1)
+        if p.ambig
+            f_bump(nAmbig, k, 1)
+    if p.state == 2 and not na(p.r)
+        f_bump(nTrade, k, 1)
+        f_bump(sumR, k, p.r)
+        if p.r > 0
+            f_bump(nWin, k, 1)
+    p
+
+var Pair pLon = Pair.new()
+var Pair pNy  = Pair.new()
+
+// London vs the Asia range
+if lonOn and not lonOn[1]
+    pLon.arm(asia.haveDone ? asia.doneHi : na, asia.haveDone ? asia.doneLo : na, lonCol)
+if lonOn
+    pLon.step(lonCol)
+if not lonOn and lonOn[1] and pLon.live
+    pLon.close_out()
+    pLon.commit(0)
+    lonPatLast := pLon.pattern()
+
+// New York vs the London range
+if nyOn and not nyOn[1]
+    pNy.arm(lon.haveDone ? lon.doneHi : na, lon.haveDone ? lon.doneLo : na, nyCol)
+if nyOn
+    pNy.step(nyCol)
+if not nyOn and nyOn[1] and pNy.live
+    pNy.close_out()
+    pNy.commit(1)
+    if lonPatLast >= 0
+        f_bump(cN, lonPatLast, 1)
+        if pNy.reached
+            f_bump(cReach, lonPatLast, 1)
+        if pNy.state == 2 and not na(pNy.r)
+            f_bump(cTrade, lonPatLast, 1)
+            f_bump(cSumR, lonPatLast, pNy.r)
+
+// ---------------------------------------------------------------- Panel
+f_pct(float a, float b) => b > 0 ? str.tostring(100 * a / b, "#.#") + "%" : "—"
+f_r(float s, float n) => n > 0 ? str.tostring(s / n, "+#.###") : "—"
+
+f_pos(string s) =>
+    s == "Top Left" ? position.top_left : s == "Bottom Right" ? position.bottom_right :
+     s == "Bottom Left" ? position.bottom_left : s == "Middle Right" ? position.middle_right :
+     position.top_right
+
+var table tb = table.new(f_pos(tblPos), 4, 14, border_width = 1, frame_width = 1,
+     frame_color = color.new(color.gray, 50), bgcolor = color.new(#161616, 10))
+
+f_hdr(int r, string t) =>
+    table.cell(tb, 0, r, t, text_color = color.new(color.gray, 20), text_size = size.tiny,
+         text_halign = text.align_left)
+
+if showTbl and barstate.islast
+    table.clear(tb, 0, 0, 3, 13)
+    table.cell(tb, 0, 0, "Session reversal", text_color = color.white, text_size = size.tiny,
+         text_halign = text.align_left, bgcolor = color.new(color.gray, 60))
+    table.cell(tb, 1, 0, "London/Asia", text_color = lonCol, text_size = size.tiny)
+    table.cell(tb, 2, 0, "NY/London", text_color = nyCol, text_size = size.tiny)
+    table.cell(tb, 3, 0, "", text_size = size.tiny)
+
+    rows = array.from("sessions counted", "took a side", "→ reached the far side",
+         "Engulf", "Inside", "Partial Up", "Partial Down",
+         "fade trades", "win rate", "expectancy", "total R")
+    for i = 0 to array.size(rows) - 1
+        f_hdr(i + 1, array.get(rows, i))
+
+    for k = 0 to 1
+        d = array.get(nDays, k)
+        t = array.get(nTook, k)
+        n = array.get(nTrade, k)
+        col = k + 1
+        sz = size.tiny
+        table.cell(tb, col, 1, str.tostring(d, "#"), text_color = color.white, text_size = sz)
+        table.cell(tb, col, 2, f_pct(t, d), text_color = color.silver, text_size = sz)
+        table.cell(tb, col, 3, f_pct(array.get(nReach, k), t), text_color = color.white, text_size = sz)
+        for q = 0 to 3
+            table.cell(tb, col, 4 + q, f_pct(array.get(nPat, k * 4 + q), d),
+                 text_color = color.silver, text_size = sz)
+        table.cell(tb, col, 8, str.tostring(n, "#"), text_color = color.silver, text_size = sz)
+        table.cell(tb, col, 9, f_pct(array.get(nWin, k), n), text_color = color.silver, text_size = sz)
+        e = n > 0 ? array.get(sumR, k) / n : na
+        table.cell(tb, col, 10, f_r(array.get(sumR, k), n),
+             text_color = na(e) ? color.gray : e > 0 ? #089981 : #f23645, text_size = sz)
+        table.cell(tb, col, 11, n > 0 ? str.tostring(array.get(sumR, k), "+#.#") : "—",
+             text_color = color.silver, text_size = sz)
+
+    // a merged footnote row: every cell in the merged span has to exist first
+    for c = 0 to 3
+        table.cell(tb, c, 12, "", text_size = size.tiny)
+    table.merge_cells(tb, 0, 12, 3, 12)
+    table.cell_set_text(tb, 0, 12, "\"reached the far side\" is a % of the days a side was taken")
+    table.cell_set_text_color(tb, 0, 12, color.new(color.gray, 20))
+    table.cell_set_text_halign(tb, 0, 12, text.align_left)
+
+    if showCond
+        for c = 0 to 3
+            table.cell(tb, c, 13, "", text_size = size.tiny)
+        table.merge_cells(tb, 0, 13, 3, 13)
+        table.cell_set_text(tb, 0, 13, "NY far side | fade exp, by what London did —  " +
+             "Engulf " + f_pct(array.get(cReach, 0), array.get(cN, 0)) + " / " + f_r(array.get(cSumR, 0), array.get(cTrade, 0)) +
+             "   Inside " + f_pct(array.get(cReach, 1), array.get(cN, 1)) + " / " + f_r(array.get(cSumR, 1), array.get(cTrade, 1)) +
+             "   P.Up " + f_pct(array.get(cReach, 2), array.get(cN, 2)) + " / " + f_r(array.get(cSumR, 2), array.get(cTrade, 2)) +
+             "   P.Dn " + f_pct(array.get(cReach, 3), array.get(cN, 3)) + " / " + f_r(array.get(cSumR, 3), array.get(cTrade, 3)))
+        table.cell_set_text_color(tb, 0, 13, color.new(color.gray, 20))
+        table.cell_set_text_halign(tb, 0, 13, text.align_left)
+
+// this needs intraday bars it can resolve sessions from
+if barstate.islast and (timeframe.isdwm or timeframe.in_seconds() > 3600)
+    label.new(bar_index, high, "Run this on an intraday chart of 1h or faster — sessions cannot be resolved from " + timeframe.period,
+         xloc = xloc.bar_index, style = label.style_label_down,
+         color = color.new(color.orange, 10), textcolor = color.white, size = size.small)

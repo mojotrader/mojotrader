@@ -1,0 +1,354 @@
+//@version=6
+// Session Reversal Strategy — trade the "a session takes one side of the previous session's
+// range and travels to the other side" idea.
+//
+//   Asia range   -> London is the driver
+//   London range -> New York is the driver
+//
+// READ THIS BEFORE TRADING IT. The concept was measured on MNQ 1h, Jan 2023 - Aug 2026
+// (research/session_reversal_study.py in this repo) and NO EDGE WAS FOUND:
+//
+//   London took a side of Asia on 94% of days; it reached the far side on 27%.
+//   NY took a side of London on 99.8% of days; it reached the far side on 49% — a coin flip.
+//   Fading the London sweep returned +0.07 R per trade over 406 trades, with a 95% bootstrap
+//     confidence interval of -0.13 to +0.31. Dropping the single best trade took it to +0.02;
+//     dropping the top three made it negative. 79% of the profit was one trade.
+//   Fading the NY sweep returned -0.17 R, negative in all four years and in every session-window
+//     variant tested.
+//   Going WITH the sweep was worse still, about -0.30 R.
+//   Holding from the sweep to the session close with NO stop drifted +1.7 pts (London) and
+//     -4.7 pts (NY), against a do-nothing session drift of +4.6 and +5.5 pts. There is no
+//     directional signal underneath the trade mechanics.
+//
+// The high hit rates the session profilers quote are real, and they are base rates, not edges:
+// NY takes a side of London almost every single day, so "98% NY takes London high or low"
+// predicts nothing. The 44-49% follow-through is a coin flip with commission on top.
+//
+// This file exists so the idea can be tested rather than argued about — on another symbol,
+// another period, or another set of windows. Every knob the study varied is an input. If a
+// configuration shows an edge here, check the trade count and how much of the total comes
+// from the best few trades before believing it.
+//
+// Mechanics, with no lookahead:
+//   entry   the CLOSE of the first bar that trades beyond the level. Optionally that bar must
+//           close back INSIDE the range - a bar closing beyond is a break, not a sweep.
+//   stop    that bar's own extreme plus a buffer (already printed), or a fixed tick distance.
+//   target  a fraction of the way back across the range, or an R multiple of the stop.
+//   orders fill on the signal bar's close (process_orders_on_close), matching the study.
+
+strategy("Session Reversal Strategy", "Session Reversal", overlay = true,
+     max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500,
+     initial_capital = 100000, pyramiding = 0, process_orders_on_close = true,
+     default_qty_type = strategy.fixed, default_qty_value = 1,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
+
+// ---------------------------------------------------------------- Inputs
+gS      = "1) Sessions"
+tz      = input.string("America/New_York", "Timezone", group = gS)
+asiaTxt = input.session("2000-0200", "Asia",     group = gS)
+lonTxt  = input.session("0200-0800", "London",   group = gS)
+nyTxt   = input.session("0800-1600", "New York", group = gS,
+     tooltip = "The ALN profiler's windows. They must not overlap.")
+
+gW      = "2) What to trade"
+doLon   = input.bool(true,  "London against the Asia range",   group = gW)
+doNy    = input.bool(false, "New York against the London range", group = gW,
+     tooltip = "Off by default: fading the NY sweep of London tested reliably negative, -0.17 R per trade across every window variant and every year.")
+sideMode= input.string("Fade the sweep", "Direction",
+     options = ["Fade the sweep", "Go with the sweep"], group = gW,
+     tooltip = "Fade: a sweep of the high is a short. Go with: a sweep of the high is a long. Going with tested worse, about -0.30 R.")
+allowL  = input.bool(true, "Allow longs",  group = gW)
+allowS  = input.bool(true, "Allow shorts", group = gW)
+
+gE      = "3) Entry"
+reqRej  = input.bool(true, "Require the sweep bar to close back inside the range", group = gE,
+     tooltip = "On: only a rejection counts. Off: any bar that trades through the level is entered on its close, breaks included.")
+maxBar  = input.int(0, "Only take a sweep in the first N bars of the session (0 = any)", 0, 50, group = gE,
+     tooltip = "A sweep on the last bar of a session has no time left to travel anywhere.")
+maxDepth= input.float(0, "Skip if the sweep went deeper than this % of the range (0 = off)", 0, step = 5, group = gE,
+     tooltip = "Deep sweeps behaved more like breaks. On MNQ the shallowest quartile was the only one that did not lose.")
+minRR   = input.float(0, "Skip if less than this much R is available to the target", 0, step = 0.25, group = gE)
+
+gX      = "4) Exit"
+slMode  = input.string("Sweep bar wick", "Stop", options = ["Sweep bar wick", "Fixed ticks"], group = gX)
+bufTk   = input.float(0,  "  Buffer beyond the wick (ticks)", 0, step = 1, group = gX)
+slTk    = input.float(40, "  Fixed stop (ticks)", 1, step = 4, group = gX)
+tpMode  = input.string("Far side of the range", "Target",
+     options = ["25% back across", "Midpoint", "75% back across", "Far side of the range",
+                "Far side + 50%", "1R", "2R", "3R"], group = gX,
+     tooltip = "On MNQ every partial target was WORSE than the far side: the concept has no short-horizon directional edge, so shrinking the target only shrinks the winners while the stop stays where it is.")
+beAt    = input.string("Off", "Move the stop to breakeven at", options = ["Off", "1R", "2R"], group = gX)
+flatEnd = input.bool(true, "Close the position when the driver session ends", group = gX)
+
+gF      = "5) Filters"
+useDow  = input.bool(false, "Filter by weekday", group = gF)
+dMon    = input.bool(true, "Mon", group = gF, inline = "d")
+dTue    = input.bool(true, "Tue", group = gF, inline = "d")
+dWed    = input.bool(true, "Wed", group = gF, inline = "d")
+dThu    = input.bool(true, "Thu", group = gF, inline = "d")
+dFri    = input.bool(true, "Fri", group = gF, inline = "d")
+minRng  = input.float(0, "Skip if the range is smaller than (points)", 0, step = 5, group = gF)
+maxRng  = input.float(0, "Skip if the range is larger than (points, 0 = no cap)", 0, step = 25, group = gF)
+
+gZ      = "Position sizing"
+useRisk = input.bool(false, "Size by risk", group = gZ)
+riskDlr = input.float(500, "Risk per trade ($)", 1, step = 50, group = gZ)
+qtyFix  = input.float(1, "Contracts (fixed sizing)", 1, group = gZ)
+ptVal   = input.float(2.0, "$ per point per contract", group = gZ,
+     tooltip = "MNQ=2, NQ=20, MES=5, ES=50.")
+
+gV      = "Visuals"
+showBox = input.bool(true, "Draw the session ranges", group = gV)
+showLvl = input.bool(true, "Extend the range levels across the driver session", group = gV)
+showTbl = input.bool(true, "Show the panel", group = gV)
+asiaCol = input.color(#ff9800, "Asia",     group = gV, inline = "c")
+lonCol  = input.color(#2157f3, "London",   group = gV, inline = "c")
+nyCol   = input.color(#ff0037, "New York", group = gV, inline = "c")
+boxA    = input.int(93, "Range transparency", 50, 99, group = gV)
+
+tick = syminfo.mintick
+buf  = bufTk * tick
+fade = sideMode == "Fade the sweep"
+
+// ---------------------------------------------------------------- Sessions
+f_on(string s) => not na(time(timeframe.period, s, tz))
+asiaOn = f_on(asiaTxt)
+lonOn  = f_on(lonTxt)
+nyOn   = f_on(nyTxt)
+
+type Sess
+    float hi = na
+    float lo = na
+    float doneHi = na
+    float doneLo = na
+    bool  have = false
+    box   bx = na
+
+method step(Sess s, bool on, bool wasOn, color col, string name) =>
+    if on and not wasOn
+        s.hi := high
+        s.lo := low
+        if showBox
+            s.bx := box.new(bar_index, high, bar_index, low, xloc = xloc.bar_index,
+                 bgcolor = color.new(col, boxA), border_color = color.new(col, 45),
+                 border_style = line.style_dotted, text = name, text_size = size.tiny,
+                 text_color = color.new(col, 25), text_halign = text.align_left,
+                 text_valign = text.align_top)
+    else if on
+        s.hi := math.max(s.hi, high)
+        s.lo := math.min(s.lo, low)
+        if showBox and not na(s.bx)
+            s.bx.set_top(s.hi)
+            s.bx.set_rightbottom(bar_index, s.lo)
+    else if wasOn
+        s.doneHi := s.hi
+        s.doneLo := s.lo
+        s.have := true
+    s
+
+var Sess asia = Sess.new()
+var Sess lon  = Sess.new()
+var Sess ny   = Sess.new()
+asia.step(asiaOn, asiaOn[1], asiaCol, "Asia")
+lon.step(lonOn, lonOn[1], lonCol, "London")
+ny.step(nyOn, nyOn[1], nyCol, "New York")
+
+// ---------------------------------------------------------------- Gates
+dow = dayofweek(time, tz)
+dowOk = not useDow or (dow == dayofweek.monday and dMon) or (dow == dayofweek.tuesday and dTue) or
+     (dow == dayofweek.wednesday and dWed) or (dow == dayofweek.thursday and dThu) or
+     (dow == dayofweek.friday and dFri)
+
+f_target(float e, float hi, float lo, int d, float risk) =>
+    span = hi - lo
+    lvl  = d == -1 ? hi : lo                       // the level that was swept
+    float t = switch tpMode
+        "25% back across"      => lvl + d * 0.25 * span
+        "Midpoint"             => lvl + d * 0.50 * span
+        "75% back across"      => lvl + d * 0.75 * span
+        "Far side of the range"=> lvl + d * 1.00 * span
+        "Far side + 50%"       => lvl + d * 1.50 * span
+        "1R"                   => e + d * 1.0 * risk
+        "2R"                   => e + d * 2.0 * risk
+        => e + d * 3.0 * risk
+    t
+
+f_qty(float risk) =>
+    per = risk * ptVal
+    n = useRisk and per > 0 ? math.max(1, math.floor(riskDlr / per)) : qtyFix
+    n
+
+// ---------------------------------------------------------------- The pair driver
+// The trade parameters live ON the object rather than in globals, because a Pine function
+// cannot assign to a global — mutating the object it was handed is the way around that.
+type Pair
+    float hi = na
+    float lo = na
+    bool  live = false
+    int   first = 0
+    int   bars = 0
+    bool  armed = false          // still allowed to take a trade this session
+    line  hiLn = na
+    line  loLn = na
+    // what the current bar decided
+    bool   tookNow = false
+    int    dir = 0
+    float  entry = na
+    float  stop = na
+    float  tgt = na
+    float  risk = na
+    string skip = "—"
+
+method arm(Pair p, float hi, float lo, color col) =>
+    p.hi := hi
+    p.lo := lo
+    p.live := not na(hi) and not na(lo) and hi > lo
+    p.first := 0
+    p.bars := 0
+    p.armed := true
+    if p.live and showLvl
+        p.hiLn := line.new(bar_index, hi, bar_index, hi, xloc = xloc.bar_index,
+             color = color.new(col, 30), style = line.style_dashed)
+        p.loLn := line.new(bar_index, lo, bar_index, lo, xloc = xloc.bar_index,
+             color = color.new(col, 30), style = line.style_dashed)
+    p
+
+var Pair pLon = Pair.new()
+var Pair pNy  = Pair.new()
+var string lastSkip = "—"
+var float  entPx = na
+var float  slPx  = na
+var float  tpPx  = na
+var float  rDist = na
+var int    tDir  = 0
+var bool   beHit = false
+
+method drive(Pair p, bool on, bool wasOn, bool enabled, color col, float rHi, float rLo) =>
+    p.tookNow := false
+    if on and not wasOn
+        p.arm(rHi, rLo, col)
+    if on and p.live
+        p.bars += 1
+        if showLvl and not na(p.hiLn)
+            p.hiLn.set_x2(bar_index)
+            p.loLn.set_x2(bar_index)
+        up = high > p.hi
+        dn = low < p.lo
+        if p.first == 0 and (up or dn)
+            p.first := up and dn ? (close < open ? 1 : -1) : (up ? 1 : -1)
+            sweptHi = p.first == 1
+            backIn  = sweptHi ? close <= p.hi : close >= p.lo
+            ext     = sweptHi ? high : low
+            depth   = 100 * math.abs(ext - (sweptHi ? p.hi : p.lo)) / (p.hi - p.lo)
+            d       = fade ? (sweptHi ? -1 : 1) : (sweptHi ? 1 : -1)
+            e       = close
+            float st = slMode == "Fixed ticks" ? e - d * slTk * tick
+                        : (sweptHi ? ext + buf : ext - buf)
+            if not fade and slMode != "Fixed ticks"
+                st := e - (st - e)                      // mirror it to the correct side
+            risk = math.abs(e - st)
+            tgt  = f_target(e, p.hi, p.lo, d, risk)
+            rew  = (tgt - e) * d
+            span = p.hi - p.lo
+
+            if not enabled or not p.armed
+                p.skip := "pair not enabled"
+            else if reqRej and not backIn
+                p.skip := "closed beyond — a break, not a sweep"
+            else if not dowOk
+                p.skip := "weekday filtered out"
+            else if maxBar > 0 and p.bars > maxBar
+                p.skip := "swept too late in the session"
+            else if maxDepth > 0 and depth > maxDepth
+                p.skip := "sweep too deep (" + str.tostring(depth, "#") + "% of range)"
+            else if minRng > 0 and span < minRng
+                p.skip := "range too small"
+            else if maxRng > 0 and span > maxRng
+                p.skip := "range too large"
+            else if (d == 1 and not allowL) or (d == -1 and not allowS)
+                p.skip := d == 1 ? "longs off" : "shorts off"
+            else if risk <= 0 or rew <= 0
+                p.skip := "target behind the fill"
+            else if rew / risk < minRR
+                p.skip := "only " + str.tostring(rew / risk, "#.##") + "R available"
+            else
+                p.dir := d
+                p.entry := e
+                p.stop := st
+                p.tgt := tgt
+                p.risk := risk
+                p.armed := false
+                p.skip := "—"
+                p.tookNow := true
+    if not on and wasOn
+        p.live := false
+    p
+
+pLon.drive(lonOn, lonOn[1], doLon, lonCol,
+     asia.have ? asia.doneHi : na, asia.have ? asia.doneLo : na)
+pNy.drive(nyOn, nyOn[1], doNy, nyCol,
+     lon.have ? lon.doneHi : na, lon.have ? lon.doneLo : na)
+
+// the orders are placed out here, where assigning to the globals is legal
+if pLon.tookNow or pNy.tookNow
+    Pair p = pLon.tookNow ? pLon : pNy
+    entPx := p.entry
+    slPx  := p.stop
+    tpPx  := p.tgt
+    rDist := p.risk
+    tDir  := p.dir
+    beHit := false
+    lastSkip := "—"
+    strategy.entry(p.dir == 1 ? (pLon.tookNow ? "L LON" : "L NY") : (pLon.tookNow ? "S LON" : "S NY"),
+         p.dir == 1 ? strategy.long : strategy.short, qty = f_qty(p.risk))
+else if pLon.skip != "—" or pNy.skip != "—"
+    lastSkip := lonOn ? pLon.skip : pNy.skip
+
+// ---------------------------------------------------------------- Exits
+inPos = strategy.position_size != 0
+if inPos and not na(slPx)
+    if beAt != "Off" and not beHit
+        trig = entPx + tDir * (beAt == "1R" ? 1.0 : 2.0) * rDist
+        if tDir == 1 ? high >= trig : low <= trig
+            slPx  := tDir == 1 ? math.max(slPx, entPx) : math.min(slPx, entPx)
+            beHit := true
+    strategy.exit("X", stop = slPx, limit = tpPx)
+
+// the driver session ending is the hard deadline — the whole premise is intraday
+sessEnded = (not lonOn and lonOn[1]) or (not nyOn and nyOn[1])
+if flatEnd and inPos and sessEnded
+    strategy.close_all(comment = "session end")
+
+if not inPos and inPos[1]
+    tDir := 0
+
+plot(inPos and not na(slPx) ? slPx : na, "Stop",   color = color.new(#f23645, 20), style = plot.style_linebr)
+plot(inPos and not na(tpPx) ? tpPx : na, "Target", color = color.new(#089981, 20), style = plot.style_linebr)
+
+// ---------------------------------------------------------------- Panel
+var table tb = table.new(position.bottom_right, 2, 6, border_width = 1,
+     frame_color = color.new(color.gray, 50), frame_width = 1, bgcolor = color.new(#161616, 10))
+if showTbl and barstate.islast
+    sz = size.tiny
+    live = lonOn ? "London vs Asia" : nyOn ? "NY vs London" : asiaOn ? "Asia (building)" : "—"
+    rng  = lonOn and pLon.live ? str.tostring(pLon.hi - pLon.lo, "#.#") + " pts"
+            : nyOn and pNy.live ? str.tostring(pNy.hi - pNy.lo, "#.#") + " pts" : "—"
+    pos  = inPos ? (tDir == 1 ? "long " : "short ") + str.tostring(math.abs(strategy.position_size), "#") : "flat"
+    table.cell(tb, 0, 0, "Session reversal", text_color = color.white, text_size = sz,
+         text_halign = text.align_left, bgcolor = color.new(color.gray, 60))
+    table.cell(tb, 1, 0, sideMode, text_color = color.white, text_size = sz)
+    table.cell(tb, 0, 1, "driver now",  text_color = color.gray, text_size = sz, text_halign = text.align_left)
+    table.cell(tb, 1, 1, live,          text_color = color.silver, text_size = sz)
+    table.cell(tb, 0, 2, "range in play", text_color = color.gray, text_size = sz, text_halign = text.align_left)
+    table.cell(tb, 1, 2, rng,           text_color = color.silver, text_size = sz)
+    table.cell(tb, 0, 3, "position",    text_color = color.gray, text_size = sz, text_halign = text.align_left)
+    table.cell(tb, 1, 3, pos,           text_color = color.white, text_size = sz)
+    table.cell(tb, 0, 4, "target mode", text_color = color.gray, text_size = sz, text_halign = text.align_left)
+    table.cell(tb, 1, 4, tpMode,        text_color = color.silver, text_size = sz)
+    table.cell(tb, 0, 5, "last skip",   text_color = color.gray, text_size = sz, text_halign = text.align_left)
+    table.cell(tb, 1, 5, lastSkip,      text_color = color.orange, text_size = sz)
+
+if barstate.islast and (timeframe.isdwm or timeframe.in_seconds() > 3600)
+    label.new(bar_index, high, "Run this on an intraday chart of 1h or faster — sessions cannot be resolved from " + timeframe.period,
+         xloc = xloc.bar_index, style = label.style_label_down,
+         color = color.new(color.orange, 10), textcolor = color.white, size = size.small)

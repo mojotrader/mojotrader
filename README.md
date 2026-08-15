@@ -138,7 +138,45 @@ slower structure. Configurable under the *Higher-timeframe structure* group:
 The HTF engine is **non-repainting**: a higher-timeframe bar is only processed
 once it has fully closed.
 
+### `pinescript/session_reversal_profiler.pine`
+Session Reversal Profiler — measures the "one session takes a side of the previous session's range
+and travels to the other side" idea **live, on whatever chart it is loaded on**, rather than
+asserting percentages from somewhere else.
+
+Windows default to the ALN profiler's (Asia 20:00–02:00, London 02:00–08:00, NY 08:00–16:00 ET) and
+are inputs. For every completed driver session it records the **pattern** (Engulf / Inside / Partial
+Up / Partial Down), **which side was taken first**, whether the **opposite side** was then reached,
+and the R outcome of a simulated fade. The panel accumulates all of it over the chart's loaded
+history — check the `sessions counted` figure before reading anything into the rest.
+
+The fade is simulated with **no lookahead**: entry at the close of the first bar that trades beyond
+the level *and closes back inside it*; stop at that same bar's already-printed extreme; a bar
+touching stop and target together scores a loss.
+
+**What it measured on MNQ 1h, Jan 2023 – Aug 2026: no edge.** See
+[`research/SESSION_REVERSAL_FINDINGS.md`](research/SESSION_REVERSAL_FINDINGS.md). Short version —
+London took a side of Asia on 94% of days and reached the far side on 27%; NY took a side of London
+on 99.8% of days and reached the far side on 49%, a coin flip. Fading it returned +0.07 R (London,
+95% CI −0.13 to +0.31, with 79% of the profit from one trade out of 406) and −0.17 R (NY, reliably
+negative). Holding from the sweep to the session close with no stop drifted *less* than doing
+nothing at all. The tool exists so the same question can be put to another symbol or period.
+
+
 ## Strategies
+### `pinescript/session_reversal_strategy.pine`
+Session Reversal Strategy — the tradeable form of the above: fade (or follow) the driver session's
+sweep of the previous session's range, targeting a configurable fraction of the way back across it.
+
+**This did not show an edge on the data it was built against** — read the header of the file or
+[`research/SESSION_REVERSAL_FINDINGS.md`](research/SESSION_REVERSAL_FINDINGS.md) before running it.
+It is here so the idea can be tested rather than argued about: every knob the study varied is an
+input — session windows, which pair to trade, fade vs follow, rejection-required, sweep depth cap,
+sweep-must-be-in-the-first-N-bars, minimum R available, range size bounds, weekday filter, stop from
+the sweep wick or fixed ticks, and eight target modes.
+
+Orders fill on the signal bar's close (`process_orders_on_close`) so backtests match the Python
+study. NY-against-London is **off** by default because it tested reliably negative.
+
 
 ### `pinescript/mtf_1m_entry_strategy.pine`
 MTF Entry Trigger — same bias and sweep as the 15m strategy, but the entry is **qualified on a
@@ -330,3 +368,23 @@ A setup whose stop is too far to afford one contract is skipped rather than take
 
 `Let the target follow a new HOD / LOD` applies only to the HOD/LOD target and is off by default;
 a candle extreme is a fixed level and never trails.
+
+## Research
+
+### `research/`
+Python studies run against exported TradingView CSVs (`time,open,high,low,close`, epoch seconds).
+
+| script | question |
+| --- | --- |
+| `session_reversal_study.py` | base rates and fade expectancy for London-vs-Asia and NY-vs-London, across four session-window presets |
+| `session_edge_detail.py` | is the expectancy real? bootstrap CIs, tail concentration, and conditioning by sweep timing, depth, range size and weekday |
+| `session_target_grid.py` | target sensitivity, and the decisive no-stop drift test |
+
+`SESSION_REVERSAL_FINDINGS.md` is the written result.
+
+```
+python3 research/session_reversal_study.py <csv> --preset aln
+python3 research/session_edge_detail.py    <csv>
+python3 research/session_target_grid.py    <csv>
+```
+
