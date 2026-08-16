@@ -346,14 +346,14 @@ if showInfo and barstate.islast
     table.cell(info, 1, 2, na(rng) ? "-" : (lowFirst ? "low first" : "high first"), text_color = color.silver, text_size = size.small)
     table.cell(info, 0, 3, "Direction", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 1, 3, dir == 1 ? "LONG" : dir == -1 ? "SHORT" : "-", text_color = dir == 1 ? color.lime : dir == -1 ? color.red : color.silver, text_size = size.small)
-    table.cell(info, 0, 7, "Close depth", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 1, 7, na(pbDepth) ? "-" : str.tostring(pbDepth * 100, "#.#") + "%" + (isMkt ? " (market)" : ""), text_color = color.silver, text_size = size.small)
     table.cell(info, 0, 4, "Entry (" + (isMkt ? "market, deep" : pbSel) + ")", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 1, 4, dir == 0 or na(entryLvl) ? "-" : str.tostring(math.round_to_mintick(entryLvl)), text_color = color.orange, text_size = size.small)
     table.cell(info, 0, 5, "Stop", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 1, 5, dir == 0 or na(stopLvl) ? "-" : str.tostring(math.round_to_mintick(stopLvl)), text_color = color.red, text_size = size.small)
     table.cell(info, 0, 6, "Target", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 1, 6, dir == 0 or na(tpLvl) ? "-" : str.tostring(math.round_to_mintick(tpLvl)), text_color = color.green, text_size = size.small)
+    table.cell(info, 0, 7, "Close depth", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 1, 7, na(pbDepth) ? "-" : str.tostring(pbDepth * 100, "#.#") + "%" + (isMkt ? " (market)" : ""), text_color = color.silver, text_size = size.small)
 
 // ---------------------------------------------------------------- Visuals
 plot(not na(rH) ? rH : na, "Window High", color = color.new(color.teal, 0), style = plot.style_linebr)
