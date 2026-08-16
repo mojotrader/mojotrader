@@ -6,9 +6,10 @@
 //            extremes sets the direction: low-first = long, high-first = short.
 //   ENTRY  : once the window closes, a resting LIMIT at a pullback from the directional extreme (the "anchor"):
 //            25% / 38.2% / 50% / 61.8% of the window range.  long: anchor - depth*range ; short: anchor + depth*range.
-//   DEEP   : if the window already CLOSED past that pullback level (e.g. price is through the 25% line at 11:00 on a
-//            25% entry) the retrace has happened without us. Default handling is a MARKET entry at the window close
-//            with the stop moved to the far range edge; "Skip day" and "Place the limit anyway" are the alternatives.
+//   DEEP   : if the window CLOSES already retraced deeper than a threshold (default 50%), the pullback has happened
+//            without us -> take it LONG/SHORT at market on the window close (11:00), stop at the far range edge, same
+//            target. Between the entry depth and that threshold the limit sits behind price: skip the day (default)
+//            or leave the order to fill at market next bar.
 //   STOP   : 50% / 75% / opposite edge (100%) of the range, measured from the SAME anchor, so the stop is always
 //            a fixed fraction of the range beyond the entry. A stop that does not sit beyond the entry skips the day.
 //   TARGET : the anchor itself (Ext 0% = the new HOD/LOD touch) or a 10% / 30% / 50% extension beyond it.
@@ -40,11 +41,16 @@ pbSel     = input.string("50%", "Pullback depth", options = ["25%", "38.2%", "50
      tooltip = "Retrace from the anchor extreme, in % of the window range. 25% = shallow (fewer fills, more follow-through), 61.8% = deep (more fills, weaker premise).")
 anchorSel = input.string("Range extreme (fixed)", "Pullback anchor", options = ["Range extreme (fixed)", "Day extreme (running)"], group = grpE,
      tooltip = "Fixed = measure from the 11:00 high/low. Running = re-measure from the day's extreme as it extends, so the limit trails a continuing move.")
-deepSel   = input.string("Market at window close (stop = range edge)", "If already retraced past the entry",
-     options = ["Market at window close (stop = range edge)", "Skip day", "Place the limit anyway"], group = grpE,
-     tooltip = "The pullback is already deeper than the entry depth when the window closes (e.g. price is past the 25% line at 11:00 on a 25% entry).\n" +
-       "Market = take it immediately at the window close with the stop moved to the far range edge (the deep pullback IS the entry).\n" +
-       "Skip = stand down for the day. Limit anyway = leave the order, which fills at market on the next bar with the configured stop.")
+mktSel    = input.string("50%", "Market entry if the window-close pullback is deeper than",
+     options = ["Off", "25%", "38.2%", "50%", "61.8%"], group = grpE,
+     tooltip = "Measured at 11:00 as a retrace from the directional extreme. Deeper than this and the pullback has ALREADY happened, " +
+       "so the trade is taken at market on the window close instead of resting a limit, with the stop at the far range edge " +
+       "(a 50%+ retrace leaves no room for the 50%/75% stop lines). Off = never enter at market.")
+deepSel   = input.string("Skip day", "If past the limit but shallower than that threshold",
+     options = ["Skip day", "Place the limit anyway"], group = grpE,
+     tooltip = "Only bites when the market threshold is deeper than the entry depth (e.g. 25% entry, 50% threshold, price 35% retraced at 11:00): " +
+       "the limit is behind price but the move is not deep enough to buy at market. Skip = stand down. " +
+       "Limit anyway = leave the order, which fills at market on the next bar with the configured stop.")
 skipBroke = input.bool(true, "Skip if the target side breaks before the fill", group = grpE,
      tooltip = "Fixed anchor only: if the anchor extreme is taken out before the pullback fills, the move went without us - stand down. Ignored with a running anchor.")
 
@@ -90,7 +96,8 @@ showInfo  = input.bool(true, "Show status table", group = grpRR)
 ptVal     = input.float(2.0, "$ per point per contract", group = grpRR, tooltip = "MNQ=2, NQ=20, MES=5, ES=50.")
 rrBars    = input.int(24, "R/R box width (bars)", 1, 300, group = grpRR)
 
-deepMkt   = deepSel == "Market at window close (stop = range edge)"
+mktOn     = mktSel != "Off"
+mktF      = mktSel == "25%" ? 0.25 : mktSel == "38.2%" ? 0.382 : mktSel == "50%" ? 0.50 : 0.618
 deepSkip  = deepSel == "Skip day"
 
 pbF  = pbSel == "25%" ? 0.25 : pbSel == "38.2%" ? 0.382 : pbSel == "50%" ? 0.50 : 0.618
@@ -117,6 +124,7 @@ var int   rLtime = na
 var int   rStart = na       // bar_index at the window open (for the shading box)
 var float rng    = na
 var float anchor = na       // extreme the pullback is measured from
+var float pbDepth = na      // retrace already done when the window closed, in % of range
 var int   dir    = 0
 var float entryLvl = na
 var float stopLvl  = na
@@ -138,6 +146,7 @@ if newDay
     rStart := na
     rng := na
     anchor := na
+    pbDepth := na
     dir := 0
     entryLvl := na
     stopLvl := na
@@ -192,20 +201,19 @@ if rngDone and dayOK and not na(rH) and not na(rL) and rH > rL and rHbar != rLba
         entryLvl := f_ent(dir, anchor, rng)
         stopLvl  := f_stp(dir, anchor, rng)
         tpLvl    := f_tgt(dir, anchor, rng)
-        deep = dir == 1 ? close[1] <= entryLvl : close[1] >= entryLvl   // pullback already deeper than the entry depth
-        if slF <= pbF
-            dir := 0                                                    // stop not beyond the entry -> skip
-        else if deep
-            if deepSkip
-                dir := 0                                                // already retraced past the limit -> skip
-            else if deepMkt
-                // the deep pullback IS the entry: take it at the window close, stop at the far range edge
-                isMkt := true
-                entryLvl := close[1]                                    // reference price only - the fill is at market
-                stopLvl  := dir == 1 ? rL : rH
-                if math.abs(entryLvl - stopLvl) < 2 * syminfo.mintick
-                    dir := 0                                            // sitting on the edge -> no room for a stop
-                    isMkt := false
+        pbDepth := dir == 1 ? (anchor - close[1]) / rng : (close[1] - anchor) / rng  // retrace already done at the close
+        if mktOn and pbDepth >= mktF
+            // deeper than the threshold at the window close: that IS the pullback - take it now, stop at the range edge
+            isMkt := true
+            entryLvl := close[1]                                        // reference price only - the fill is at market
+            stopLvl  := dir == 1 ? rL : rH
+            if math.abs(entryLvl - stopLvl) < 2 * syminfo.mintick
+                dir := 0                                                // sitting on the edge -> no room for a stop
+                isMkt := false
+        else if slF <= pbF
+            dir := 0                                                    // stop not beyond the limit entry -> skip
+        else if pbDepth >= pbF and deepSkip
+            dir := 0                                                    // past the limit, too shallow to buy at market -> skip
 
 // ---------------------------------------------------------------- Time gates
 tod      = hour(time, tz) * 60 + minute(time, tz)
@@ -327,7 +335,7 @@ if showRR and rngDone and dir != 0 and not na(entryLvl) and not na(stopLvl) and 
          xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.gray, 15), textcolor = color.white, size = size.small)
 
 // ---------------------------------------------------------------- Status table
-var table info = table.new(position.top_right, 2, 7, border_width = 1)
+var table info = table.new(position.top_right, 2, 8, border_width = 1)
 if showInfo and barstate.islast
     st = dir == 0 ? (na(rng) ? "waiting for window" : "no setup today") : done ? "done" : strategy.position_size != 0 ? "in trade" : isMkt ? "market armed" : "limit resting"
     table.cell(info, 0, 0, "Noon Curve", text_color = color.white, bgcolor = color.new(color.gray, 30), text_size = size.small)
@@ -338,6 +346,8 @@ if showInfo and barstate.islast
     table.cell(info, 1, 2, na(rng) ? "-" : (lowFirst ? "low first" : "high first"), text_color = color.silver, text_size = size.small)
     table.cell(info, 0, 3, "Direction", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 1, 3, dir == 1 ? "LONG" : dir == -1 ? "SHORT" : "-", text_color = dir == 1 ? color.lime : dir == -1 ? color.red : color.silver, text_size = size.small)
+    table.cell(info, 0, 7, "Close depth", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 1, 7, na(pbDepth) ? "-" : str.tostring(pbDepth * 100, "#.#") + "%" + (isMkt ? " (market)" : ""), text_color = color.silver, text_size = size.small)
     table.cell(info, 0, 4, "Entry (" + (isMkt ? "market, deep" : pbSel) + ")", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 1, 4, dir == 0 or na(entryLvl) ? "-" : str.tostring(math.round_to_mintick(entryLvl)), text_color = color.orange, text_size = size.small)
     table.cell(info, 0, 5, "Stop", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
