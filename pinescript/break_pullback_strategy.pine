@@ -18,7 +18,9 @@
 //      top half (long) / bottom half (short) of the range.
 //   2) The trade ARMS only AFTER the range level BREAKS. Break type is selectable: "Wick (touch)" or "Close beyond".
 //   3) A LIMIT rests at the fib pullback: shallow(0-25%)->25% line, deeper(25-50%)->50% line.
-//   4) AVERAGE DOWN (optional): shallow setup -> a 2nd same-size unit at the 50% line.
+//   4) AVERAGE DOWN (optional): shallow setup -> a 2nd unit at the 50% line. Each of the four entries (ORB first,
+//      ORB avg-down, IB first, IB avg-down) carries its OWN contract count and its own risk budget, and the R/R
+//      tool draws a box per unit - solid for the first entry, dashed for the add.
 //   FILTERS: skip double-break days; skip ORB setups whose range is under the "Min ORB range %" of price.
 //   Stop: shallow -> range extreme (100%) ; deeper -> 75% line. Optional breakeven when the range level is reclaimed.
 //   TP long/short selectable: range level / +10% / +30% / +50% / HOD-LOD. One setup/day per range, EOD flatten.
@@ -37,7 +39,8 @@ strategy("Break-then-Pullback (ORB + IB)", overlay = true, pyramiding = 6, max_b
      initial_capital = 30000, margin_long = 0, margin_short = 0,
      default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
      commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
-// NOTE: position sizing uses a FIXED account size (see 'Account size $' input) - it does NOT compound with P&L.
+// NOTE: position sizing uses a FIXED account size (see 'Account size $' input) - it does NOT compound with P&L,
+//   and risk is set PER ENTRY (four independent budgets), not split out of one per-setup number.
 
 // ---------------------------------------------------------------- Strategy toggles (isolate each for backtesting)
 gStrat    = "Strategies (toggle to track each separately)"
@@ -60,28 +63,47 @@ ibWed     = input.bool(true, "IB Wednesday", group = gDayI)
 ibThu     = input.bool(true, "IB Thursday",  group = gDayI)
 ibFri     = input.bool(true, "IB Friday",    group = gDayI)
 
-// ---------------------------------------------------------------- Risk sizing (% of a FIXED capital, or a flat $ - no compounding)
+// ---------------------------------------------------------------- Risk sizing (PER ENTRY: % of a FIXED capital, or a flat $ - no compounding)
+// Each of the four entries is sized on its own: ORB first, ORB average-down, IB first, IB average-down.
+// Whichever way you size (fixed contracts or by risk), the four are independent - the average-down unit can be
+// bigger, smaller or the same as the entry it doubles up on.
 gRisk       = "Risk sizing"
 useRiskSize = input.bool(false, "Size by risk (else use the contracts below)", group = gRisk,
-     tooltip = "OFF (default): trade exactly the contract counts set below - the R/R tool, the strategy orders and the webhook all use them. ON: ignore those counts and size each entry so the setup's risk equals the per-setup risk below, split across its units.")
-orbQtyIn    = input.float(2, "ORB contracts per entry", minval = 1, step = 1, group = gRisk,
-     tooltip = "Contracts for ONE ORB entry unit. With average-down on, a shallow ORB setup fires two of these units, so the setup's total is 2x this number (the R/R label shows both the per-unit and the setup total).")
-ibQtyIn     = input.float(1, "IB contracts per entry", minval = 1, step = 1, group = gRisk,
-     tooltip = "Contracts for ONE IB entry unit. With average-down on, a shallow IB setup fires two of these units.")
+     tooltip = "OFF (default): trade exactly the four contract counts set below - the R/R tool, the strategy orders and the webhook all use them. ON: ignore those counts and size each entry so ITS OWN risk equals that entry's risk budget below.")
+orbQty1In   = input.float(2, "ORB contracts - FIRST entry",    minval = 1, step = 1, group = gRisk,
+     tooltip = "Contracts on the first ORB unit (the limit at the fib pullback: 25% line on a shallow setup, 50% line on a deeper one).")
+orbQty2In   = input.float(2, "ORB contracts - AVG-DOWN entry", minval = 1, step = 1, group = gRisk,
+     tooltip = "Contracts on the ORB average-down unit at the 50% line (shallow setups only, when average-down is on). Independent of the first entry - set it larger to scale in, smaller to add only a probe.")
+ibQty1In    = input.float(1, "IB contracts - FIRST entry",     minval = 1, step = 1, group = gRisk,
+     tooltip = "Contracts on the first IB unit (the limit at the fib pullback).")
+ibQty2In    = input.float(1, "IB contracts - AVG-DOWN entry",  minval = 1, step = 1, group = gRisk,
+     tooltip = "Contracts on the IB average-down unit at the 50% line (shallow setups only, when average-down is on).")
 acctSize    = input.float(30000, "Account size $ (fixed - NO compounding)", minval = 1, group = gRisk,
      tooltip = "Sizing uses this constant capital every day; it does NOT grow/shrink with P&L. So the dollar risk per trade is the same every day (no compounding).")
-riskMode    = input.string("% of capital", "Risk per setup measured in", options = ["% of capital", "$ per setup"], group = gRisk,
-     tooltip = "% of capital: the setup risks that percentage of the fixed account size above. $ per setup: the setup risks a flat dollar amount regardless of the account size - useful when you want the same dollar risk across instruments, or when comparing runs without the account size confusing the picture. Whichever is selected, the other input is ignored.")
-riskPct     = input.float(1.0, "  Risk per setup (% of capital)", minval = 0.1, step = 0.1, group = gRisk,
-     tooltip = "Used when 'Risk per setup measured in' = % of capital. Total risk for one strategy's setup, split equally between its entry units. 1% on 30k = $300 = $150 per unit (with average-down on).")
-riskDlr     = input.float(300, "  Risk per setup ($)", minval = 1, step = 25, group = gRisk,
-     tooltip = "Used when 'Risk per setup measured in' = $ per setup. Total dollar risk for one strategy's setup, split equally between its entry units - $300 with average-down on is $150 per unit. The stop distance then decides the contract count.")
+riskMode    = input.string("% of capital", "Risk per ENTRY measured in", options = ["% of capital", "$ per entry"], group = gRisk,
+     tooltip = "% of capital: each entry risks its own percentage of the fixed account size above. $ per entry: each entry risks its own flat dollar amount regardless of the account size - useful when you want the same dollar risk across instruments, or when comparing runs without the account size confusing the picture. Whichever is selected, the other four inputs are ignored.")
+orbRiskPct1 = input.float(0.5, "  ORB first entry risk (% of capital)",    minval = 0.05, step = 0.05, group = gRisk,
+     tooltip = "Used when 'Risk per ENTRY measured in' = % of capital. The stop distance of the first ORB entry then decides its contract count. 0.5% on 30k = $150.")
+orbRiskPct2 = input.float(0.5, "  ORB avg-down entry risk (% of capital)", minval = 0.05, step = 0.05, group = gRisk,
+     tooltip = "Risk budget for the ORB average-down unit. Its stop distance is shorter (it enters at the 50% line), so the same % buys more contracts than the first entry - lower it if you do not want the add to dominate the setup.")
+ibRiskPct1  = input.float(0.5, "  IB first entry risk (% of capital)",     minval = 0.05, step = 0.05, group = gRisk)
+ibRiskPct2  = input.float(0.5, "  IB avg-down entry risk (% of capital)",  minval = 0.05, step = 0.05, group = gRisk)
+orbRiskDlr1 = input.float(150, "  ORB first entry risk ($)",    minval = 1, step = 25, group = gRisk,
+     tooltip = "Used when 'Risk per ENTRY measured in' = $ per entry. Dollar risk on the first ORB entry; the stop distance decides the contract count.")
+orbRiskDlr2 = input.float(150, "  ORB avg-down entry risk ($)", minval = 1, step = 25, group = gRisk,
+     tooltip = "Dollar risk on the ORB average-down unit, independent of the first entry.")
+ibRiskDlr1  = input.float(150, "  IB first entry risk ($)",     minval = 1, step = 25, group = gRisk)
+ibRiskDlr2  = input.float(150, "  IB avg-down entry risk ($)",  minval = 1, step = 25, group = gRisk)
 maxDayPct   = input.float(2.0, "Daily max loss (% of capital, 0 = off)", minval = 0, step = 0.5, group = gRisk,
-     tooltip = "Once the day's loss reaches this % of the day's starting equity, open trades are closed and no new trades are taken until the next day. This one is always a percentage of the account size, independent of how the per-setup risk is expressed.")
+     tooltip = "Once the day's loss reaches this % of the day's starting equity, open trades are closed and no new trades are taken until the next day. This one is always a percentage of the account size, independent of how the per-entry risk is expressed.")
 
-// The $ risk a whole setup may lose, however it was expressed. Every sizing calculation below reads
-// this, so the two inputs never both apply and switching mode changes nothing else.
-setupBudget = riskMode == "$ per setup" ? riskDlr : acctSize * (riskPct / 100.0)
+// The $ risk ONE entry may lose, however it was expressed. Every sizing calculation below reads these four,
+// so the % and $ inputs never both apply and switching mode changes nothing else.
+byDlr   = riskMode == "$ per entry"
+orbBud1 = byDlr ? orbRiskDlr1 : acctSize * (orbRiskPct1 / 100.0)
+orbBud2 = byDlr ? orbRiskDlr2 : acctSize * (orbRiskPct2 / 100.0)
+ibBud1  = byDlr ? ibRiskDlr1  : acctSize * (ibRiskPct1  / 100.0)
+ibBud2  = byDlr ? ibRiskDlr2  : acctSize * (ibRiskPct2  / 100.0)
 
 // ---------------------------------------------------------------- HARDCODED CONFIG (edit values here)
 // Session
@@ -100,7 +122,8 @@ orbTpL    = "Ext 10%"
 orbTpS    = "Ext 30%"
 orbDeepSL = "75% line"
 orbBE     = false
-orbQty    = orbQtyIn          // contracts per ORB unit (from the Risk sizing group)
+orbQty1   = orbQty1In         // contracts on the first ORB entry     (Risk sizing group)
+orbQty2   = orbQty2In         // contracts on the ORB avg-down entry  (Risk sizing group)
 orbCutH   = 15
 orbCutM   = 0
 // IB settings
@@ -112,7 +135,8 @@ ibTpL     = "Ext 30%"
 ibTpS     = "Ext 30%"
 ibDeepSL  = "75% line"
 ibBE      = false
-ibQty     = ibQtyIn           // contracts per IB unit (from the Risk sizing group)
+ibQty1    = ibQty1In          // contracts on the first IB entry      (Risk sizing group)
+ibQty2    = ibQty2In          // contracts on the IB avg-down entry   (Risk sizing group)
 ibCutH    = 14
 ibCutM    = 0
 
@@ -140,13 +164,15 @@ brkAlerts = input.bool(true, "Alert when ORB / IB level breaks", group = grpBA,
 // ---------------------------------------------------------------- Risk/Reward tool
 grpRR     = "Risk / Reward tool"
 showRR    = input.bool(true, "Show risk/reward box at the break", group = grpRR)
+showRR2   = input.bool(true, "  ... and a second box for the average-down unit", group = grpRR,
+     tooltip = "The average-down unit is a trade of its own - its own entry price, its own contract count, its own risk and reward. With this on it gets its own pair of boxes (dashed border, lighter fill) measured from the 50% line to the same stop and target, plus its own $ label. Turn it off to keep only the first entry's box; the add still appears in the first label's setup-total line.")
 showFibs  = input.bool(true, "Show fib retracement lines (25/50/75)", group = grpRR, tooltip = "Dotted lines only, no text: the 25/50/75 levels of the range. Which one is the entry is shown by the R/R box.")
 showInfo  = input.bool(true, "Show strategy rules panel", group = grpRR)
 ptVal     = input.float(2.0, "$ per point per contract", group = grpRR, tooltip = "MNQ=2, NQ=20, MES=5, ES=50.")
 keepBox   = input.int(0, "Keep R/R boxes for the last N setups (0 = all)", 0, 250, group = grpRR,
-     tooltip = "0 keeps every past setup's boxes and fib lines, so you can scroll back and review the risk/reward of each historical setup. Pine caps a script at 500 boxes and 500 lines, so in practice that is the most recent ~250 setups (~166 if the fib lines are on). Set a small number to keep only the newest setups on the chart.")
+     tooltip = "0 keeps every past setup's boxes and fib lines, so you can scroll back and review the risk/reward of each historical setup. Pine caps a script at 500 boxes and 500 lines: a setup with an average-down unit draws four boxes, so that is the most recent ~125 setups (~166 fib-line sets). Set a small number to keep only the newest setups on the chart.")
 keepLab   = input.int(3, "Keep R/R labels for the last N setups (0 = all)", 0, 250, group = grpRR,
-     tooltip = "The boxes are cheap to look at; the text labels are what makes a chart unreadable when they stack up. This keeps the $ risk/reward label on the newest few setups only, while the boxes stay for the whole history. 0 keeps every label.")
+     tooltip = "The boxes are cheap to look at; the text labels are what makes a chart unreadable when they stack up. This keeps the $ risk/reward labels on the newest few setups only (both the first entry's and the average-down unit's), while the boxes stay for the whole history. 0 keeps every label.")
 
 // ---------------------------------------------------------------- Historical probabilities
 grpP      = "Historical probabilities"
@@ -423,11 +449,9 @@ if or_rDone and not na(or_rH) and or_rH > or_rL
         or_e2 := or_rL + 0.5*or_rng
         or_zstop := or_shallow ? or_rH : (orbDeepSL == "75% line" ? or_rL + 0.75*or_rng : or_rH)
     if or_dir != 0
-        orbU  = (orbAvg and or_shallow) ? 2 : 1                            // units this setup will use
-        orbBud = setupBudget / orbU                                        // $ risk budget per unit
-        orbUPct = orbBud / acctSize * 100.0                                // that unit's risk as a % of capital
-        orbSz1 := useRiskSize ? f_size(orbBud, math.abs(or_e1 - or_zstop), orbUPct) : orbQty
-        orbSz2 := useRiskSize ? f_size(orbBud, math.abs(or_e2 - or_zstop), orbUPct) : orbQty
+        // each unit is sized on its own budget and its own stop distance (the add sits closer to the stop)
+        orbSz1 := useRiskSize ? f_size(orbBud1, math.abs(or_e1 - or_zstop), orbBud1 / acctSize * 100.0) : orbQty1
+        orbSz2 := useRiskSize ? f_size(orbBud2, math.abs(or_e2 - or_zstop), orbBud2 / acctSize * 100.0) : orbQty2
 or_useAdd = orbAvg and or_shallow and not na(or_e2)
 // break by selected type
 or_brk = orbBreak == "Wick (touch)" ? ((or_dir == 1 and high >= or_rH) or (or_dir == -1 and low <= or_rL)) : ((or_dir == 1 and close > or_rH) or (or_dir == -1 and close < or_rL))
@@ -674,11 +698,8 @@ if ib_rDone and not na(ib_rH) and ib_rH > ib_rL
         ib_e2 := ib_rL + 0.5*ib_rng
         ib_zstop := ib_shallow ? ib_rH : (ibDeepSL == "75% line" ? ib_rL + 0.75*ib_rng : ib_rH)
     if ib_dir != 0
-        ibU  = (ibAvg and ib_shallow) ? 2 : 1
-        ibBud = setupBudget / ibU
-        ibUPct = ibBud / acctSize * 100.0
-        ibSz1 := useRiskSize ? f_size(ibBud, math.abs(ib_e1 - ib_zstop), ibUPct) : ibQty
-        ibSz2 := useRiskSize ? f_size(ibBud, math.abs(ib_e2 - ib_zstop), ibUPct) : ibQty
+        ibSz1 := useRiskSize ? f_size(ibBud1, math.abs(ib_e1 - ib_zstop), ibBud1 / acctSize * 100.0) : ibQty1
+        ibSz2 := useRiskSize ? f_size(ibBud2, math.abs(ib_e2 - ib_zstop), ibBud2 / acctSize * 100.0) : ibQty2
 // INTERACTION: an OPEN ORB trade always keeps priority - the IB order is held back (either direction, so the two
 // can never stack risk or hedge each other). The IB is not cancelled, only delayed: the moment the ORB closes
 // (target, stop or the flip of its own exit) the IB limit goes in, provided price has NOT already traded through
@@ -917,32 +938,47 @@ if brkAlerts and runIB and ib_dir != 0 and ib_broke and not ib_broke[1]
 // HISTORY: every valid setup keeps its boxes and fib lines, so you can scroll back and read the risk/reward of
 // any past setup at the price levels it actually had. Only the text labels are capped (newest few by default),
 // since those are what turn a long history into noise. Both limits are inputs; 0 on either means keep everything.
+// TWO UNITS, TWO BOXES: the first entry gets a solid box pair and the average-down unit (when it is armed) gets a
+// dashed, lighter pair drawn from the 50% line to the same stop and the same target - so each unit's own risk and
+// reward in dollars, at its own contract count, can be read straight off the chart.
 var array<box>   dBox = array.new<box>()
 var array<line>  dLin = array.new<line>()
 var array<label> dLab = array.new<label>()
 
+// A setup draws up to FOUR boxes (first entry + average-down unit, two each) and up to TWO labels, so the
+// per-setup limits are multiplied out here - "keep the last N setups" means the same thing either way.
 f_trimDraws() =>
     if keepBox > 0
-        while array.size(dBox) > keepBox * 2
+        while array.size(dBox) > keepBox * 4
             box.delete(array.shift(dBox))
         while array.size(dLin) > keepBox * 3
             line.delete(array.shift(dLin))
     if keepLab > 0
-        while array.size(dLab) > keepLab
+        while array.size(dLab) > keepLab * 2
             label.delete(array.shift(dLab))
 
-// q = contracts on this entry. ent2/q2 describe the average-down unit when one is armed - it gets no box of its
-// own, its numbers ride along in the label so the chart stays readable.
-f_drawRR(int d, float ent, float zstop, float ptp, float q, color sigCol, string tag, float ent2, float q2) =>
+// Markup for ONE entry unit: a green box from its entry to the target, a red box from its entry to the stop, and
+// a label carrying that unit's own contracts / $ risk / $ reward. Both units of a setup share the same stop and
+// the same target, so the average-down box is the taller reward / shorter risk of the two.
+// q     = contracts on THIS entry (each entry has its own count and its own risk budget).
+// ent2/q2 = the OTHER unit, passed only on the first entry so its label can also show the setup total; pass
+//           na/0 on the average-down unit itself.
+// dashed = draw this unit's boxes with a dashed border and a lighter fill, so the add is told apart at a glance.
+f_drawRR(int d, float ent, float zstop, float ptp, float q, color sigCol, string tag, float ent2, float q2, bool dashed) =>
     riskUsd = math.abs(ent - zstop) * ptVal * q
     rewUsd  = math.abs(ptp - ent) * ptVal * q
     risk1   = math.abs(ent - zstop) * ptVal
     rew1    = math.abs(ptp - ent) * ptVal
     rrr = riskUsd > 0 ? rewUsd / riskUsd : na
-    bw = box.new(bar_index, d == 1 ? ptp : ent, bar_index + 1, d == 1 ? ent : ptp, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.green, 82))
-    br = box.new(bar_index, d == 1 ? ent : zstop, bar_index + 1, d == 1 ? zstop : ent, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.red, 82))
-    txt = tag + "  " + str.tostring(q, "#.#") + " contract" + (q == 1 ? "" : "s") +
-         "  Risk $" + str.tostring(riskUsd, "#") + " | Reward $" + str.tostring(rewUsd, "#") + " (" + str.tostring(rrr, "#.##") + "R)" +
+    gCol = color.new(color.green, dashed ? 89 : 82)
+    rCol = color.new(color.red,   dashed ? 89 : 82)
+    bw = box.new(bar_index, d == 1 ? ptp : ent, bar_index + 1, d == 1 ? ent : ptp, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = gCol)
+    br = box.new(bar_index, d == 1 ? ent : zstop, bar_index + 1, d == 1 ? zstop : ent, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = rCol)
+    if dashed
+        box.set_border_style(bw, line.style_dashed)
+        box.set_border_style(br, line.style_dashed)
+    txt = tag + "  " + str.tostring(q, "#.#") + " contract" + (q == 1 ? "" : "s") + " @ " + str.tostring(math.round_to_mintick(ent)) +
+         "\nRisk $" + str.tostring(riskUsd, "#") + " | Reward $" + str.tostring(rewUsd, "#") + " (" + str.tostring(rrr, "#.##") + "R)" +
          "\n1 contract: Risk $" + str.tostring(risk1, "#") + " | Reward $" + str.tostring(rew1, "#")
     if not na(ent2) and q2 > 0
         totR = riskUsd + math.abs(ent2 - zstop) * ptVal * q2
@@ -950,7 +986,7 @@ f_drawRR(int d, float ent, float zstop, float ptp, float q, color sigCol, string
         txt := txt + "\n+ avg-down " + str.tostring(q2, "#.#") + " @ " + str.tostring(math.round_to_mintick(ent2)) +
              "  ->  setup total Risk $" + str.tostring(totR, "#") + " | Reward $" + str.tostring(totW, "#") +
              " (" + str.tostring(totR > 0 ? totW / totR : na, "#.##") + "R)"
-    lb = label.new(bar_index + 1, ent, txt, xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.gray, 15), textcolor = color.white, size = size.small)
+    lb = label.new(bar_index + 1, ent, txt, xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.gray, dashed ? 35 : 15), textcolor = color.white, size = size.small)
     array.push(dBox, bw)
     array.push(dBox, br)
     array.push(dLab, lb)
@@ -964,61 +1000,92 @@ f_drawFibs(float rL, float rg, color sigCol, array<line> dest) =>
         array.push(dest, ln)
         array.push(dLin, ln)
 
-// stretch the live setup's drawings to the current bar; prices stay exactly where they were set
-f_grow(box bw, box br, label lb, array<line> fib) =>
+// stretch one live unit's drawings to the current bar; prices stay exactly where they were set
+f_growUnit(box bw, box br, label lb) =>
     if not na(bw)
         box.set_right(bw, bar_index)
         box.set_right(br, bar_index)
-        label.set_x(lb, bar_index)
+        if not na(lb)
+            label.set_x(lb, bar_index)
+
+f_growFibs(array<line> fib) =>
     if array.size(fib) > 0
         for i = 0 to array.size(fib) - 1
             line.set_x2(array.get(fib, i), bar_index)
 
-var box   orbBw = na
-var box   orbBr = na
-var label orbLb = na
+var box   orbBw  = na
+var box   orbBr  = na
+var label orbLb  = na
+var box   orbBw2 = na            // the average-down unit's own pair of boxes
+var box   orbBr2 = na
+var label orbLb2 = na
 var bool  orbGrow = false
 var array<line> orbFib = array.new<line>()
 if runORB and or_placed and not or_placed[1] and not na(or_e1) and not na(or_zstop)
     orTP = f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
-    orbBw := na
-    orbBr := na
-    orbLb := na
+    orbBw  := na
+    orbBr  := na
+    orbLb  := na
+    orbBw2 := na
+    orbBr2 := na
+    orbLb2 := na
     if showFibs
         f_drawFibs(or_rL, or_rng, color.new(color.orange, 0), orbFib)
     if showRR
-        [bw, br, lb] = f_drawRR(or_dir, or_e1, or_zstop, orTP, orbSz1, color.new(color.orange, 0), "ORB", (or_useAdd and orbSz2 >= 1) ? or_e2 : na, or_useAdd ? orbSz2 : 0)
+        orbAdd = or_useAdd and orbSz2 >= 1
+        [bw, br, lb] = f_drawRR(or_dir, or_e1, or_zstop, orTP, orbSz1, color.new(color.orange, 0), "ORB entry 1", orbAdd ? or_e2 : na, orbAdd ? orbSz2 : 0, false)
         orbBw := bw
         orbBr := br
         orbLb := lb
+        if orbAdd and showRR2
+            [bwA, brA, lbA] = f_drawRR(or_dir, or_e2, or_zstop, orTP, orbSz2, color.new(color.orange, 0), "ORB avg-down", float(na), 0.0, true)
+            orbBw2 := bwA
+            orbBr2 := brA
+            orbLb2 := lbA
     orbGrow := true
     f_trimDraws()
 if orbGrow
-    f_grow(orbBw, orbBr, orbLb, orbFib)
+    f_growUnit(orbBw,  orbBr,  orbLb)
+    f_growUnit(orbBw2, orbBr2, orbLb2)
+    f_growFibs(orbFib)
     if or_closed or flatten or (not (or_f1 or or_f2) and not orbWin)
         orbGrow := false
 
-var box   ibBw = na
-var box   ibBr = na
-var label ibLb = na
+var box   ibBw  = na
+var box   ibBr  = na
+var label ibLb  = na
+var box   ibBw2 = na             // the average-down unit's own pair of boxes
+var box   ibBr2 = na
+var label ibLb2 = na
 var bool  ibGrow = false
 var array<line> ibFib = array.new<line>()
 if runIB and ib_placed and not ib_placed[1] and not na(ib_e1) and not na(ib_zstop)
     ibTP = f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
-    ibBw := na
-    ibBr := na
-    ibLb := na
+    ibBw  := na
+    ibBr  := na
+    ibLb  := na
+    ibBw2 := na
+    ibBr2 := na
+    ibLb2 := na
     if showFibs
         f_drawFibs(ib_rL, ib_rng, color.new(color.teal, 0), ibFib)
     if showRR
-        [bw2, br2, lb2] = f_drawRR(ib_dir, ib_e1, ib_zstop, ibTP, ibSz1, color.new(color.teal, 0), "IB", (ib_useAdd and ibSz2 >= 1) ? ib_e2 : na, ib_useAdd ? ibSz2 : 0)
+        ibAdd = ib_useAdd and ibSz2 >= 1
+        [bw2, br2, lb2] = f_drawRR(ib_dir, ib_e1, ib_zstop, ibTP, ibSz1, color.new(color.teal, 0), "IB entry 1", ibAdd ? ib_e2 : na, ibAdd ? ibSz2 : 0, false)
         ibBw := bw2
         ibBr := br2
         ibLb := lb2
+        if ibAdd and showRR2
+            [bwB, brB, lbB] = f_drawRR(ib_dir, ib_e2, ib_zstop, ibTP, ibSz2, color.new(color.teal, 0), "IB avg-down", float(na), 0.0, true)
+            ibBw2 := bwB
+            ibBr2 := brB
+            ibLb2 := lbB
     ibGrow := true
     f_trimDraws()
 if ibGrow
-    f_grow(ibBw, ibBr, ibLb, ibFib)
+    f_growUnit(ibBw,  ibBr,  ibLb)
+    f_growUnit(ibBw2, ibBr2, ibLb2)
+    f_growFibs(ibFib)
     if ib_closed or flatten or (not (ib_f1 or ib_f2) and not ibWin)
         ibGrow := false
 
@@ -1034,7 +1101,7 @@ if showInfo and barstate.islast
     table.cell(info, 0, 5,  "  shallow -> 25% line | deeper -> 50% line",          text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 6,  "Stop: shallow = range extreme | deeper = 75% line",   text_color = color.white,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 7,  "Target: ORB L +10% / S +30% ; IB +30% extension",    text_color = color.white,  text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 8,  "Avg-down: 2nd unit @ 50% (shallow setups)",           text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 8,  "Avg-down: 2nd unit @ 50% - own size & risk",          text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 9,  "One at a time: IB waits for an open ORB to close",    text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 13, orbCarry ? "ORB carry ON: unfilled ORB rests past 10:30" : "ORB carry off (unfilled ORB dies at 10:30)", text_color = orbCarry ? color.orange : color.gray, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 10, "Skip double-break days | Flatten 15:30 ET",           text_color = color.silver, text_size = size.small, text_halign = text.align_left)
