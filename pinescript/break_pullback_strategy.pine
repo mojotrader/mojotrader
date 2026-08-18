@@ -39,8 +39,9 @@ strategy("Break-then-Pullback (ORB + IB)", overlay = true, pyramiding = 6, max_b
      initial_capital = 30000, margin_long = 0, margin_short = 0,
      default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
      commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
-// NOTE: position sizing uses a FIXED account size (see 'Account size $' input) - it does NOT compound with P&L,
-//   and risk is set PER ENTRY (four independent budgets), not split out of one per-setup number.
+// NOTE: position sizing has three modes, picked by checkbox - fixed contracts, risk $ per trade, or risk % of a
+//   FIXED account size (see 'Account size $'). It does NOT compound with P&L, and in every mode risk is set PER
+//   ENTRY (four independent budgets: ORB first, ORB avg-down, IB first, IB avg-down).
 
 // ---------------------------------------------------------------- Strategy toggles (isolate each for backtesting)
 gStrat    = "Strategies (toggle to track each separately)"
@@ -63,13 +64,20 @@ ibWed     = input.bool(true, "IB Wednesday", group = gDayI)
 ibThu     = input.bool(true, "IB Thursday",  group = gDayI)
 ibFri     = input.bool(true, "IB Friday",    group = gDayI)
 
-// ---------------------------------------------------------------- Risk sizing (PER ENTRY: % of a FIXED capital, or a flat $ - no compounding)
-// Each of the four entries is sized on its own: ORB first, ORB average-down, IB first, IB average-down.
-// Whichever way you size (fixed contracts or by risk), the four are independent - the average-down unit can be
-// bigger, smaller or the same as the entry it doubles up on.
+// ---------------------------------------------------------------- Risk sizing (PER ENTRY - no compounding)
+// THREE risk-management modes, one active at a time - tick the one you want:
+//   1) Fixed contract size      - trade the four contract counts exactly as typed.
+//   2) Risk per trade in $      - each entry risks its own flat dollar amount; the stop distance sets the size.
+//   3) Risk % of the capital    - each entry risks its own % of the FIXED account size below; same idea, in %.
+// Each of the four entries is sized on its own: ORB first, ORB average-down, IB first, IB average-down - so in
+// every mode the average-down unit can be bigger, smaller or the same as the entry it doubles up on.
 gRisk       = "Risk sizing"
-useRiskSize = input.bool(false, "Size by risk (else use the contracts below)", group = gRisk,
-     tooltip = "OFF (default): trade exactly the four contract counts set below - the R/R tool, the strategy orders and the webhook all use them. ON: ignore those counts and size each entry so ITS OWN risk equals that entry's risk budget below.")
+mFixed      = input.bool(true,  "1) Fixed contract size", group = gRisk,
+     tooltip = "MODE 1 (default). Trade exactly the four contract counts below - no risk maths at all. The R/R tool, the strategy orders and the webhook all use those counts. If more than one mode is ticked this one wins; if none is ticked this one is used.")
+mDlr        = input.bool(false, "2) Risk per trade in $", group = gRisk,
+     tooltip = "MODE 2. Ignore the contract counts: size each entry so ITS OWN risk equals that entry's dollar amount ('... risk ($)' inputs below). The stop distance decides the contract count, so a wide stop buys fewer contracts. Independent of the account size, which makes it easy to compare instruments or runs. Untick mode 1 for this to take effect.")
+mPct        = input.bool(false, "3) Risk % of the capital", group = gRisk,
+     tooltip = "MODE 3. Same sizing maths as mode 2, but each entry's budget is a percentage of the FIXED account size below ('... risk (% of capital)' inputs). It does NOT compound - the account size is a constant, so the dollar risk per trade is the same every day. Untick modes 1 and 2 for this to take effect.")
 orbQty1In   = input.float(2, "ORB contracts - FIRST entry",    minval = 1, step = 1, group = gRisk,
      tooltip = "Contracts on the first ORB unit (the limit at the fib pullback: 25% line on a shallow setup, 50% line on a deeper one).")
 orbQty2In   = input.float(2, "ORB contracts - AVG-DOWN entry", minval = 1, step = 1, group = gRisk,
@@ -80,30 +88,36 @@ ibQty2In    = input.float(1, "IB contracts - AVG-DOWN entry",  minval = 1, step 
      tooltip = "Contracts on the IB average-down unit at the 50% line (shallow setups only, when average-down is on).")
 acctSize    = input.float(30000, "Account size $ (fixed - NO compounding)", minval = 1, group = gRisk,
      tooltip = "Sizing uses this constant capital every day; it does NOT grow/shrink with P&L. So the dollar risk per trade is the same every day (no compounding).")
-riskMode    = input.string("% of capital", "Risk per ENTRY measured in", options = ["% of capital", "$ per entry"], group = gRisk,
-     tooltip = "% of capital: each entry risks its own percentage of the fixed account size above. $ per entry: each entry risks its own flat dollar amount regardless of the account size - useful when you want the same dollar risk across instruments, or when comparing runs without the account size confusing the picture. Whichever is selected, the other four inputs are ignored.")
 orbRiskPct1 = input.float(0.5, "  ORB first entry risk (% of capital)",    minval = 0.05, step = 0.05, group = gRisk,
-     tooltip = "Used when 'Risk per ENTRY measured in' = % of capital. The stop distance of the first ORB entry then decides its contract count. 0.5% on 30k = $150.")
+     tooltip = "MODE 3 only. The stop distance of the first ORB entry then decides its contract count. 0.5% on 30k = $150.")
 orbRiskPct2 = input.float(0.5, "  ORB avg-down entry risk (% of capital)", minval = 0.05, step = 0.05, group = gRisk,
-     tooltip = "Risk budget for the ORB average-down unit. Its stop distance is shorter (it enters at the 50% line), so the same % buys more contracts than the first entry - lower it if you do not want the add to dominate the setup.")
+     tooltip = "MODE 3 only. Risk budget for the ORB average-down unit. Its stop distance is shorter (it enters at the 50% line), so the same % buys more contracts than the first entry - lower it if you do not want the add to dominate the setup.")
 ibRiskPct1  = input.float(0.5, "  IB first entry risk (% of capital)",     minval = 0.05, step = 0.05, group = gRisk)
 ibRiskPct2  = input.float(0.5, "  IB avg-down entry risk (% of capital)",  minval = 0.05, step = 0.05, group = gRisk)
 orbRiskDlr1 = input.float(150, "  ORB first entry risk ($)",    minval = 1, step = 25, group = gRisk,
-     tooltip = "Used when 'Risk per ENTRY measured in' = $ per entry. Dollar risk on the first ORB entry; the stop distance decides the contract count.")
+     tooltip = "MODE 2 only. Dollar risk on the first ORB entry; the stop distance decides the contract count.")
 orbRiskDlr2 = input.float(150, "  ORB avg-down entry risk ($)", minval = 1, step = 25, group = gRisk,
-     tooltip = "Dollar risk on the ORB average-down unit, independent of the first entry.")
+     tooltip = "MODE 2 only. Dollar risk on the ORB average-down unit, independent of the first entry.")
 ibRiskDlr1  = input.float(150, "  IB first entry risk ($)",     minval = 1, step = 25, group = gRisk)
 ibRiskDlr2  = input.float(150, "  IB avg-down entry risk ($)",  minval = 1, step = 25, group = gRisk)
 maxDayPct   = input.float(2.0, "Daily max loss (% of capital, 0 = off)", minval = 0, step = 0.5, group = gRisk,
      tooltip = "Once the day's loss reaches this % of the day's starting equity, open trades are closed and no new trades are taken until the next day. This one is always a percentage of the account size, independent of how the per-entry risk is expressed.")
 
-// The $ risk ONE entry may lose, however it was expressed. Every sizing calculation below reads these four,
-// so the % and $ inputs never both apply and switching mode changes nothing else.
-byDlr   = riskMode == "$ per entry"
-orbBud1 = byDlr ? orbRiskDlr1 : acctSize * (orbRiskPct1 / 100.0)
-orbBud2 = byDlr ? orbRiskDlr2 : acctSize * (orbRiskPct2 / 100.0)
-ibBud1  = byDlr ? ibRiskDlr1  : acctSize * (ibRiskPct1  / 100.0)
-ibBud2  = byDlr ? ibRiskDlr2  : acctSize * (ibRiskPct2  / 100.0)
+// Exactly ONE mode ever runs, whatever the checkboxes say: fixed contracts wins, then $ per trade, then % of
+// capital; tick nothing and it falls back to fixed contracts. So the boxes behave like radio buttons without
+// Pine having any, and no combination can ever size a trade two ways at once.
+rmFixed = mFixed or (not mDlr and not mPct)
+rmDlr   = not rmFixed and mDlr
+rmPct   = not rmFixed and not rmDlr
+sizeByRisk = not rmFixed                                  // modes 2 and 3 both size off a $ budget
+modeTxt = rmFixed ? "Sizing: fixed contracts" : rmDlr ? "Sizing: risk $ per trade" : rmPct ? "Sizing: risk % of capital" : "Sizing: fixed contracts"
+
+// The $ risk ONE entry may lose in the two risk modes. Every sizing calculation below reads these four, so the
+// % and $ inputs never both apply and switching mode changes nothing else.
+orbBud1 = rmDlr ? orbRiskDlr1 : acctSize * (orbRiskPct1 / 100.0)
+orbBud2 = rmDlr ? orbRiskDlr2 : acctSize * (orbRiskPct2 / 100.0)
+ibBud1  = rmDlr ? ibRiskDlr1  : acctSize * (ibRiskPct1  / 100.0)
+ibBud2  = rmDlr ? ibRiskDlr2  : acctSize * (ibRiskPct2  / 100.0)
 
 // ---------------------------------------------------------------- HARDCODED CONFIG (edit values here)
 // Session
@@ -450,8 +464,8 @@ if or_rDone and not na(or_rH) and or_rH > or_rL
         or_zstop := or_shallow ? or_rH : (orbDeepSL == "75% line" ? or_rL + 0.75*or_rng : or_rH)
     if or_dir != 0
         // each unit is sized on its own budget and its own stop distance (the add sits closer to the stop)
-        orbSz1 := useRiskSize ? f_size(orbBud1, math.abs(or_e1 - or_zstop), orbBud1 / acctSize * 100.0) : orbQty1
-        orbSz2 := useRiskSize ? f_size(orbBud2, math.abs(or_e2 - or_zstop), orbBud2 / acctSize * 100.0) : orbQty2
+        orbSz1 := sizeByRisk ? f_size(orbBud1, math.abs(or_e1 - or_zstop), orbBud1 / acctSize * 100.0) : orbQty1
+        orbSz2 := sizeByRisk ? f_size(orbBud2, math.abs(or_e2 - or_zstop), orbBud2 / acctSize * 100.0) : orbQty2
 or_useAdd = orbAvg and or_shallow and not na(or_e2)
 // break by selected type
 or_brk = orbBreak == "Wick (touch)" ? ((or_dir == 1 and high >= or_rH) or (or_dir == -1 and low <= or_rL)) : ((or_dir == 1 and close > or_rH) or (or_dir == -1 and close < or_rL))
@@ -698,8 +712,8 @@ if ib_rDone and not na(ib_rH) and ib_rH > ib_rL
         ib_e2 := ib_rL + 0.5*ib_rng
         ib_zstop := ib_shallow ? ib_rH : (ibDeepSL == "75% line" ? ib_rL + 0.75*ib_rng : ib_rH)
     if ib_dir != 0
-        ibSz1 := useRiskSize ? f_size(ibBud1, math.abs(ib_e1 - ib_zstop), ibBud1 / acctSize * 100.0) : ibQty1
-        ibSz2 := useRiskSize ? f_size(ibBud2, math.abs(ib_e2 - ib_zstop), ibBud2 / acctSize * 100.0) : ibQty2
+        ibSz1 := sizeByRisk ? f_size(ibBud1, math.abs(ib_e1 - ib_zstop), ibBud1 / acctSize * 100.0) : ibQty1
+        ibSz2 := sizeByRisk ? f_size(ibBud2, math.abs(ib_e2 - ib_zstop), ibBud2 / acctSize * 100.0) : ibQty2
 // INTERACTION: an OPEN ORB trade always keeps priority - the IB order is held back (either direction, so the two
 // can never stack risk or hedge each other). The IB is not cancelled, only delayed: the moment the ORB closes
 // (target, stop or the flip of its own exit) the IB limit goes in, provided price has NOT already traded through
@@ -1092,7 +1106,7 @@ if ibGrow
 // ---------------------------------------------------------------- Strategy rules panel (top-right)
 var table info = na
 if showInfo and barstate.islast
-    info := table.new(position.top_right, 1, 14, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
+    info := table.new(position.top_right, 1, 15, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
     table.cell(info, 0, 0,  "BREAK-THEN-PULLBACK  (ORB + IB)",                    text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 1,  "Ranges: ORB 09:30-09:45 | IB 09:30-10:30 (ET)",      text_color = color.white,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 2,  "Direction: low-first = LONG, high-first = SHORT",     text_color = color.white,  text_size = size.small, text_halign = text.align_left)
@@ -1107,6 +1121,7 @@ if showInfo and barstate.islast
     table.cell(info, 0, 10, "Skip double-break days | Flatten 15:30 ET",           text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 11, "Toggle Run ORB/IB + weekdays to isolate results",     text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 12, "Odds live in the table; > marks where price is now",  text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 14, modeTxt + (rmFixed ? "" : " (per entry, fixed capital)"), text_color = color.yellow, text_size = size.small, text_halign = text.align_left)
 
 // ---------------------------------------------------------------- Probability table
 // Columns: N = sample size, Reach = how often that starting point is even reached, then the odds of price trading
