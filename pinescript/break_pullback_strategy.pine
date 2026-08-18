@@ -17,13 +17,18 @@
 //   1) At the range close: bias = low-before-high (long) / high-before-low (short) AND the range close in the
 //      top half (long) / bottom half (short) of the range.
 //   2) The trade ARMS only AFTER the range level BREAKS. Break type is selectable: "Wick (touch)" or "Close beyond".
-//   3) A LIMIT rests at the fib pullback: shallow(0-25%)->25% line, deeper(25-50%)->50% line.
+//   3) A LIMIT rests at the selected pullback level. EVERY level is an input, named by retracement DEPTH from the
+//      level that broke: 0% = the range level itself (a RETEST entry - no pullback discount, fills far more often),
+//      25/50/75% = the fib lines inside the range, 100% = the far side. Longs and shorts mirror automatically.
+//      Shallow and deeper setups each carry their own entry and their own stop (defaults: 25%/50% entry, 100%/75% stop).
 //   4) AVERAGE DOWN (optional): shallow setup -> a 2nd unit at the 50% line. Each of the four entries (ORB first,
 //      ORB avg-down, IB first, IB avg-down) carries its OWN contract count and its own risk budget, and the R/R
 //      tool draws a box per unit - solid for the first entry, dashed for the add.
 //   FILTERS: skip double-break days; skip ORB setups whose range is under the "Min ORB range %" of price.
-//   Stop: shallow -> range extreme (100%) ; deeper -> 75% line. Optional breakeven when the range level is reclaimed.
-//   TP long/short selectable: range level / +10% / +30% / +50% / HOD-LOD. One setup/day per range, EOD flatten.
+//   Stop: any level deeper than that setup's entry (a stop at or above the entry disables the setup).
+//   TP long/short: range level / +10% / +20% / +30% / +50% / +75% / +100% extension / HOD-LOD. A target that is not
+//   beyond the entry (e.g. a 0% entry with a "Range level" target) simply takes no trade.
+//   One setup/day per range, EOD flatten. Session windows, cutoffs, thresholds and range filters are all inputs.
 //
 // PROBABILITY TABLE (bottom right) - how often price REACHES each level from a given starting point, walk-forward:
 //   - "From FILL" rows: from the entry fill to the EOD flatten, per range-size bucket.
@@ -119,47 +124,88 @@ orbBud2 = rmDlr ? orbRiskDlr2 : acctSize * (orbRiskPct2 / 100.0)
 ibBud1  = rmDlr ? ibRiskDlr1  : acctSize * (ibRiskPct1  / 100.0)
 ibBud2  = rmDlr ? ibRiskDlr2  : acctSize * (ibRiskPct2  / 100.0)
 
-// ---------------------------------------------------------------- HARDCODED CONFIG (edit values here)
-// Session
-tz      = "America/New_York"
-sess    = "0930-1600"
-orbSess = "0930-0945"
-ibSess  = "0930-1030"
-flatH   = 15
-flatM   = 30
-// ORB settings
-orbLong   = true
-orbShort  = true
-orbBreak  = "Close beyond"
-orbAvg    = true
-orbTpL    = "Ext 10%"
-orbTpS    = "Ext 30%"
-orbDeepSL = "75% line"
-orbBE     = false
+// ---------------------------------------------------------------- Session & timing
+gSess     = "Session & timing"
+tz        = input.string("America/New_York", "Timezone", group = gSess,
+     tooltip = "Every time in this script - the range windows, the cutoffs, the flatten - is read in this timezone, whatever the chart's own timezone is.")
+sess      = input.session("0930-1600", "Trading session", group = gSess,
+     tooltip = "Bars outside this window are ignored completely: no range building, no entries, no tracking.")
+orbSess   = input.session("0930-0945", "ORB range window", group = gSess,
+     tooltip = "The opening range. 0930-0945 is the 15-minute ORB; 0930-1000 turns it into a 30-minute one. The setup is decided on the first bar AFTER this window closes.")
+ibSess    = input.session("0930-1030", "IB range window", group = gSess,
+     tooltip = "The initial balance - 0930-1030 is the classic one hour. It must end later than the ORB window for the ORB-first priority rules to mean anything.")
+flatH     = input.int(15, "Flatten hour", minval = 0, maxval = 23, group = gSess)
+flatM     = input.int(30, "Flatten minute", minval = 0, maxval = 59, group = gSess,
+     tooltip = "Everything is closed and cancelled at this time - the last exit of the day, whatever the trade is doing.")
+
+// ---------------------------------------------------------------- ORB setup - every level is selectable
+// LEVELS ARE NAMED BY RETRACEMENT DEPTH from the level that broke, so longs and shorts read the same:
+//     0%   = the broken range level itself (a RETEST entry - no pullback discount, the earliest fill)
+//     25%  / 50% / 75%  = the fib pullback lines inside the range
+//     100% = the far side of the range (the range extreme)
+// For a long the range HIGH is 0% and the range LOW is 100%; for a short it is the other way round.
+gO        = "ORB setup"
+orbLong   = input.bool(true,  "ORB longs",  group = gO)
+orbShort  = input.bool(true,  "ORB shorts", group = gO)
+orbBreak  = input.string("Close beyond", "Break type", options = ["Wick (touch)", "Close beyond"], group = gO,
+     tooltip = "What counts as breaking the range and arming the setup. Wick: any trade through the level. Close beyond: the bar must CLOSE past it - fewer setups, but it filters the pokes that immediately fail.")
+orbShThr  = input.float(75, "Shallow when the range closes beyond % of the range", minval = 50, maxval = 100, step = 5, group = gO,
+     tooltip = "Where the range's closing price splits a SHALLOW setup from a DEEPER one. 75 = the range must close in the top 25% (long) / bottom 25% (short) to count as shallow. Each class gets its own entry and its own stop below, so this decides which pair is used.")
+orbEshal  = input.string("25% line", "Entry - shallow setup", options = ["0% (range level)", "25% line", "50% line", "75% line"], group = gO,
+     tooltip = "Where the limit rests on a shallow setup. 0% = a retest of the broken level - it fills far more often and much sooner, at the cost of a worse price and a wider stop distance. 25/50/75% wait for a real pullback.")
+orbEdeep  = input.string("50% line", "Entry - deeper setup",  options = ["0% (range level)", "25% line", "50% line", "75% line"], group = gO,
+     tooltip = "Same, for a range that closed less decisively. Traditionally deeper than the shallow entry, but nothing stops you testing it the other way round.")
+orbSshal  = input.string("100% (range extreme)", "Stop - shallow setup", options = ["25% line", "50% line", "75% line", "100% (range extreme)"], group = gO,
+     tooltip = "The stop for a shallow setup. It MUST sit deeper than that setup's entry or the setup is skipped and nothing is drawn. Moving it from 100% to 75% roughly halves the risk per unit - the biggest single lever in the whole script.")
+orbSdeep  = input.string("75% line", "Stop - deeper setup", options = ["25% line", "50% line", "75% line", "100% (range extreme)"], group = gO)
+orbAvg    = input.bool(true, "Average down (2nd unit)", group = gO,
+     tooltip = "Add a second unit deeper in the range. It has its own contract count and its own risk budget in the Risk sizing group, and its own risk/reward box on the chart.")
+orbAvgLvl = input.string("50% line", "  Average-down level", options = ["25% line", "50% line", "75% line"], group = gO,
+     tooltip = "Where the second unit rests. It has to sit between the entry and the stop; if it does not, the add is skipped for that setup.")
+orbAvgSh  = input.bool(true, "  Average down on shallow setups only", group = gO,
+     tooltip = "ON (classic): only a shallow setup, whose entry is high in the range, gets a second unit. OFF: deeper setups add too, whenever the level fits between their entry and stop.")
+orbTpL    = input.string("Ext 10%", "Target - long",  options = ["Range level", "Ext 10%", "Ext 20%", "Ext 30%", "Ext 50%", "Ext 75%", "Ext 100%", "HOD/LOD"], group = gO,
+     tooltip = "Range level = back to the broken high. Ext X% = that far beyond it, measured in range widths. HOD/LOD = the day's extreme at the moment of the fill. A target at or behind the entry skips the setup.")
+orbTpS    = input.string("Ext 30%", "Target - short", options = ["Range level", "Ext 10%", "Ext 20%", "Ext 30%", "Ext 50%", "Ext 75%", "Ext 100%", "HOD/LOD"], group = gO)
+orbBE     = input.bool(false, "Breakeven stop when the range level is reclaimed", group = gO,
+     tooltip = "Once price trades back through the broken level in your favour, pull the stop to the average fill price. Cuts losers to zero - and turns a good many winners into scratches.")
+orbCutH   = input.int(15, "Entry cutoff hour", minval = 0, maxval = 23, group = gO)
+orbCutM   = input.int(0,  "Entry cutoff minute", minval = 0, maxval = 59, group = gO,
+     tooltip = "An ORB limit that has not filled by this time is cancelled. Note that when the IB also runs, the ORB is cut at the IB's formation instead - unless 'Carry an unfilled ORB past the IB' is armed.")
+orbMinRngPct = input.float(0.40, "Min ORB range (% of price, 0 = off)", minval = 0, step = 0.05, group = gO,
+     tooltip = "Skip ORB setups whose range is smaller than this % of price (range / range-low * 100). A too-tight range makes the stop and the target meaningless. Tune it per instrument - MNQ and MES do not have the same typical opening range.")
+
+// ---------------------------------------------------------------- IB setup - same knobs, its own values
+gI        = "IB setup"
+ibLong    = input.bool(true,  "IB longs",  group = gI)
+ibShort   = input.bool(true,  "IB shorts", group = gI)
+ibBreak   = input.string("Wick (touch)", "Break type", options = ["Wick (touch)", "Close beyond"], group = gI)
+ibShThr   = input.float(75, "Shallow when the range closes beyond % of the range", minval = 50, maxval = 100, step = 5, group = gI)
+ibEshal   = input.string("25% line", "Entry - shallow setup", options = ["0% (range level)", "25% line", "50% line", "75% line"], group = gI,
+     tooltip = "0% is a retest of the broken IB level. The IB is a wide range, so its 0% entry is a very different trade from its 50% one - the stop distance changes by a factor of two or more.")
+ibEdeep   = input.string("50% line", "Entry - deeper setup",  options = ["0% (range level)", "25% line", "50% line", "75% line"], group = gI)
+ibSshal   = input.string("100% (range extreme)", "Stop - shallow setup", options = ["25% line", "50% line", "75% line", "100% (range extreme)"], group = gI)
+ibSdeep   = input.string("75% line", "Stop - deeper setup", options = ["25% line", "50% line", "75% line", "100% (range extreme)"], group = gI)
+ibAvg     = input.bool(true, "Average down (2nd unit)", group = gI)
+ibAvgLvl  = input.string("50% line", "  Average-down level", options = ["25% line", "50% line", "75% line"], group = gI)
+ibAvgSh   = input.bool(true, "  Average down on shallow setups only", group = gI)
+ibTpL     = input.string("Ext 30%", "Target - long",  options = ["Range level", "Ext 10%", "Ext 20%", "Ext 30%", "Ext 50%", "Ext 75%", "Ext 100%", "HOD/LOD"], group = gI)
+ibTpS     = input.string("Ext 30%", "Target - short", options = ["Range level", "Ext 10%", "Ext 20%", "Ext 30%", "Ext 50%", "Ext 75%", "Ext 100%", "HOD/LOD"], group = gI)
+ibBE      = input.bool(false, "Breakeven stop when the range level is reclaimed", group = gI)
+ibCutH    = input.int(14, "Entry cutoff hour", minval = 0, maxval = 23, group = gI)
+ibCutM    = input.int(0,  "Entry cutoff minute", minval = 0, maxval = 59, group = gI)
+ibMinRngPct = input.float(0.0, "Min IB range (% of price, 0 = off)", minval = 0, step = 0.05, group = gI,
+     tooltip = "The IB equivalent of the ORB range filter. Off by default.")
+
 orbQty1   = orbQty1In         // contracts on the first ORB entry     (Risk sizing group)
 orbQty2   = orbQty2In         // contracts on the ORB avg-down entry  (Risk sizing group)
-orbCutH   = 15
-orbCutM   = 0
-// IB settings
-ibLong    = true
-ibShort   = true
-ibBreak   = "Wick (touch)"
-ibAvg     = true
-ibTpL     = "Ext 30%"
-ibTpS     = "Ext 30%"
-ibDeepSL  = "75% line"
-ibBE      = false
 ibQty1    = ibQty1In          // contracts on the first IB entry      (Risk sizing group)
 ibQty2    = ibQty2In          // contracts on the IB avg-down entry   (Risk sizing group)
-ibCutH    = 14
-ibCutM    = 0
 
 // ---------------------------------------------------------------- Filters
 gFilt     = "Filters"
 noDbl     = input.bool(true, "Skip double-break days (both range sides break)", group = gFilt,
      tooltip = "If the side OPPOSITE the setup direction also breaks (long: price trades below the range low; short: above the range high), cancel the pending entry and take no trade that day. Keeps you to clean one-directional break days only.")
-orbMinRngPct = input.float(0.40, "Min ORB range (% of price, 0 = off)", minval = 0, step = 0.05, group = gFilt,
-     tooltip = "Skip ORB setups whose 15-min opening range is smaller than this % of price (range / range-low * 100). The segmentation test showed the smallest-range ORB bucket (<~0.4%) is the only unprofitable segment - 36% win, PF 0.71. IB is NOT filtered. Set 0 to disable. Tune to your own data; the test sample was limited.")
 
 // ---------------------------------------------------------------- Automation (PickMyTrade webhook -> Tradovate)
 grpA      = "Automation - PickMyTrade"
@@ -250,9 +296,20 @@ f_size(float budget, float ptDist, float unitPct) =>
     n := (unitPct >= 0.5 and n < 1) ? 1 : n
     n
 
+// ---- level helpers -------------------------------------------------------------------------------------------
+// One convention for every selectable level: DEPTH is measured from the level that broke (0%) towards the far
+// side of the range (100%), so a long and a short read identically and 0% simply means "the range level itself".
+f_depth(string s) =>
+    s == "0% (range level)" ? 0.0 : s == "25% line" ? 0.25 : s == "50% line" ? 0.50 : s == "75% line" ? 0.75 : 1.0
+f_lvl(int d, float rH, float rL, float rg, float dep) =>
+    d == 1 ? rH - dep*rg : rL + dep*rg
+f_hm(int h, int m) => str.tostring(h, "00") + ":" + str.tostring(m, "00")
+
 // TP resolver
 f_tp(int d, float rH, float rL, float rg, float dHi, float dLo, string tpL, string tpS) =>
-    d == 1 ? (tpL == "HOD/LOD" ? dHi : tpL == "Ext 10%" ? rH + 0.10*rg : tpL == "Ext 30%" ? rH + 0.30*rg : tpL == "Ext 50%" ? rH + 0.50*rg : rH) : (tpS == "HOD/LOD" ? dLo : tpS == "Ext 10%" ? rL - 0.10*rg : tpS == "Ext 30%" ? rL - 0.30*rg : tpS == "Ext 50%" ? rL - 0.50*rg : rL)
+    sel = d == 1 ? tpL : tpS
+    ext = sel == "Ext 10%" ? 0.10 : sel == "Ext 20%" ? 0.20 : sel == "Ext 30%" ? 0.30 : sel == "Ext 50%" ? 0.50 : sel == "Ext 75%" ? 0.75 : sel == "Ext 100%" ? 1.00 : 0.0
+    sel == "HOD/LOD" ? (d == 1 ? dHi : dLo) : (d == 1 ? rH + ext*rg : rL - ext*rg)
 
 // ================================================================ Historical-probability stats
 // TWO walk-forward studies are collected (a day is only added to the sample after its EOD flatten, so the numbers
@@ -414,7 +471,10 @@ var float or_curStop = na
 var float or_curTP = na
 var bool  or_beDone = false
 var bool  or_closed = false
+var int   or_fillBar = na
 var bool  or_oppBroke = false
+var bool  or_okLv = false        // the selected stop sits deeper than the selected entry
+var bool  or_addOK = false       // the average-down level fits between that entry and that stop
 var float orbSz1 = na
 var float orbSz2 = na
 
@@ -436,7 +496,10 @@ if newSession
     or_curTP := na
     or_beDone := false
     or_closed := false
+    or_fillBar := na
     or_oppBroke := false
+    or_okLv := false
+    or_addOK := false
     orbSz1 := na
     orbSz2 := na
 if or_inR
@@ -450,23 +513,26 @@ if or_rDone and not na(or_rH) and or_rH > or_rL
     or_rng := or_rH - or_rL
     or_lf = or_rLbar < or_rHbar
     or_pos = (close[1] - or_rL) / or_rng
+    orbThr = orbShThr / 100.0
     if orbLong and or_lf and or_pos >= 0.5
         or_dir := 1
-        or_shallow := or_pos >= 0.75
-        or_e1 := or_shallow ? or_rL + 0.75*or_rng : or_rL + 0.5*or_rng
-        or_e2 := or_rL + 0.5*or_rng
-        or_zstop := or_shallow ? or_rL : (orbDeepSL == "75% line" ? or_rL + 0.25*or_rng : or_rL)
+        or_shallow := or_pos >= orbThr
     else if orbShort and (not or_lf) and or_pos <= 0.5
         or_dir := -1
-        or_shallow := or_pos <= 0.25
-        or_e1 := or_shallow ? or_rL + 0.25*or_rng : or_rL + 0.5*or_rng
-        or_e2 := or_rL + 0.5*or_rng
-        or_zstop := or_shallow ? or_rH : (orbDeepSL == "75% line" ? or_rL + 0.75*or_rng : or_rH)
+        or_shallow := or_pos <= 1.0 - orbThr
     if or_dir != 0
+        oEdep = f_depth(or_shallow ? orbEshal : orbEdeep)     // entry depth for this class of setup
+        oSdep = f_depth(or_shallow ? orbSshal : orbSdeep)     // its stop
+        oAdep = f_depth(orbAvgLvl)                            // the average-down unit
+        or_okLv  := oSdep > oEdep + 0.0001
+        or_addOK := orbAvg and (or_shallow or not orbAvgSh) and oAdep > oEdep + 0.0001 and oAdep < oSdep - 0.0001
+        or_e1    := f_lvl(or_dir, or_rH, or_rL, or_rng, oEdep)
+        or_e2    := or_addOK ? f_lvl(or_dir, or_rH, or_rL, or_rng, oAdep) : na
+        or_zstop := f_lvl(or_dir, or_rH, or_rL, or_rng, oSdep)
         // each unit is sized on its own budget and its own stop distance (the add sits closer to the stop)
         orbSz1 := sizeByRisk ? f_size(orbBud1, math.abs(or_e1 - or_zstop), orbBud1 / acctSize * 100.0) : orbQty1
         orbSz2 := sizeByRisk ? f_size(orbBud2, math.abs(or_e2 - or_zstop), orbBud2 / acctSize * 100.0) : orbQty2
-or_useAdd = orbAvg and or_shallow and not na(or_e2)
+or_useAdd = or_addOK and not na(or_e2)
 // break by selected type
 or_brk = orbBreak == "Wick (touch)" ? ((or_dir == 1 and high >= or_rH) or (or_dir == -1 and low <= or_rL)) : ((or_dir == 1 and close > or_rH) or (or_dir == -1 and close < or_rL))
 if or_dir != 0 and or_brk
@@ -478,8 +544,12 @@ if or_dir == -1 and high > or_rH
     or_oppBroke := true
 // entry window: before IB forms (when IB is on), within ORB cutoff otherwise, on an allowed weekday
 orbSizeOK = orbMinRngPct <= 0 or (not na(or_rng) and or_rL > 0 and or_rng / or_rL * 100 >= orbMinRngPct)
+// A setup is only tradable when the stop sits deeper than the entry AND the target is genuinely beyond the entry.
+// (A 0% entry with a "Range level" target is the same price twice, so that combination simply takes no trade.)
+or_tpChk = (or_dir != 0 and not na(or_rng)) ? f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS) : na
+or_valid = or_okLv and not na(or_tpChk) and (or_dir == 1 ? or_tpChk > or_e1 : or_tpChk < or_e1)
 orbWin = inSess and orbDayOK and tod <= (orbCutH*60 + orbCutM) and (not runIB or not ibFormed) and not dailyHalt and orbSizeOK
-if runORB and or_dir != 0 and or_broke and not or_placed and not or_closed and orbWin and not flatten and (not noDbl or not or_oppBroke) and orbSz1 >= 1
+if runORB and or_dir != 0 and or_valid and or_broke and not or_placed and not or_closed and orbWin and not flatten and (not noDbl or not or_oppBroke) and orbSz1 >= 1
     if or_dir == 1
         strategy.entry("ORL", strategy.long, qty = orbSz1, limit = or_e1)
         if or_useAdd and orbSz2 >= 1
@@ -489,7 +559,7 @@ if runORB and or_dir != 0 and or_broke and not or_placed and not or_closed and o
         if or_useAdd and orbSz2 >= 1
             strategy.entry("ORS2", strategy.short, qty = orbSz2, limit = or_e2)
     or_placed := true
-if or_placed and not or_closed
+if or_placed and or_placed[1] and not or_closed
     if or_dir == 1
         if not or_f1 and low <= or_e1
             or_f1 := true
@@ -504,6 +574,7 @@ or_firstFill = (or_f1 or or_f2) and not (or_f1[1] or or_f2[1])
 if or_f1 or or_f2
     or_avgPx := or_f1 and or_f2 ? (or_e1 + or_e2) / 2 : or_f1 ? or_e1 : or_e2
 if or_firstFill
+    or_fillBar := bar_index
     or_curStop := or_zstop
     or_curTP := f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
     or_beDone := false
@@ -519,7 +590,7 @@ if not na(or_curStop)
     strategy.exit("ORL2x", from_entry = "ORL2", stop = or_curStop, limit = or_curTP)
     strategy.exit("ORSx",  from_entry = "ORS",  stop = or_curStop, limit = or_curTP)
     strategy.exit("ORS2x", from_entry = "ORS2", stop = or_curStop, limit = or_curTP)
-if (or_f1 or or_f2) and not or_closed and not na(or_curStop)
+if (or_f1 or or_f2) and not or_closed and not na(or_curStop) and bar_index > or_fillBar
     if or_dir == 1 and (low <= or_curStop or high >= or_curTP)
         or_closed := true
     if or_dir == -1 and (high >= or_curStop or low <= or_curTP)
@@ -661,8 +732,11 @@ var float ib_curStop = na
 var float ib_curTP = na
 var bool  ib_beDone = false
 var bool  ib_closed = false
+var int   ib_fillBar = na
 var bool  ib_oppBroke = false
 var bool  ib_missed = false      // the IB pullback was reached while an ORB trade held the seat -> skip IB today
+var bool  ib_okLv = false
+var bool  ib_addOK = false
 var float ibSz1 = na
 var float ibSz2 = na
 
@@ -684,8 +758,11 @@ if newSession
     ib_curTP := na
     ib_beDone := false
     ib_closed := false
+    ib_fillBar := na
     ib_oppBroke := false
     ib_missed := false
+    ib_okLv := false
+    ib_addOK := false
     ibSz1 := na
     ibSz2 := na
 if ib_inR
@@ -699,19 +776,22 @@ if ib_rDone and not na(ib_rH) and ib_rH > ib_rL
     ib_rng := ib_rH - ib_rL
     ib_lf = ib_rLbar < ib_rHbar
     ib_pos = (close[1] - ib_rL) / ib_rng
+    ibThr = ibShThr / 100.0
     if ibLong and ib_lf and ib_pos >= 0.5
         ib_dir := 1
-        ib_shallow := ib_pos >= 0.75
-        ib_e1 := ib_shallow ? ib_rL + 0.75*ib_rng : ib_rL + 0.5*ib_rng
-        ib_e2 := ib_rL + 0.5*ib_rng
-        ib_zstop := ib_shallow ? ib_rL : (ibDeepSL == "75% line" ? ib_rL + 0.25*ib_rng : ib_rL)
+        ib_shallow := ib_pos >= ibThr
     else if ibShort and (not ib_lf) and ib_pos <= 0.5
         ib_dir := -1
-        ib_shallow := ib_pos <= 0.25
-        ib_e1 := ib_shallow ? ib_rL + 0.25*ib_rng : ib_rL + 0.5*ib_rng
-        ib_e2 := ib_rL + 0.5*ib_rng
-        ib_zstop := ib_shallow ? ib_rH : (ibDeepSL == "75% line" ? ib_rL + 0.75*ib_rng : ib_rH)
+        ib_shallow := ib_pos <= 1.0 - ibThr
     if ib_dir != 0
+        iEdep = f_depth(ib_shallow ? ibEshal : ibEdeep)
+        iSdep = f_depth(ib_shallow ? ibSshal : ibSdeep)
+        iAdep = f_depth(ibAvgLvl)
+        ib_okLv  := iSdep > iEdep + 0.0001
+        ib_addOK := ibAvg and (ib_shallow or not ibAvgSh) and iAdep > iEdep + 0.0001 and iAdep < iSdep - 0.0001
+        ib_e1    := f_lvl(ib_dir, ib_rH, ib_rL, ib_rng, iEdep)
+        ib_e2    := ib_addOK ? f_lvl(ib_dir, ib_rH, ib_rL, ib_rng, iAdep) : na
+        ib_zstop := f_lvl(ib_dir, ib_rH, ib_rL, ib_rng, iSdep)
         ibSz1 := sizeByRisk ? f_size(ibBud1, math.abs(ib_e1 - ib_zstop), ibBud1 / acctSize * 100.0) : ibQty1
         ibSz2 := sizeByRisk ? f_size(ibBud2, math.abs(ib_e2 - ib_zstop), ibBud2 / acctSize * 100.0) : ibQty2
 // INTERACTION: an OPEN ORB trade always keeps priority - the IB order is held back (either direction, so the two
@@ -719,7 +799,7 @@ if ib_rDone and not na(ib_rH) and ib_rH > ib_rL
 // (target, stop or the flip of its own exit) the IB limit goes in, provided price has NOT already traded through
 // the IB entry level while it was held. If it has, that pullback was missed and the IB is done for the day.
 orbLive = runORB and (or_f1 or or_f2) and not or_closed
-ib_useAdd = ibAvg and ib_shallow and not na(ib_e2)
+ib_useAdd = ib_addOK and not na(ib_e2)
 ib_brk = ibBreak == "Wick (touch)" ? ((ib_dir == 1 and high >= ib_rH) or (ib_dir == -1 and low <= ib_rL)) : ((ib_dir == 1 and close > ib_rH) or (ib_dir == -1 and close < ib_rL))
 if ib_dir != 0 and ib_brk
     ib_broke := true
@@ -727,12 +807,15 @@ if ib_dir == 1 and low < ib_rL
     ib_oppBroke := true
 if ib_dir == -1 and high > ib_rH
     ib_oppBroke := true
-ibWin = inSess and ibDayOK and tod <= (ibCutH*60 + ibCutM) and not dailyHalt
+ibSizeOK = ibMinRngPct <= 0 or (not na(ib_rng) and ib_rL > 0 and ib_rng / ib_rL * 100 >= ibMinRngPct)
+ib_tpChk = (ib_dir != 0 and not na(ib_rng)) ? f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS) : na
+ib_valid = ib_okLv and not na(ib_tpChk) and (ib_dir == 1 ? ib_tpChk > ib_e1 : ib_tpChk < ib_e1)
+ibWin = inSess and ibDayOK and tod <= (ibCutH*60 + ibCutM) and not dailyHalt and ibSizeOK
 // hold the IB while an ORB trade is live; if its entry level trades through during the hold, the IB is forfeited
-if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and orbLive and not na(ib_e1)
+if runIB and ib_dir != 0 and ib_valid and ib_broke and not ib_placed and not ib_closed and orbLive and not na(ib_e1)
     if (ib_dir == 1 and low <= ib_e1) or (ib_dir == -1 and high >= ib_e1)
         ib_missed := true
-if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and ibWin and not flatten and (not noDbl or not ib_oppBroke) and ibSz1 >= 1 and not orbLive and not ib_missed
+if runIB and ib_dir != 0 and ib_valid and ib_broke and not ib_placed and not ib_closed and ibWin and not flatten and (not noDbl or not ib_oppBroke) and ibSz1 >= 1 and not orbLive and not ib_missed
     if ib_dir == 1
         strategy.entry("IBL", strategy.long, qty = ibSz1, limit = ib_e1)
         if ib_useAdd and ibSz2 >= 1
@@ -742,7 +825,7 @@ if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and ib
         if ib_useAdd and ibSz2 >= 1
             strategy.entry("IBS2", strategy.short, qty = ibSz2, limit = ib_e2)
     ib_placed := true
-if ib_placed and not ib_closed
+if ib_placed and ib_placed[1] and not ib_closed
     if ib_dir == 1
         if not ib_f1 and low <= ib_e1
             ib_f1 := true
@@ -757,6 +840,7 @@ ib_firstFill = (ib_f1 or ib_f2) and not (ib_f1[1] or ib_f2[1])
 if ib_f1 or ib_f2
     ib_avgPx := ib_f1 and ib_f2 ? (ib_e1 + ib_e2) / 2 : ib_f1 ? ib_e1 : ib_e2
 if ib_firstFill
+    ib_fillBar := bar_index
     ib_curStop := ib_zstop
     ib_curTP := f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
     ib_beDone := false
@@ -772,7 +856,7 @@ if not na(ib_curStop)
     strategy.exit("IBL2x", from_entry = "IBL2", stop = ib_curStop, limit = ib_curTP)
     strategy.exit("IBSx",  from_entry = "IBS",  stop = ib_curStop, limit = ib_curTP)
     strategy.exit("IBS2x", from_entry = "IBS2", stop = ib_curStop, limit = ib_curTP)
-if (ib_f1 or ib_f2) and not ib_closed and not na(ib_curStop)
+if (ib_f1 or ib_f2) and not ib_closed and not na(ib_curStop) and bar_index > ib_fillBar
     if ib_dir == 1 and (low <= ib_curStop or high >= ib_curTP)
         ib_closed := true
     if ib_dir == -1 and (high >= ib_curStop or low <= ib_curTP)
@@ -1108,17 +1192,23 @@ var table info = na
 if showInfo and barstate.islast
     info := table.new(position.top_right, 1, 15, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
     table.cell(info, 0, 0,  "BREAK-THEN-PULLBACK  (ORB + IB)",                    text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 1,  "Ranges: ORB 09:30-09:45 | IB 09:30-10:30 (ET)",      text_color = color.white,  text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 1,  "Ranges: ORB " + orbSess + " | IB " + ibSess,          text_color = color.white,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 2,  "Direction: low-first = LONG, high-first = SHORT",     text_color = color.white,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 3,  "  + close in top half (L) / bottom half (S)",         text_color = color.silver, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 4,  "Enter AFTER the range breaks; limit at fib pullback:", text_color = color.white, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 5,  "  shallow -> 25% line | deeper -> 50% line",          text_color = color.silver, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 6,  "Stop: shallow = range extreme | deeper = 75% line",   text_color = color.white,  text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 7,  "Target: ORB L +10% / S +30% ; IB +30% extension",    text_color = color.white,  text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 8,  "Avg-down: 2nd unit @ 50% - own size & risk",          text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 4,  "ORB " + (runORB ? "ON " : "off ") + orbBreak + " | entry " + orbEshal + " / " + orbEdeep,
+         text_color = runORB ? color.orange : color.gray, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 5,  "   stop " + orbSshal + " / " + orbSdeep + " | TP " + orbTpL + " / " + orbTpS + " | to " + f_hm(orbCutH, orbCutM),
+         text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 6,  "IB  " + (runIB ? "ON " : "off ") + ibBreak + " | entry " + ibEshal + " / " + ibEdeep,
+         text_color = runIB ? color.teal : color.gray, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 7,  "   stop " + ibSshal + " / " + ibSdeep + " | TP " + ibTpL + " / " + ibTpS + " | to " + f_hm(ibCutH, ibCutM),
+         text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 8,  "Avg-down: ORB " + (orbAvg ? orbAvgLvl : "off") + " | IB " + (ibAvg ? ibAvgLvl : "off") + " - own size & risk",
+         text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 9,  "One at a time: IB waits for an open ORB to close",    text_color = color.silver, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 13, orbCarry ? "ORB carry ON: unfilled ORB rests past 10:30" : "ORB carry off (unfilled ORB dies at 10:30)", text_color = orbCarry ? color.orange : color.gray, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 10, "Skip double-break days | Flatten 15:30 ET",           text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 13, orbCarry ? "ORB carry ON: unfilled ORB rests past the IB" : "ORB carry off (unfilled ORB dies at the IB)", text_color = orbCarry ? color.orange : color.gray, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 10, (noDbl ? "Skip double-break days | " : "") + "Min range " + str.tostring(orbMinRngPct, "#.##") + "/" + str.tostring(ibMinRngPct, "#.##") + "% | Flatten " + f_hm(flatH, flatM),
+         text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 11, "Toggle Run ORB/IB + weekdays to isolate results",     text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 12, "Odds live in the table; > marks where price is now",  text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 14, modeTxt + (rmFixed ? "" : " (per entry, fixed capital)"), text_color = color.yellow, text_size = size.small, text_halign = text.align_left)
