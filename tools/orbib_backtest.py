@@ -104,7 +104,10 @@ def run_day(bars, range_end, cfg, flat, cost):
         for k, tp in enumerate(tps):
             if tBar[k] is None and ((d == 1 and h >= tp) or (d == -1 and l <= tp)): tBar[k] = i
         if sBar is not None and all(t is not None for t in tBar): break
-    eodPx = bars[flatBar][1] if flatBar is not None else bars[-1][4]
+    # strategy.close_all() is issued on the flatten bar, so the market order fills at the OPEN of the
+    # bar after it - matching TradingView with process_orders_on_close = false.
+    eodPx = (bars[flatBar+1][1] if (flatBar is not None and flatBar+1 < n)
+             else (bars[flatBar][4] if flatBar is not None else bars[-1][4]))
 
     rec = dict(dir=d, shallow=shallow, rngPct=rng/rL*100, rng=rng, risk1=abs(px1-stop)*cost.ptval,
                fillTod=bars[f1][0], px1=px1, px2=px2, stop=stop,
@@ -224,10 +227,114 @@ def mode_detail(days, range_end, flat, cost, cfg, tpL, tpS, avg, cut, mr, split,
         rk = sorted(grp["_risk"])
         print(f"  risk on unit 1: mean {sum(rk)/len(rk):.0f}, median {rk[len(rk)//2]:.0f} per contract/share")
 
+
+# ------------------------------------------------------------------ joint ORB + IB
+# The two engines share one position, so the script's priority rules decide who gets the seat:
+# the ORB may enter only before the IB forms (unless carried), an open ORB holds the IB back, and
+# an IB whose entry traded through during that hold is forfeited for the day.
+ES_ORB = dict(cfg=(0.25, 0.75, 0.50, 0.75, 0.50, 0.75, "close"), tp=(0.75, 1.00), cut=11*60, minr=0.20)
+ES_IB  = dict(cfg=(0.25, 1.00, 0.50, 0.75, 0.50, 0.75, "wick"),  tp=(0.30, 0.30), cut=12*60, minr=0.30)
+
+def _levels(bars, range_end, cfg):
+    eS, sS, eD, sD, aDep, thr, brk = cfg
+    ri = [i for i, b in enumerate(bars) if b[0] < range_end]
+    if not ri: return None
+    rH = max(bars[i][2] for i in ri); rL = min(bars[i][3] for i in ri)
+    if not rH > rL: return None
+    hi = min(i for i in ri if bars[i][2] == rH); lo = min(i for i in ri if bars[i][3] == rL)
+    rng = rH - rL; last = max(ri); pos = (bars[last][4] - rL) / rng
+    if lo < hi and pos >= 0.5:    d, sh = 1, pos >= thr
+    elif lo > hi and pos <= 0.5:  d, sh = -1, pos <= 1 - thr
+    else: return None
+    eDep, sDep = (eS, sS) if sh else (eD, sD)
+    if sDep <= eDep: return None
+    return dict(d=d, rH=rH, rL=rL, rng=rng, start=last+1, brk=brk, rngPct=rng/rL*100,
+                e1=lvl(d, rH, rL, rng, eDep), stop=lvl(d, rH, rL, rng, sDep),
+                e2=lvl(d, rH, rL, rng, aDep) if eDep < aDep < sDep else None)
+
+def joint_day(bars, ibOn, carry, cost, flat, avg=True):
+    O = _levels(bars, hhmm("09:45"), ES_ORB["cfg"]); I = _levels(bars, hhmm("10:30"), ES_IB["cfg"]) if ibOn else None
+    if O and O["rngPct"] < ES_ORB["minr"]: O = None
+    if I and I["rngPct"] < ES_IB["minr"]:  I = None
+    st = {t: dict(L=L, cut=c, tp=tp, broke=False, placed=False, f1=None, f2=None, px1=None, px2=None,
+                  stopP=None, tpP=None, closed=False, missed=False, ein=None)
+          for t, L, c, tp in (("ORB", O, ES_ORB["cut"], ES_ORB["tp"]), ("IB", I, ES_IB["cut"], ES_IB["tp"]))}
+    out = []; dHi = -1e18; dLo = 1e18; ibFormed = False
+    for i, (tod, o, h, l, c) in enumerate(bars):
+        dHi = max(dHi, h); dLo = min(dLo, l)
+        if tod >= hhmm("10:30"): ibFormed = True
+        orbLive = st["ORB"]["f1"] is not None and not st["ORB"]["closed"]
+        for tag in ("ORB", "IB"):
+            S = st[tag]; L = S["L"]
+            if L is None or S["closed"] or i < L["start"]: continue
+            d = L["d"]
+            if S["f1"] is not None and i > S["f1"]:
+                hitS = (l <= S["stopP"]) if d == 1 else (h >= S["stopP"])
+                hitT = (h >= S["tpP"])   if d == 1 else (l <= S["tpP"])
+                px = kind = None
+                if hitS:   px, kind = S["stopP"] - cost.tick*d, "stop"
+                elif hitT: px, kind = S["tpP"], "target"
+                elif tod >= flat:
+                    px = (bars[i+1][1] if i+1 < len(bars) else c) - cost.tick*d; kind = "eod"
+                if px is not None:
+                    pnl = (px - S["px1"])*d*cost.ptval - 2*cost.comm
+                    units = 1
+                    if S["f2"] is not None and S["f2"] <= i:
+                        pnl += (px - S["px2"])*d*cost.ptval - 2*cost.comm; units = 2
+                    out.append(dict(tag=tag, pnl=pnl, ein=S["ein"], xout=tod, kind=kind, units=units))
+                    S["closed"] = True
+                    continue
+            if tod >= flat: continue
+            if not S["broke"]:
+                S["broke"] = (h >= L["rH"] if d == 1 else l <= L["rL"]) if L["brk"] == "wick" else (c > L["rH"] if d == 1 else c < L["rL"])
+                continue
+            if tag == "IB" and orbLive and S["f1"] is None:                 # held behind an open ORB
+                if (d == 1 and l <= L["e1"]) or (d == -1 and h >= L["e1"]): S["missed"] = True
+                continue
+            if tag == "IB" and S["missed"]: continue
+            if tag == "ORB" and S["f1"] is None:
+                if ibOn and ibFormed and not carry: continue                # cut when the IB forms
+                if ibOn and carry and I is not None and st["IB"]["broke"]: continue   # carry yields to an armed IB
+            if tod > S["cut"] and S["f1"] is None: continue
+            if not S["placed"]: S["placed"] = True; continue                # live from the next bar
+            if S["f1"] is None and ((d == 1 and l <= L["e1"]) or (d == -1 and h >= L["e1"])):
+                S["f1"] = i; S["px1"] = min(L["e1"], o) if d == 1 else max(L["e1"], o); S["ein"] = tod
+                S["stopP"] = L["stop"]
+                ext = S["tp"][0] if d == 1 else S["tp"][1]
+                S["tpP"] = (L["rH"] + ext*L["rng"]) if d == 1 else (L["rL"] - ext*L["rng"])
+            if avg and L["e2"] is not None and S["f1"] is not None and S["f2"] is None and i >= S["f1"]:
+                if (d == 1 and l <= L["e2"]) or (d == -1 and h >= L["e2"]):
+                    S["f2"] = i; S["px2"] = min(L["e2"], o) if d == 1 else max(L["e2"], o)
+    return out
+
+def mode_joint(days, cost, flat, ibOn, carry, split):
+    T = []
+    for d in sorted(days):
+        for t in joint_day(days[d], ibOn, carry, cost, flat): t["date"] = d; T.append(t)
+    def stat(rows, name):
+        v = [t["pnl"] for t in rows]
+        if not v: print(f"  {name:<24} n=0"); return
+        eq = peak = dd = 0.0
+        for x in v:
+            eq += x; peak = max(peak, eq); dd = max(dd, peak-eq)
+        gw = sum(x for x in v if x > 0); gl = -sum(x for x in v if x < 0)
+        print(f"  {name:<24} n={len(v):>4}  net={sum(v):>9.0f}  PF={(gw/gl if gl else float('inf')):>5.2f}  "
+              f"win={100*sum(1 for x in v if x>0)/len(v):>5.1f}%  maxDD={dd:>8.0f}")
+    print("="*104)
+    print(f"JOINT  ORB{' + IB' if ibOn else ' only'}  (ES/MES preset rules, carry {'on' if carry else 'off'})")
+    stat(T, "full period"); stat([t for t in T if t["date"] < split], "in-sample (first 60%)")
+    stat([t for t in T if t["date"] >= split], "out-of-sample (last 40%)")
+    for tag in ("ORB", "IB"): stat([t for t in T if t["tag"] == tag], f"  {tag} leg")
+    mon = defaultdict(float)
+    for t in T: mon[f"{t['date'].year%100}-{t['date'].month:02d}"] += t["pnl"]
+    print("  monthly: " + " ".join(f"{k}:{v:+.0f}" for k, v in sorted(mon.items())))
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("csv")
-    ap.add_argument("--mode", default="baseline", choices=["baseline", "sweep", "detail"])
+    ap.add_argument("--mode", default="baseline", choices=["baseline", "sweep", "detail", "joint"])
+    ap.add_argument("--ib", default="on", choices=["on","off"], help="joint mode: run the IB leg")
+    ap.add_argument("--carry", default="on", choices=["on","off"], help="joint mode: carry an unfilled ORB past the IB")
     ap.add_argument("--range", default="orb", choices=["orb", "ib"])
     ap.add_argument("--point-value", type=float, default=5.0, help="$ per 1.00 move per contract/share (MES 5, MNQ 2, MGC 10, an ETF 1)")
     ap.add_argument("--tick", type=float, default=0.25, help="one tick, charged as slippage on stop and market exits")
@@ -260,6 +367,8 @@ def main():
             rec = build(days, rE, (0.25, 1.00, 0.50, 0.75, 0.50, 0.75, brk), flat, cost)
             print(fmt(score(rec, TPNAMES.index(tl), TPNAMES.index(ts), True, cut, mr), nm))
         return
+    if a.mode == "joint":
+        mode_joint(days, cost, flat, a.ib == "on", a.carry == "on", split); return
     if a.mode == "sweep":
         mode_sweep(days, rend, flat, cost, a.min_trades, split); return
 
