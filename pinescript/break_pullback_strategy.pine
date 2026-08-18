@@ -44,6 +44,10 @@ strategy("Break-then-Pullback (ORB + IB)", overlay = true, pyramiding = 6, max_b
      initial_capital = 30000, margin_long = 0, margin_short = 0,
      default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
      commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
+// MODE: the "Run as" switch turns every order off ("Indicator - drawings & alerts only") while leaving the
+//   ranges, levels, risk/reward boxes, probability table and break alerts running on identical rules. Pine decides
+//   strategy vs indicator at compile time, so the file stays a strategy() either way - it just trades nothing.
+//
 // NOTE: position sizing has three modes, picked by checkbox - fixed contracts, risk $ per trade, or risk % of a
 //   FIXED account size (see 'Account size $'). It does NOT compound with P&L, and in every mode risk is set PER
 //   ENTRY (four independent budgets: ORB first, ORB avg-down, IB first, IB avg-down).
@@ -67,6 +71,11 @@ strategy("Break-then-Pullback (ORB + IB)", overlay = true, pyramiding = 6, max_b
 // and the Properties tab still holding commission 0.5 cash per contract and 1 tick of slippage.
 // The IB leg is the weaker half - its edge moves around a lot with the shallow threshold on ~60
 // trades, so treat the ORB-only preset as the tested one and the portfolio as the experiment.
+gMode     = "Mode"
+runMode   = input.string("Strategy - place orders", "Run as", options = ["Strategy - place orders", "Indicator - drawings & alerts only"], group = gMode,
+     tooltip = "Pine fixes a script's type at compile time, so this cannot turn the file into a real indicator() - what it does is silence every order. INDICATOR: no entries, no exits, no flatten, so the Strategy Tester stays empty and the equity curve flat, while the ranges, the fib lines, the risk/reward boxes, the probability table and the break alerts all keep working on the same rules - the chart looks identical, nothing is traded. STRATEGY: the full engine, orders included. Switching costs nothing: the setup logic runs in both modes, so the boxes you see as an indicator are the trades the strategy would have taken.")
+ordersOn  = runMode == "Strategy - place orders"
+
 gPre      = "Preset"
 preset    = input.string("Custom (use the inputs below)", "Rule preset",
      options = ["Custom (use the inputs below)", "ES / MES - ORB only", "ES / MES - ORB + IB"], group = gPre,
@@ -301,7 +310,7 @@ noDbl     = input.bool(true, "Skip double-break days (both range sides break)", 
 // ---------------------------------------------------------------- Automation (PickMyTrade webhook -> Tradovate)
 grpA      = "Automation - PickMyTrade"
 autoOn    = input.bool(false, "Enable webhook alerts", group = grpA,
-     tooltip = "Create ONE alert with condition 'alert() function calls only' and paste PickMyTrade's webhook URL. Verify the JSON fields match PickMyTrade's template. Alerts fire on the NET position; ORB and IB are never open at the same time, so each alert maps to a single setup.")
+     tooltip = "Create ONE alert with condition 'alert() function calls only' and paste PickMyTrade's webhook URL. Verify the JSON fields match PickMyTrade's template. Alerts fire on the NET position; ORB and IB are never open at the same time, so each alert maps to a single setup. These need the position the strategy engine holds, so they are silent in Indicator mode - the manual 'Break alerts' below fire in both modes.")
 pmtToken  = input.string("", "PickMyTrade token", group = grpA)
 pmtAcct   = input.string("", "Tradovate account id", group = grpA)
 pmtSym    = input.string("MNQ1!", "Broker symbol", group = grpA)
@@ -642,15 +651,16 @@ or_valid = or_okLv and not na(or_tpChk) and (or_dir == 1 ? or_tpChk > or_e1 : or
 inWindow = not useWin or (time >= winFrom and time <= winTo)
 orbWin = inSess and inWindow and orbDayOK and tod <= (orbCutH*60 + orbCutM) and (not runIB or not ibFormed) and not dailyHalt and orbSizeOK
 if runORB and or_dir != 0 and or_valid and or_broke and not or_placed and not or_closed and orbWin and not flatten and (not noDbl or not or_oppBroke) and orbSz1 >= 1
-    if or_dir == 1
-        strategy.entry("ORL", strategy.long, qty = orbSz1, limit = or_e1)
-        if or_useAdd and orbSz2 >= 1
-            strategy.entry("ORL2", strategy.long, qty = orbSz2, limit = or_e2)
-    else
-        strategy.entry("ORS", strategy.short, qty = orbSz1, limit = or_e1)
-        if or_useAdd and orbSz2 >= 1
-            strategy.entry("ORS2", strategy.short, qty = orbSz2, limit = or_e2)
-    or_placed := true
+    if ordersOn
+        if or_dir == 1
+            strategy.entry("ORL", strategy.long, qty = orbSz1, limit = or_e1)
+            if or_useAdd and orbSz2 >= 1
+                strategy.entry("ORL2", strategy.long, qty = orbSz2, limit = or_e2)
+        else
+            strategy.entry("ORS", strategy.short, qty = orbSz1, limit = or_e1)
+            if or_useAdd and orbSz2 >= 1
+                strategy.entry("ORS2", strategy.short, qty = orbSz2, limit = or_e2)
+    or_placed := true                       // the setup is tracked in both modes; only the order is optional
 if or_placed and or_placed[1] and not or_closed
     if or_dir == 1
         if not or_f1 and low <= or_e1
@@ -677,7 +687,7 @@ if orbBE and not or_beDone and (or_f1 or or_f2) and not or_closed
     if or_dir == -1 and low <= or_rL
         or_curStop := math.min(or_curStop, or_avgPx)
         or_beDone := true
-if not na(or_curStop)
+if ordersOn and not na(or_curStop)
     strategy.exit("ORLx",  from_entry = "ORL",  stop = or_curStop, limit = or_curTP)
     strategy.exit("ORL2x", from_entry = "ORL2", stop = or_curStop, limit = or_curTP)
     strategy.exit("ORSx",  from_entry = "ORS",  stop = or_curStop, limit = or_curTP)
@@ -692,7 +702,7 @@ if (or_f1 or or_f2) and not or_closed and not na(or_curStop) and bar_index > or_
 // on a double-break, on the daily halt or at the flatten - and it gives way as soon as the IB arms its own setup,
 // which is handled after the IB engine below (ib_broke is not known this early in the bar).
 orbHold = orbCarry and or_placed and not (or_f1 or or_f2) and inSess and orbDayOK and not dailyHalt and tod <= (orbCutH*60 + orbCutM)
-if or_closed or flatten or not runORB or (noDbl and or_oppBroke) or ((not orbWin) and not (or_f1 or or_f2) and not orbHold)
+if ordersOn and (or_closed or flatten or not runORB or (noDbl and or_oppBroke) or ((not orbWin) and not (or_f1 or or_f2) and not orbHold))
     strategy.cancel("ORL")
     strategy.cancel("ORL2")
     strategy.cancel("ORS")
@@ -908,14 +918,15 @@ if runIB and ib_dir != 0 and ib_valid and ib_broke and not ib_placed and not ib_
     if (ib_dir == 1 and low <= ib_e1) or (ib_dir == -1 and high >= ib_e1)
         ib_missed := true
 if runIB and ib_dir != 0 and ib_valid and ib_broke and not ib_placed and not ib_closed and ibWin and not flatten and (not noDbl or not ib_oppBroke) and ibSz1 >= 1 and not orbLive and not ib_missed
-    if ib_dir == 1
-        strategy.entry("IBL", strategy.long, qty = ibSz1, limit = ib_e1)
-        if ib_useAdd and ibSz2 >= 1
-            strategy.entry("IBL2", strategy.long, qty = ibSz2, limit = ib_e2)
-    else
-        strategy.entry("IBS", strategy.short, qty = ibSz1, limit = ib_e1)
-        if ib_useAdd and ibSz2 >= 1
-            strategy.entry("IBS2", strategy.short, qty = ibSz2, limit = ib_e2)
+    if ordersOn
+        if ib_dir == 1
+            strategy.entry("IBL", strategy.long, qty = ibSz1, limit = ib_e1)
+            if ib_useAdd and ibSz2 >= 1
+                strategy.entry("IBL2", strategy.long, qty = ibSz2, limit = ib_e2)
+        else
+            strategy.entry("IBS", strategy.short, qty = ibSz1, limit = ib_e1)
+            if ib_useAdd and ibSz2 >= 1
+                strategy.entry("IBS2", strategy.short, qty = ibSz2, limit = ib_e2)
     ib_placed := true
 if ib_placed and ib_placed[1] and not ib_closed
     if ib_dir == 1
@@ -943,7 +954,7 @@ if ibBE and not ib_beDone and (ib_f1 or ib_f2) and not ib_closed
     if ib_dir == -1 and low <= ib_rL
         ib_curStop := math.min(ib_curStop, ib_avgPx)
         ib_beDone := true
-if not na(ib_curStop)
+if ordersOn and not na(ib_curStop)
     strategy.exit("IBLx",  from_entry = "IBL",  stop = ib_curStop, limit = ib_curTP)
     strategy.exit("IBL2x", from_entry = "IBL2", stop = ib_curStop, limit = ib_curTP)
     strategy.exit("IBSx",  from_entry = "IBS",  stop = ib_curStop, limit = ib_curTP)
@@ -953,7 +964,7 @@ if (ib_f1 or ib_f2) and not ib_closed and not na(ib_curStop) and bar_index > ib_
         ib_closed := true
     if ib_dir == -1 and (high >= ib_curStop or low <= ib_curTP)
         ib_closed := true
-if ib_closed or flatten or not runIB or (noDbl and ib_oppBroke) or ((not ibWin) and not (ib_f1 or ib_f2))
+if ordersOn and (ib_closed or flatten or not runIB or (noDbl and ib_oppBroke) or ((not ibWin) and not (ib_f1 or ib_f2)))
     strategy.cancel("IBL")
     strategy.cancel("IBL2")
     strategy.cancel("IBS")
@@ -962,10 +973,11 @@ if ib_closed or flatten or not runIB or (noDbl and ib_oppBroke) or ((not ibWin) 
 // CARRY hand-over: the moment the IB breaks its range and has a valid setup, a carried ORB limit that is still
 // unfilled is dropped - the IB gets the seat. A carried ORB that HAS filled keeps it (see orbLive above).
 if runORB and orbCarry and not or_closed and not (or_f1 or or_f2) and ib_dir != 0 and ib_broke
-    strategy.cancel("ORL")
-    strategy.cancel("ORL2")
-    strategy.cancel("ORS")
-    strategy.cancel("ORS2")
+    if ordersOn
+        strategy.cancel("ORL")
+        strategy.cancel("ORL2")
+        strategy.cancel("ORS")
+        strategy.cancel("ORS2")
     or_closed := true
 
 // ---- IB study A: from the fill to EOD, did price touch each level? ----
@@ -1075,9 +1087,9 @@ if ibP_act
         ibP_act := false
 
 // ---------------------------------------------------------------- EOD flatten + daily max-loss halt
-if flatten
+if ordersOn and flatten
     strategy.close_all(comment = "EOD flat")
-if dailyHalt
+if ordersOn and dailyHalt
     strategy.close_all(comment = "Daily max loss")
     strategy.cancel_all()
 
@@ -1095,11 +1107,11 @@ autoQty  = math.abs(strategy.position_size)   // actual net contracts (respects 
 buyNow   = strategy.position_size > 0 and (strategy.position_size[1] <= 0 or strategy.position_size > strategy.position_size[1])
 sellNow  = strategy.position_size < 0 and (strategy.position_size[1] >= 0 or strategy.position_size < strategy.position_size[1])
 closeNow = flatten and strategy.position_size[1] != 0
-if autoOn and buyNow
+if autoOn and ordersOn and buyNow
     alert(f_pmt("buy",  autoQty, autoStop, autoTP), alert.freq_once_per_bar)
-if autoOn and sellNow
+if autoOn and ordersOn and sellNow
     alert(f_pmt("sell", autoQty, autoStop, autoTP), alert.freq_once_per_bar)
-if autoOn and closeNow
+if autoOn and ordersOn and closeNow
     alert(f_pmt("close", 0, 0.0, 0.0), alert.freq_once_per_bar)
 
 // ---------------------------------------------------------------- Break alerts (fire once when each range breaks)
@@ -1283,8 +1295,8 @@ if ibGrow
 var table info = na
 if showInfo and barstate.islast
     info := table.new(position.top_right, 1, 15, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
-    table.cell(info, 0, 0,  usePreset ? "PRESET: " + preset + (presetOne ? "  (1 contract)" : "") : "BREAK-THEN-PULLBACK  (ORB + IB)",
-         text_color = usePreset ? color.yellow : color.aqua, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 0,  (ordersOn ? "" : "[INDICATOR - no orders]  ") + (usePreset ? "PRESET: " + preset + (presetOne ? "  (1 contract)" : "") : "BREAK-THEN-PULLBACK  (ORB + IB)"),
+         text_color = not ordersOn ? color.orange : usePreset ? color.yellow : color.aqua, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 1,  "Ranges: ORB " + orbSess + " | IB " + ibSess,          text_color = color.white,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 2,  "Direction: low-first = LONG, high-first = SHORT",     text_color = color.white,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 3,  "  + close in top half (L) / bottom half (S)",         text_color = color.silver, text_size = size.small, text_halign = text.align_left)
