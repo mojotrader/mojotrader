@@ -232,8 +232,8 @@ def mode_detail(days, range_end, flat, cost, cfg, tpL, tpS, avg, cut, mr, split,
 # The two engines share one position, so the script's priority rules decide who gets the seat:
 # the ORB may enter only before the IB forms (unless carried), an open ORB holds the IB back, and
 # an IB whose entry traded through during that hold is forfeited for the day.
-ES_ORB = dict(cfg=(0.25, 0.75, 0.50, 0.75, 0.50, 0.75, "close"), tp=(0.75, 1.00), cut=11*60, minr=0.20)
-ES_IB  = dict(cfg=(0.25, 1.00, 0.50, 0.75, 0.50, 0.75, "wick"),  tp=(0.30, 0.30), cut=12*60, minr=0.30)
+ES_ORB = dict(cfg=(0.25, 1.00, 0.50, 1.00, 0.50, 0.75, "close"), tp=(0.75, 1.00), cut=11*60, minr=0.20)
+ES_IB  = dict(cfg=(0.25, 1.00, 0.50, 1.00, 0.50, 0.75, "wick"),  tp=(0.30, 0.30), cut=12*60, minr=0.30)
 
 def _levels(bars, range_end, cfg):
     eS, sS, eD, sD, aDep, thr, brk = cfg
