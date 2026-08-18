@@ -15,7 +15,8 @@
 //
 // PER SETUP (each range, independently configurable below):
 //   1) At the range close: bias = low-before-high (long) / high-before-low (short) AND the range close in the
-//      top half (long) / bottom half (short) of the range.
+//      top half (long) / bottom half (short) of the range - that half is the "Bias %" input, 50 by default,
+//      so a range closing a tick the wrong side of its own midpoint takes no trade. Loosen or tighten it there.
 //   2) The trade ARMS only AFTER the range level BREAKS. Break type is selectable: "Wick (touch)" or "Close beyond".
 //   3) A LIMIT rests at the fib pullback: shallow(0-25%)->25% line, deeper(25-50%)->50% line.
 //   4) AVERAGE DOWN (optional): shallow setup -> a 2nd unit at the 50% line. Each of the four entries (ORB first,
@@ -147,6 +148,10 @@ ibCutM    = 0
 gFilt     = "Filters"
 noDbl     = input.bool(true, "Skip double-break days (both range sides break)", group = gFilt,
      tooltip = "If the side OPPOSITE the setup direction also breaks (long: price trades below the range low; short: above the range high), cancel the pending entry and take no trade that day. Keeps you to clean one-directional break days only.")
+orbBias   = input.float(50, "ORB bias: range must close beyond % of the range", minval = 0, maxval = 100, step = 0.5, group = gFilt,
+     tooltip = "The direction test has two parts: which extreme printed FIRST, and where the range CLOSED. This is the second part - how far beyond the midpoint the close must be. 50 is the classic rule (top half for a long, bottom half for a short) but it makes a knife edge out of a range that closes on its midpoint: a close a single tick the wrong side kills the setup. Raise it to demand a more decisive close, or drop it a point or two to stop hairline misses throwing a day away.")
+ibBias    = input.float(50, "IB bias: range must close beyond % of the range", minval = 0, maxval = 100, step = 0.5, group = gFilt,
+     tooltip = "The direction test has two parts: which extreme printed FIRST, and where the range CLOSED. This is the second part - how far beyond the midpoint the close must be. 50 is the classic rule (top half for a long, bottom half for a short) but it makes a knife edge out of a range that closes on its midpoint: a close a single tick the wrong side kills the setup. Raise it to demand a more decisive close, or drop it a point or two to stop hairline misses throwing a day away.")
 orbMinRngPct = input.float(0.40, "Min ORB range (% of price, 0 = off)", minval = 0, step = 0.05, group = gFilt,
      tooltip = "Skip ORB setups whose 15-min opening range is smaller than this % of price (range / range-low * 100). The segmentation test showed the smallest-range ORB bucket (<~0.4%) is the only unprofitable segment - 36% win, PF 0.71. IB is NOT filtered. Set 0 to disable. Tune to your own data; the test sample was limited.")
 
@@ -431,13 +436,14 @@ if or_rDone and not na(or_rH) and or_rH > or_rL
     or_rng := or_rH - or_rL
     or_lf = or_rLbar < or_rHbar
     or_pos = (close[1] - or_rL) / or_rng
-    if orbLong and or_lf and or_pos >= 0.5
+    orbBiasF = orbBias / 100.0
+    if orbLong and or_lf and or_pos >= orbBiasF
         or_dir := 1
         or_shallow := or_pos >= 0.75
         or_e1 := or_shallow ? or_rL + 0.75*or_rng : or_rL + 0.5*or_rng
         or_e2 := or_rL + 0.5*or_rng
         or_zstop := or_rL                     // the stop is ALWAYS the far side of the range
-    else if orbShort and (not or_lf) and or_pos <= 0.5
+    else if orbShort and (not or_lf) and or_pos <= 1.0 - orbBiasF
         or_dir := -1
         or_shallow := or_pos <= 0.25
         or_e1 := or_shallow ? or_rL + 0.25*or_rng : or_rL + 0.5*or_rng
@@ -681,13 +687,14 @@ if ib_rDone and not na(ib_rH) and ib_rH > ib_rL
     ib_rng := ib_rH - ib_rL
     ib_lf = ib_rLbar < ib_rHbar
     ib_pos = (close[1] - ib_rL) / ib_rng
-    if ibLong and ib_lf and ib_pos >= 0.5
+    ibBiasF = ibBias / 100.0
+    if ibLong and ib_lf and ib_pos >= ibBiasF
         ib_dir := 1
         ib_shallow := ib_pos >= 0.75
         ib_e1 := ib_shallow ? ib_rL + 0.75*ib_rng : ib_rL + 0.5*ib_rng
         ib_e2 := ib_rL + 0.5*ib_rng
         ib_zstop := ib_rL                     // the stop is ALWAYS the far side of the range
-    else if ibShort and (not ib_lf) and ib_pos <= 0.5
+    else if ibShort and (not ib_lf) and ib_pos <= 1.0 - ibBiasF
         ib_dir := -1
         ib_shallow := ib_pos <= 0.25
         ib_e1 := ib_shallow ? ib_rL + 0.25*ib_rng : ib_rL + 0.5*ib_rng
@@ -1092,7 +1099,8 @@ if showInfo and barstate.islast
          text_color = ordersOn ? color.aqua : color.orange, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 1,  "Ranges: ORB 09:30-09:45 | IB 09:30-10:30 (ET)",      text_color = color.white,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 2,  "Direction: low-first = LONG, high-first = SHORT",     text_color = color.white,  text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 3,  "  + close in top half (L) / bottom half (S)",         text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 3,  "  + close beyond " + str.tostring(orbBias, "#.#") + "% (ORB) / " + str.tostring(ibBias, "#.#") + "% (IB) of the range",
+         text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 4,  "Enter AFTER the range breaks; limit at fib pullback:", text_color = color.white, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 5,  "  shallow -> 25% line | deeper -> 50% line",          text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 6,  "Stop: always the range extreme (100%)",               text_color = color.white,  text_size = size.small, text_halign = text.align_left)

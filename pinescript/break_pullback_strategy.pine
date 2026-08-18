@@ -15,7 +15,8 @@
 //
 // PER SETUP (each range, independently configurable below):
 //   1) At the range close: bias = low-before-high (long) / high-before-low (short) AND the range close in the
-//      top half (long) / bottom half (short) of the range.
+//      top half (long) / bottom half (short) of the range - that half is the "Bias %" input, 50 by default,
+//      so a range closing a tick the wrong side of its own midpoint takes no trade. Loosen or tighten it there.
 //   2) The trade ARMS only AFTER the range level BREAKS. Break type is selectable: "Wick (touch)" or "Close beyond".
 //   3) A LIMIT rests at the selected pullback level. EVERY level is an input, named by retracement DEPTH from the
 //      level that broke: 0% = the range level itself (a RETEST entry - no pullback discount, fills far more often),
@@ -175,6 +176,8 @@ orbBreakIn = input.string("Close beyond", "Break type", options = ["Wick (touch)
      tooltip = "What counts as breaking the range and arming the setup. Wick: any trade through the level. Close beyond: the bar must CLOSE past it - fewer setups, but it filters the pokes that immediately fail.")
 orbShThrIn = input.float(75, "Shallow when the range closes beyond % of the range", minval = 50, maxval = 100, step = 5, group = gO,
      tooltip = "Where the range's closing price splits a SHALLOW setup from a DEEPER one. 75 = the range must close in the top 25% (long) / bottom 25% (short) to count as shallow. Each class gets its own entry and its own stop below, so this decides which pair is used.")
+orbBiasIn  = input.float(50, "Bias: range must close beyond % of the range", minval = 0, maxval = 100, step = 0.5, group = gO,
+     tooltip = "The direction test has two parts: which extreme printed FIRST, and where the range CLOSED. This is the second part - how far beyond the midpoint the close must be. 50 is the classic rule (top half for a long, bottom half for a short) but it makes a knife edge out of a range that closes on its midpoint: a close a single tick the wrong side kills the setup. Raise it to demand a more decisive close, or drop it a point or two to stop hairline misses throwing a day away.")
 orbEshalIn = input.string("25% line", "Entry - shallow setup", options = ["0% (range level)", "25% line", "50% line", "75% line"], group = gO,
      tooltip = "Where the limit rests on a shallow setup. 0% = a retest of the broken level - it fills far more often and much sooner, at the cost of a worse price and a wider stop distance. 25/50/75% wait for a real pullback.")
 orbEdeepIn = input.string("50% line", "Entry - deeper setup",  options = ["0% (range level)", "25% line", "50% line", "75% line"], group = gO,
@@ -202,6 +205,8 @@ ibLongIn  = input.bool(true,  "IB longs",  group = gI)
 ibShortIn = input.bool(true,  "IB shorts", group = gI)
 ibBreakIn = input.string("Wick (touch)", "Break type", options = ["Wick (touch)", "Close beyond"], group = gI)
 ibShThrIn = input.float(75, "Shallow when the range closes beyond % of the range", minval = 50, maxval = 100, step = 5, group = gI)
+ibBiasIn  = input.float(50, "Bias: range must close beyond % of the range", minval = 0, maxval = 100, step = 0.5, group = gI,
+     tooltip = "The direction test has two parts: which extreme printed FIRST, and where the range CLOSED. This is the second part - how far beyond the midpoint the close must be. 50 is the classic rule (top half for a long, bottom half for a short) but it makes a knife edge out of a range that closes on its midpoint: a close a single tick the wrong side kills the setup. Raise it to demand a more decisive close, or drop it a point or two to stop hairline misses throwing a day away.")
 ibEshalIn = input.string("25% line", "Entry - shallow setup", options = ["0% (range level)", "25% line", "50% line", "75% line"], group = gI,
      tooltip = "0% is a retest of the broken IB level. The IB is a wide range, so its 0% entry is a very different trade from its 50% one - the stop distance changes by a factor of two or more.")
 ibEdeepIn = input.string("50% line", "Entry - deeper setup",  options = ["0% (range level)", "25% line", "50% line", "75% line"], group = gI)
@@ -237,6 +242,7 @@ orbLong      = esAny ? true : orbLongIn
 orbShort     = esAny ? true : orbShortIn
 orbBreak     = esAny ? "Close beyond" : orbBreakIn
 orbShThr     = esAny ? 75.0 : orbShThrIn
+orbBias      = esAny ? 50.0 : orbBiasIn
 orbEshal     = esAny ? "25% line" : orbEshalIn
 orbEdeep     = esAny ? "50% line" : orbEdeepIn
 orbAvg       = esAny ? true : orbAvgIn
@@ -253,6 +259,7 @@ ibLong      = esAny ? true : ibLongIn
 ibShort     = esAny ? true : ibShortIn
 ibBreak     = esAny ? "Wick (touch)" : ibBreakIn
 ibShThr     = esAny ? 75.0 : ibShThrIn
+ibBias      = esAny ? 50.0 : ibBiasIn
 ibEshal     = esAny ? "25% line" : ibEshalIn
 ibEdeep     = esAny ? "50% line" : ibEdeepIn
 ibAvg       = esAny ? true : ibAvgIn
@@ -567,10 +574,11 @@ if or_rDone and not na(or_rH) and or_rH > or_rL
     or_lf = or_rLbar < or_rHbar
     or_pos = (close[1] - or_rL) / or_rng
     orbThr = orbShThr / 100.0
-    if orbLong and or_lf and or_pos >= 0.5
+    orbBiasF = orbBias / 100.0
+    if orbLong and or_lf and or_pos >= orbBiasF
         or_dir := 1
         or_shallow := or_pos >= orbThr
-    else if orbShort and (not or_lf) and or_pos <= 0.5
+    else if orbShort and (not or_lf) and or_pos <= 1.0 - orbBiasF
         or_dir := -1
         or_shallow := or_pos <= 1.0 - orbThr
     if or_dir != 0
@@ -832,10 +840,11 @@ if ib_rDone and not na(ib_rH) and ib_rH > ib_rL
     ib_lf = ib_rLbar < ib_rHbar
     ib_pos = (close[1] - ib_rL) / ib_rng
     ibThr = ibShThr / 100.0
-    if ibLong and ib_lf and ib_pos >= 0.5
+    ibBiasF = ibBias / 100.0
+    if ibLong and ib_lf and ib_pos >= ibBiasF
         ib_dir := 1
         ib_shallow := ib_pos >= ibThr
-    else if ibShort and (not ib_lf) and ib_pos <= 0.5
+    else if ibShort and (not ib_lf) and ib_pos <= 1.0 - ibBiasF
         ib_dir := -1
         ib_shallow := ib_pos <= 1.0 - ibThr
     if ib_dir != 0
@@ -1249,7 +1258,8 @@ if showInfo and barstate.islast
          text_color = not ordersOn ? color.orange : usePreset ? color.yellow : color.aqua, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 1,  "Ranges: ORB " + orbSess + " | IB " + ibSess,          text_color = color.white,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 2,  "Direction: low-first = LONG, high-first = SHORT",     text_color = color.white,  text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 3,  "  + close in top half (L) / bottom half (S)",         text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 3,  "  + close beyond " + str.tostring(orbBias, "#.#") + "% (ORB) / " + str.tostring(ibBias, "#.#") + "% (IB) of the range",
+         text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 4,  "ORB " + (runORB ? "ON " : "off ") + orbBreak + " | entry " + orbEshal + " / " + orbEdeep,
          text_color = runORB ? color.orange : color.gray, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 5,  "   stop 100% (range extreme) | TP " + orbTpL + " / " + orbTpS + " | to " + f_hm(orbCutH, orbCutM),
