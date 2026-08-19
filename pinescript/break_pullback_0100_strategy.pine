@@ -69,6 +69,16 @@ strategy("Break-then-Pullback 01:00 (ORB + IB)", overlay = true, pyramiding = 6,
 //   that sits an optional DAILY MAX LOSS in dollars: hit it and the open trade is closed, resting orders are
 //   cancelled and the session is over. Off by default (0).
 
+// ---------------------------------------------------------------- Mode: strategy or indicator
+// Pine decides strategy() vs indicator() when the script compiles, so an input cannot change the file's type.
+// What this switch does is silence every ORDER. In Indicator mode the ranges, levels, fib lines, risk/reward
+// boxes, probability table and break alerts all keep running on identical rules - the chart is byte for byte
+// the same - while nothing is bought or sold, so the Strategy Tester stays empty and the equity curve flat.
+gMode     = "Mode"
+runMode   = input.string("Strategy - place orders", "Run as", options = ["Strategy - place orders", "Indicator - drawings & alerts only"], group = gMode,
+     tooltip = "STRATEGY: the full engine - entries, exits, EOD flatten, daily-loss limit and the PickMyTrade webhook. INDICATOR: none of those, so no trades and an empty Strategy Tester, but every level, box, label, table and break alert still works. Use it to run the setup as a manual-trading overlay.")
+ordersOn  = runMode == "Strategy - place orders"
+
 // ---------------------------------------------------------------- Strategy toggles (isolate each for backtesting)
 gStrat    = "Strategies (toggle to track each separately)"
 runORBIn  = input.bool(true, "Run ORB strategy", group = gStrat, tooltip = "Turn OFF to backtest the IB strategy alone in the Strategy Tester.")
@@ -115,9 +125,6 @@ ibRiskDlr1  = input.float(150, "   IB $ risk - FIRST entry",      minval = 1, st
 ibRiskDlr2  = input.float(150, "   IB $ risk - AVG-DOWN entry",   minval = 1, step = 25, group = gRisk)
 maxDayLoss  = input.float(0, "Daily max loss $ (0 = off)", minval = 0, step = 25, group = gRisk,
      tooltip = "A flat dollar stop for the whole day, counted from the equity at the session open and including the open trade's floating P&L. The moment the day is down this much, everything open is closed at market, every resting order is cancelled and no new setup is taken until the next session - the block latches, so a later recovery does not re-open the day. 0 turns it off. It is evaluated bar by bar, so a fast bar can carry the loss past the number before the close lands; treat it as a circuit breaker, not a guaranteed worst case. Needs the strategy engine, so it does nothing in Indicator mode.")
-
-mFixed = mFixedIn
-mDlr   = mDlrIn
 
 // One mode only: fixed contracts wins if both are ticked, and is the fallback if neither is.
 rmFixed    = mFixed or not mDlr

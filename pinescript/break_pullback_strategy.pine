@@ -118,7 +118,7 @@ ibFri     = input.bool(true, "IB Friday",    group = gDayI)
 // Either way the four entries are sized independently: ORB first, ORB average-down, IB first, IB average-down,
 // so the add can be bigger, smaller or the same as the entry it doubles up on.
 gRisk       = "Risk sizing"
-mFixed      = input.bool(true,  "1) Fixed contract size", group = gRisk,
+mFixedIn    = input.bool(true,  "1) Fixed contract size", group = gRisk,
      tooltip = "MODE 1 (default). Trade exactly the four contract counts below - no risk maths at all. The R/R tool, the strategy orders and the webhook all use those counts. If both modes are ticked this one wins; if neither is ticked this one is used.")
 orbQty1In   = input.float(2, "   ORB contracts - FIRST entry",    minval = 1, step = 1, group = gRisk,
      tooltip = "MODE 1. Contracts on the first ORB unit (the limit at the fib pullback).")
@@ -128,7 +128,7 @@ ibQty1In    = input.float(1, "   IB contracts - FIRST entry",     minval = 1, st
      tooltip = "MODE 1. Contracts on the first IB unit.")
 ibQty2In    = input.float(1, "   IB contracts - AVG-DOWN entry",  minval = 1, step = 1, group = gRisk,
      tooltip = "MODE 1. Contracts on the IB average-down unit.")
-mDlr        = input.bool(false, "2) Risk $ per trade", group = gRisk,
+mDlrIn      = input.bool(false, "2) Risk $ per trade", group = gRisk,
      tooltip = "MODE 2. Ignore the contract counts: size each entry so ITS OWN risk equals that entry's dollar amount below. The stop distance decides the count, so a wide range buys fewer contracts and a tight one more - the dollar risk stays put. Untick mode 1 for this to take effect. If the amount cannot cover a single contract at that stop distance, the setup is skipped rather than traded at a size you did not ask for.")
 orbRiskDlr1 = input.float(150, "   ORB $ risk - FIRST entry",     minval = 1, step = 25, group = gRisk,
      tooltip = "MODE 2. Dollars risked on the first ORB entry, entry to stop.")
