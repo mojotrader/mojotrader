@@ -54,7 +54,7 @@ def lvl(d, rH, rL, rng, depth):
     """depth 0 = the level that broke, 1 = the far side of the range"""
     return rH - depth*rng if d == 1 else rL + depth*rng
 
-def run_day(bars, range_end, cfg, flat, cost):
+def run_day(bars, range_end, cfg, flat, cost, maxdep=0.5):
     """cfg = (entry_shallow, stop_shallow, entry_deep, stop_deep, avg_depth, thr, break_type),
     depths as fractions. Returns one trade record with the outcome under every target."""
     eS, sS, eD, sD, aDep, thr, brk = cfg
@@ -66,8 +66,9 @@ def run_day(bars, range_end, cfg, flat, cost):
     hi = min(i for i in ri if bars[i][2] == rH); lo = min(i for i in ri if bars[i][3] == rL)
     rng = rH - rL; last = max(ri)
     pos = (bars[last][4] - rL) / rng
-    if lo < hi and pos >= 0.5:      d, shallow = 1, pos >= thr
-    elif lo > hi and pos <= 0.5:    d, shallow = -1, pos <= 1 - thr
+    # maxdep = how far the range may CLOSE into itself, measured from the level that will break
+    if lo < hi and pos >= 1 - maxdep:   d, shallow = 1, pos >= thr
+    elif lo > hi and pos <= maxdep:     d, shallow = -1, pos <= 1 - thr
     else: return None
     eDep, sDep = (eS, sS) if shallow else (eD, sD)
     if sDep <= eDep: return None                       # stop must sit deeper than the entry
@@ -128,10 +129,10 @@ def run_day(bars, range_end, cfg, flat, cost):
             rec["pnl2"][k] = (xpx - px2)*d*cost.ptval - 2*cost.comm
     return rec
 
-def build(days, range_end, cfg, flat, cost):
+def build(days, range_end, cfg, flat, cost, maxdep=0.5):
     out = []
     for d in sorted(days):
-        t = run_day(days[d], range_end, cfg, flat, cost)
+        t = run_day(days[d], range_end, cfg, flat, cost, maxdep)
         if t: t["date"] = d; t["dow"] = d.weekday(); out.append(t)
     return out
 
@@ -195,8 +196,8 @@ def mode_sweep(days, range_end, flat, cost, minTrades, split):
     print(f"\n{len(res)} configurations profitable in both walk-forward halves with "
           f"n>={minTrades} and PF>=1.25")
 
-def mode_detail(days, range_end, flat, cost, cfg, tpL, tpS, avg, cut, mr, split, label):
-    rec = build(days, range_end, cfg, flat, cost)
+def mode_detail(days, range_end, flat, cost, cfg, tpL, tpS, avg, cut, mr, split, label, maxdep=0.5):
+    rec = build(days, range_end, cfg, flat, cost, maxdep)
     s  = score(rec, tpL, tpS, avg, cut, mr)
     if s is None: print("no trades"); return
     IS = {d for d in days if d < split}; OS = {d for d in days if d >= split}
@@ -235,7 +236,7 @@ def mode_detail(days, range_end, flat, cost, cfg, tpL, tpS, avg, cut, mr, split,
 ES_ORB = dict(cfg=(0.25, 1.00, 0.50, 1.00, 0.50, 0.75, "close"), tp=(0.75, 1.00), cut=11*60, minr=0.20)
 ES_IB  = dict(cfg=(0.25, 1.00, 0.50, 1.00, 0.50, 0.75, "wick"),  tp=(0.30, 0.30), cut=12*60, minr=0.30)
 
-def _levels(bars, range_end, cfg):
+def _levels(bars, range_end, cfg, maxdep=0.5):
     eS, sS, eD, sD, aDep, thr, brk = cfg
     ri = [i for i, b in enumerate(bars) if b[0] < range_end]
     if not ri: return None
@@ -243,8 +244,8 @@ def _levels(bars, range_end, cfg):
     if not rH > rL: return None
     hi = min(i for i in ri if bars[i][2] == rH); lo = min(i for i in ri if bars[i][3] == rL)
     rng = rH - rL; last = max(ri); pos = (bars[last][4] - rL) / rng
-    if lo < hi and pos >= 0.5:    d, sh = 1, pos >= thr
-    elif lo > hi and pos <= 0.5:  d, sh = -1, pos <= 1 - thr
+    if lo < hi and pos >= 1 - maxdep:   d, sh = 1, pos >= thr
+    elif lo > hi and pos <= maxdep:     d, sh = -1, pos <= 1 - thr
     else: return None
     eDep, sDep = (eS, sS) if sh else (eD, sD)
     if sDep <= eDep: return None
@@ -349,6 +350,8 @@ def main():
     ap.add_argument("--tp-long", default=None); ap.add_argument("--tp-short", default=None)
     ap.add_argument("--cutoff", default=None); ap.add_argument("--min-range", type=float, default=None)
     ap.add_argument("--min-trades", type=int, default=40)
+    ap.add_argument("--max-close-depth", type=float, default=50,
+                    help="how far the range may close into itself, %% measured from the breaking level (50 = classic half rule)")
     a = ap.parse_args()
 
     cost = Cost(a.point_value, a.tick, a.commission)
@@ -364,7 +367,7 @@ def main():
         for nm, rE, brk, tl, ts, cut, mr in (
                 ("ORB (script defaults)", hhmm(a.orb_end), "close", "Ext 10%", "Ext 30%", 15*60, 0.40),
                 ("IB  (script defaults)", hhmm(a.ib_end),  "wick",  "Ext 30%", "Ext 30%", 14*60, 0.0)):
-            rec = build(days, rE, (0.25, 1.00, 0.50, 0.75, 0.50, 0.75, brk), flat, cost)
+            rec = build(days, rE, (0.25, 1.00, 0.50, 0.75, 0.50, 0.75, brk), flat, cost, a.max_close_depth/100)
             print(fmt(score(rec, TPNAMES.index(tl), TPNAMES.index(ts), True, cut, mr), nm))
         return
     if a.mode == "joint":
@@ -383,7 +386,8 @@ def main():
                 a.avg == "on", cut, mr, split,
                 f"{a.range.upper()}  entry {a.entry_shallow:.0f}%/{a.entry_deep:.0f}%  "
                 f"stop {a.stop_shallow:.0f}%/{a.stop_deep:.0f}%  {brk}-break  TP {tl}/{ts}  "
-                f"cutoff {cut//60:02d}:{cut%60:02d}  minRange {mr}%  avg {a.avg}")
+                f"cutoff {cut//60:02d}:{cut%60:02d}  minRange {mr}%  avg {a.avg}  depth {a.max_close_depth:.0f}%",
+                maxdep=a.max_close_depth/100)
 
 if __name__ == "__main__":
     main()
