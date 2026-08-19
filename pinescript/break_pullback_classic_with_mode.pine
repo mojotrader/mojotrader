@@ -47,8 +47,9 @@ strategy("Break-then-Pullback (ORB + IB)", overlay = true, pyramiding = 6, max_b
 //   way; it simply trades nothing.
 //
 // NOTE: position sizing has two modes, picked by checkbox - fixed contract counts, or a flat $ risk per entry.
-//   Either way size is set PER ENTRY (four of them: ORB first, ORB avg-down, IB first, IB avg-down). There is no
-//   daily loss limit: risk is controlled per trade, and the day ends at the flatten.
+//   Either way size is set PER ENTRY (four of them: ORB first, ORB avg-down, IB first, IB avg-down). On top of
+//   that sits an optional DAILY MAX LOSS in dollars: hit it and the open trade is closed, resting orders are
+//   cancelled and the session is over. Off by default (0).
 
 // ---------------------------------------------------------------- Mode: strategy or indicator
 // Pine decides strategy() vs indicator() when the script compiles, so an input cannot change the file's type.
@@ -106,6 +107,8 @@ orbRiskDlr2 = input.float(150, "   ORB $ risk - AVG-DOWN entry",  minval = 1, st
      tooltip = "MODE 2. Dollars risked on the ORB average-down unit. Its stop is the same price but its entry is deeper, so the same dollars buy more contracts than the first entry - lower it if you do not want the add to dominate the setup.")
 ibRiskDlr1  = input.float(150, "   IB $ risk - FIRST entry",      minval = 1, step = 25, group = gRisk)
 ibRiskDlr2  = input.float(150, "   IB $ risk - AVG-DOWN entry",   minval = 1, step = 25, group = gRisk)
+maxDayLoss  = input.float(0, "Daily max loss $ (0 = off)", minval = 0, step = 25, group = gRisk,
+     tooltip = "A flat dollar stop for the whole day, counted from the equity at the session open and including the open trade's floating P&L. The moment the day is down this much, everything open is closed at market, every resting order is cancelled and no new setup is taken until the next session - the block latches, so a later recovery does not re-open the day. 0 turns it off. It is evaluated bar by bar, so a fast bar can carry the loss past the number before the close lands; treat it as a circuit breaker, not a guaranteed worst case. Needs the strategy engine, so it does nothing in Indicator mode.")
 
 // One mode only: fixed contracts wins if both are ticked, and is the fallback if neither is.
 rmFixed    = mFixed or not mDlr
@@ -212,6 +215,16 @@ else if inSess
     dLow  := math.min(dLow, low)
 tod     = hour(time, tz) * 60 + minute(time, tz)
 flatten = tod >= (flatH*60 + flatM)
+
+// ---- daily loss limit: a flat $ stop for the whole session, floating P&L included ----
+var float dayStartEq = na
+var bool  dayHalt    = false
+if newSession
+    dayStartEq := strategy.equity
+    dayHalt    := false
+dayPnL = strategy.equity - dayStartEq                 // today's P&L, realised + open
+if maxDayLoss > 0 and dayPnL <= -maxDayLoss
+    dayHalt := true                                   // latched: the day stays shut once it trips
 
 // day-of-week gates (per strategy)
 dow      = dayofweek(time, tz)
@@ -466,7 +479,7 @@ if or_dir == -1 and high > or_rH
     or_oppBroke := true
 // entry window: before IB forms (when IB is on), within ORB cutoff otherwise, on an allowed weekday
 orbSizeOK = orbMinRngPct <= 0 or (not na(or_rng) and or_rL > 0 and or_rng / or_rL * 100 >= orbMinRngPct)
-orbWin = inSess and orbDayOK and tod <= (orbCutH*60 + orbCutM) and (not runIB or not ibFormed) and orbSizeOK
+orbWin = inSess and not dayHalt and orbDayOK and tod <= (orbCutH*60 + orbCutM) and (not runIB or not ibFormed) and orbSizeOK
 if runORB and or_dir != 0 and or_broke and not or_placed and not or_closed and orbWin and not flatten and (not noDbl or not or_oppBroke) and orbSz1 >= 1
     if ordersOn
         if or_dir == 1
@@ -517,7 +530,7 @@ if (or_f1 or or_f2) and not or_closed and not na(or_curStop)
 // CARRY: with the option armed, an unfilled ORB limit survives the IB forming. It still dies at the ORB cutoff,
 // on a double-break, on the daily halt or at the flatten - and it gives way as soon as the IB arms its own setup,
 // which is handled after the IB engine below (ib_broke is not known this early in the bar).
-orbHold = orbCarry and or_placed and not (or_f1 or or_f2) and inSess and orbDayOK and tod <= (orbCutH*60 + orbCutM)
+orbHold = orbCarry and or_placed and not (or_f1 or or_f2) and inSess and not dayHalt and orbDayOK and tod <= (orbCutH*60 + orbCutM)
 if ordersOn and (or_closed or flatten or not runORB or (noDbl and or_oppBroke) or ((not orbWin) and not (or_f1 or or_f2) and not orbHold))
     strategy.cancel("ORL")
     strategy.cancel("ORL2")
@@ -717,7 +730,7 @@ if ib_dir == 1 and low < ib_rL
     ib_oppBroke := true
 if ib_dir == -1 and high > ib_rH
     ib_oppBroke := true
-ibWin = inSess and ibDayOK and tod <= (ibCutH*60 + ibCutM)
+ibWin = inSess and not dayHalt and ibDayOK and tod <= (ibCutH*60 + ibCutM)
 // hold the IB while an ORB trade is live; if its entry level trades through during the hold, the IB is forfeited
 if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and orbLive and not na(ib_e1)
     if (ib_dir == 1 and low <= ib_e1) or (ib_dir == -1 and high >= ib_e1)
@@ -890,9 +903,12 @@ if ibP_act
         f_pbPush(1, ibP_rngP, ibP_r25, ibP_r50, ibP_h25, ibP_h50)
         ibP_act := false
 
-// ---------------------------------------------------------------- EOD flatten
+// ---------------------------------------------------------------- EOD flatten + daily loss limit
 if ordersOn and flatten
     strategy.close_all(comment = "EOD flat")
+if ordersOn and dayHalt
+    strategy.close_all(comment = "Daily max loss")
+    strategy.cancel_all()
 
 // ---------------------------------------------------------------- Automation: PickMyTrade webhook JSON (net position)
 f_pmt(string act, float q, float slp, float tpp) =>
@@ -1112,7 +1128,7 @@ if showInfo and barstate.islast
     table.cell(info, 0, 10, "Skip double-break days | Flatten 15:30 ET",           text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 11, "Toggle Run ORB/IB + weekdays to isolate results",     text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 12, "Odds live in the table; > marks where price is now",  text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 14, modeTxt + (rmFixed ? "" : " (per entry, fixed capital)"), text_color = color.yellow, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 14, modeTxt + (maxDayLoss > 0 ? "  | day stop $" + str.tostring(maxDayLoss, "#") + (dayHalt ? " - HIT" : "") : "") + (rmFixed ? "" : " (per entry, fixed capital)"), text_color = dayHalt ? color.red : color.yellow, text_size = size.small, text_halign = text.align_left)
 
 // ---------------------------------------------------------------- Probability table
 // Columns: N = sample size, Reach = how often that starting point is even reached, then the odds of price trading
