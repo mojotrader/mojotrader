@@ -30,3 +30,25 @@ slower structure. Configurable under the *Higher-timeframe structure* group:
 
 The HTF engine is **non-repainting**: a higher-timeframe bar is only processed
 once it has fully closed.
+
+## Strategies
+
+### `pinescript/flat_moon_society_mnq_strategy.pine`
+FLAT MOON SOCIETY MNQ 1.4.0-rc.1 — a Pine v6 port of the NinjaTrader 8 strategy
+of the same name, ported from the NinjaScript source rather than its README.
+
+Run it on **MNQ, 1-minute, extended hours**. It builds the 09:30–09:45 ET
+opening range from 15 exact one-minute bars, evaluates a 15-bar decision candle
+every quarter hour from 10:00 to 15:45 ET, admits a breakout on body/close-
+location/touch geometry, then picks direction from the raw breakout, a
+prior-session ±300 bps rule and a quarterly 15-nearest-neighbour flip model
+(labels included). Entry refinements observe one to three completed minutes
+before the market order. Stop = 1.25 × ORB clamped to 2–100 points, target 3R
+(1.25R in the high-ORB regime), breakeven at 1.25R (+0.10R at 0.75R when
+countertrend), a conditional 15:30 ET exit and a 16:00 ET flatten. Three sizing
+modes: `FixedDollar`, `ClosedEquityPercent`, `ConfidenceScaledPercent`.
+
+Parity notes and the deviations TradingView forces — chiefly that the direction
+model needs more 1-minute history than most plans provide, and that early
+closes are caught on the session's last bar instead of before the trade — are
+in [`pinescript/FLAT_MOON_SOCIETY_MNQ.md`](pinescript/FLAT_MOON_SOCIETY_MNQ.md).

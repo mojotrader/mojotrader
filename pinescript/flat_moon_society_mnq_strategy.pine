@@ -1,0 +1,1093 @@
+//@version=6
+// ============================================================================
+// FLAT MOON SOCIETY MNQ 1.4.0-rc.1 — Pine port of the NinjaTrader 8 strategy.
+//
+// Run on MNQ, 1-minute chart, exchange-hours (ETH) data. The port follows
+// FLAT_MOON_SOCIETY_MNQ_v1_4_0_RC1.cs rule-for-rule:
+//   - 09:30-09:45 ET opening range from 15 exact one-minute bars.
+//   - Decision closes every quarter hour from 10:00 through 15:45 ET; the
+//     decision candle is the last 15 completed one-minute bars.
+//   - Admission: close >= ORB high + 1 tick (or <= ORB low - 1 tick),
+//     directional body >= 15% of the signal range, close location >= 0.60,
+//     and >= 3 of the 15 one-minute bars touching the confirmation level.
+//     Geometry rejects keep scanning; a touch veto consumes the cash date.
+//   - Direction: raw breakout, reversed by the prior-session rule (-300 bps
+//     aligned) and/or a quarterly 15-nearest-neighbour flip model.
+//   - Entry refinement: weak signal (1 bar, keep) > high-vol/low-touch vote
+//     (3 bars, flip when the aligned move <= 0), then prior-session
+//     disagreement (2 bars, always flip) > intraday continuation (1 bar, flip
+//     only when the aligned move > 0). Market order after the final completed
+//     bar, filled at the next bar open.
+//   - Stop = clamp(1.25 x ORB, 2, 100) points. Target 3R, or 1.25R when the
+//     ORB exceeds its prior 120-session 75th percentile. Managed stop to
+//     breakeven at 1.25R, or +0.10R at 0.75R in the countertrend regime.
+//     15:30 ET exit outside [0R, 1R); 16:00 ET flatten.
+//   - Sizing: FixedDollar / ClosedEquityPercent / ConfidenceScaledPercent with
+//     the same caps, leverage limit and per-contract risk reserve.
+//
+// The 15-NN direction model is reproduced in full, including the causal
+// breakout-vs-fade shadow pair that produces its labels and the quarterly
+// expanding-window refit. Deviations forced by the platform are listed in
+// pinescript/FLAT_MOON_SOCIETY_MNQ.md — read them before trusting a backtest.
+// ============================================================================
+strategy("FLAT MOON SOCIETY MNQ 1.4.0-rc.1", overlay = true, pyramiding = 0,
+     calc_on_every_tick = false, process_orders_on_close = false,
+     initial_capital = 50000, currency = currency.USD, margin_long = 0, margin_short = 0,
+     default_qty_type = strategy.fixed, default_qty_value = 1,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 1.25,
+     slippage = 1, max_bars_back = 500, max_lines_count = 500, max_labels_count = 500)
+
+// ---------------------------------------------------------------- Constants (NinjaScript parity)
+ORB_START_MIN      = 9 * 60 + 30            // OrbStartMinuteEt
+ORB_END_MIN        = 9 * 60 + 45            // OrbEndMinuteEt
+FIRST_DEC_MIN      = 10 * 60                // FirstBreakoutCloseMinuteEt
+FLATTEN_MIN        = 16 * 60                // FlattenMinuteEt / RequiredCashCloseMinuteEt
+COND_EXIT_MIN      = 15 * 60 + 30           // ConditionalExitMinuteEt
+EXPECTED_ORB_BARS  = 15
+
+STOP_ORB_MULT      = 1.25
+MIN_STOP_POINTS    = 2.0
+MAX_STOP_POINTS    = 100.0
+BASELINE_TARGET_R  = 3.0
+HIGH_ORB_TARGET_R  = 1.25
+ORB_LOOKBACK       = 120
+ORB_QUANTILE       = 0.75
+DEFENSIVE_MAX_QTY  = 1
+BODY_FRACTION      = 0.15                   // AdmissionBodyFraction
+CLOSE_LOCATION     = 0.60                   // AdmissionCloseLocation
+MIN_TOUCHES        = 3
+CONFIRMATION_TICKS = 1
+TREND_LOOKBACK     = 20
+TREND_CLOSES       = TREND_LOOKBACK + 1     // RequiredConfidenceTrendCloses
+BASE_MG_TRIGGER_R  = 1.25
+BASE_MG_LOCK_R     = 0.0
+CT_MG_TRIGGER_R    = 0.75
+CT_MG_LOCK_R       = 0.10
+COND_LOSS_R        = 0.0
+COND_PROFIT_R      = 1.0
+
+PRIOR_DAY_BPS      = 300.0                  // PriorDayContinuationThresholdBps
+FEATURES           = 14
+NEIGHBORS          = 15
+MIN_TRAIN_ROWS     = 100
+FLIP_PROB_LIMIT    = 0.65
+TRAIN_START_KEY    = 20210101
+PREDICT_START_KEY  = 20230101
+WEAK_BODY_FRACTION = 0.20
+WEAK_DELAY_BARS    = 1
+HIGH_VOL_TOUCH_MAX = 3
+HIGH_VOL_VOTE_BARS = 3
+HIGH_VOL_VOTE_THR  = 0.0
+INTRADAY_BPS       = 25.0
+INTRADAY_MAX_EXT   = 0.25
+INTRADAY_OBS_BARS  = 1
+PRIOR_DIS_BPS      = 100.0
+PRIOR_DIS_MAX_BODY = 0.0
+PRIOR_DIS_OBS_BARS = 2
+
+// Label costs are fixed per contract so labels stay independent of the sizing mode.
+MODEL_ENTRY_SLIP_TICKS = 1
+MODEL_STOP_SLIP_TICKS  = 1
+MODEL_FLAT_SLIP_TICKS  = 1
+MODEL_ROUND_TURN_COST  = 2.50
+
+// ---------------------------------------------------------------- Inputs
+grpSize   = "1. Risk sizing"
+sizingIn  = input.string("FixedDollar", "Sizing Mode", options = ["FixedDollar", "ClosedEquityPercent", "ConfidenceScaledPercent"], group = grpSize)
+fixedRisk = input.float(535.0, "Fixed Risk Per Trade ($)", minval = 0.01, group = grpSize)
+fixedCap  = input.int(2, "Fixed-Dollar Max Contracts", minval = 1, maxval = 1000, group = grpSize)
+startEq   = input.float(50000.0, "Starting Equity ($)", minval = 1.0, group = grpSize)
+tradeStart= input.int(20210101, "Trading Start Date (YYYYMMDD)", minval = 19000101, maxval = 20991231, group = grpSize,
+     tooltip = "Earlier loaded sessions are warm-up only: they build history and model labels but submit no orders.")
+minPct    = input.float(0.5, "Confidence Low Risk (%)", minval = 0.0001, maxval = 10.0, group = grpSize)
+basePct   = input.float(1.0, "Base Risk Per Trade (%)", minval = 0.0001, maxval = 10.0, group = grpSize)
+maxPct    = input.float(2.0, "Confidence High Risk (%)", minval = 0.0001, maxval = 10.0, group = grpSize)
+portCap   = input.int(10, "Portfolio Max Contracts", minval = 1, maxval = 1000, group = grpSize)
+maxLev    = input.float(4.0, "Max Raw-Notional Leverage", minval = 0.01, maxval = 100.0, group = grpSize)
+
+grpRisk   = "2. Risk model"
+rtCost    = input.float(2.50, "Estimated Round-Turn Cost / Contract", minval = 0.0, group = grpRisk,
+     tooltip = "Sizing reserve only. It does not post a commission.")
+stopSlipT = input.int(1, "Stop Slippage Reserve (ticks)", minval = 0, maxval = 100, group = grpRisk)
+slipTicks = input.int(1, "Analyzer slippage (ticks)", minval = 0, maxval = 100, group = grpRisk,
+     tooltip = "Mirror of the strategy-properties slippage. Sizing reserves max(stop slippage, this value).")
+backAdjust = input.float(0.0, "Back-adjustment offset (points)", group = grpRisk,
+     tooltip = "Subtracted from the chart price to recover the raw contract price used by the leverage cap, the NinjaScript stored-rollover feature. TradingView continuous contracts are unadjusted, so 0 is correct there; supply the cumulative offset if you load back-adjusted data.")
+
+grpModel  = "3. Direction model"
+useModel  = input.bool(true, "Use the quarterly 15-NN flip model", group = grpModel,
+     tooltip = "Needs >= 100 causal labels from sessions before the current quarter, with predictions from 2023-01-01. TradingView 1-minute history is usually too short to reach that; the model then stays unavailable and direction comes from the breakout and the prior-session rule.")
+usePriorRule = input.bool(true, "Use the prior-session -300 bps reversal", group = grpModel)
+
+grpSess   = "4. Session & data"
+tz        = input.string("America/New_York", "Exchange time zone", group = grpSess)
+rollHour  = input.int(17, "Cash-date roll hour (ET)", minval = 12, maxval = 23, group = grpSess,
+     tooltip = "Bars at or after this ET hour belong to the next cash date, matching the CME exchange trading day.")
+useLastBar= input.bool(true, "Flatten on an early exchange close", group = grpSess)
+exclDates = input.string("20200227,20200228,20200630,20200701,20200702,20211206,20220103,20240918,20240919,20250917,20250918,20250924,20250925,20251128,20260316,20260317,20260410,20260525,20260730,20260731,20200311,20200610,20200909,20210609,20210908,20220608,20220907,20260611",
+     "Excluded cash dates (YYYYMMDD)", group = grpSess,
+     tooltip = "Embedded rollover and degraded-data exclusions from the NinjaScript source.")
+
+grpVis    = "5. Diagnostics"
+drawLevels= input.bool(true, "Draw the opening range and trade levels", group = grpVis)
+showTable = input.bool(true, "Show the run summary", group = grpVis)
+
+MODE_FIXED   = sizingIn == "FixedDollar"
+MODE_CONF    = sizingIn == "ConfidenceScaledPercent"
+tick         = syminfo.mintick
+pointValue   = syminfo.pointvalue
+minRiskFrac  = minPct / 100.0
+baseRiskFrac = basePct / 100.0
+maxRiskFrac  = maxPct / 100.0
+
+// ---------------------------------------------------------------- Pure helpers
+f_dateKey(ts) => year(ts, tz) * 10000 + month(ts, tz) * 100 + dayofmonth(ts, tz)
+f_roundPrice(p) => math.round(p / tick) * tick
+f_safeBps(num, den) => den != 0 ? (num / den - 1.0) * 10000.0 : 0.0
+f_floorQty(v) => v > 0 and not na(v) ? int(math.floor(v)) : 0
+
+// Absolute-price half-up tick rounding, as RoundPriceOffsetTicks does.
+f_offsetTicks(points, priceBelowEntry) =>
+    exact = points / tick
+    int(priceBelowEntry ? math.ceil(exact - 0.5) : math.floor(exact + 0.5))
+
+// NinjaScript LinearPercentile.
+f_percentile(src, q) =>
+    a = array.copy(src)
+    array.sort(a, order.ascending)
+    n = array.size(a)
+    pos = (n - 1) * q
+    lo = int(math.floor(pos))
+    hi = int(math.ceil(pos))
+    lo == hi ? array.get(a, lo) : array.get(a, lo) + (array.get(a, hi) - array.get(a, lo)) * (pos - lo)
+
+// NinjaScript LagReturnBps over the eligible RTH close history.
+f_lagBps(src, periods) =>
+    n = array.size(src)
+    float out = 0.0
+    if n > periods
+        base = array.get(src, n - 1 - periods)
+        if base != 0
+            out := f_safeBps(array.get(src, n - 1), base)
+    out
+
+// ---------------------------------------------------------------- Session / cash-date state
+var int    cashKeyCur      = na
+var bool   sessionEligible = false
+var bool   refCaptured     = false
+var float  refOpen         = 0.0
+var bool   dayBlocked      = true
+var bool   sessionEnding   = false
+var bool   orbFinalized    = false
+var bool   breakoutUsed    = false
+var bool   cashExitDone    = false
+var bool   cashIntegrity   = false
+var bool   orbHistDone     = false
+var bool   rthHistDone     = false
+var int    orbBarCount     = 0
+var int    expectedOrbMin  = ORB_START_MIN
+var float  orbHigh         = na
+var float  orbLow          = na
+var float  orbOpen         = na
+var float  orbClose        = na
+var float  orbBps          = 0.0
+var float  priorOrbQ75     = 0.0
+var bool   priorOrbQ75Ok   = false
+var float  priorTrendBps   = 0.0
+var bool   priorTrendOk    = false
+var int    rthBarCount     = 0
+var float  tpvSum          = 0.0
+var float  volSum          = 0.0
+var int    lastCashCloseTs = na
+
+// Eligible-session history (identical retention limits to the NinjaScript lists).
+var array<float> orbHist    = array.new<float>()   // capped at 120 rows
+var array<float> closeHist  = array.new<float>()   // capped at 21 rows
+var float  priorSessionBps  = 0.0                  // last eligible session return, 0 while empty
+var bool   priorSessionOk   = false
+
+// Live trade management.
+var int    initStopTicks   = 0
+var int    initTargetTicks = 0
+var float  mgTriggerR      = 0.0
+var float  mgLockR         = 0.0
+var bool   mgActivated     = false
+var bool   condExitDone    = false
+var string mgRegime        = ""
+
+// Pending entry refinement (weak signal / high-vol touch vote).
+var bool   pdActive     = false
+var int    pdExpectedTs = na
+var int    pdSide       = 0
+var int    pdRequired   = 0
+var int    pdObserved   = 0
+var float  pdFirstOpen  = na
+var bool   pdSubmit     = false
+var string pdBranch     = ""
+var string pdSource     = ""
+var int    pdBaseSide   = 0
+var float  pdF1         = 0.0      // features[1]: aligned prior-session return
+var float  pdF5         = 0.0      // features[5]: aligned 30-minute return
+var float  pdSignalClose = na
+
+// Pending final refinement (prior-session disagreement / intraday continuation).
+var bool   pfActive     = false
+var int    pfExpectedTs = na
+var int    pfSide       = 0
+var int    pfRequired   = 0
+var int    pfObserved   = 0
+var float  pfFirstOpen  = na
+var bool   pfSubmit     = false
+var string pfBranch     = ""
+var string pfSource     = ""
+var string pfPath       = ""
+
+// Causal breakout-vs-fade shadow pair that labels the direction model.
+var bool   spActive     = false
+var bool   spInit       = false
+var bool   spInvalid    = false
+var bool   spLabelDone  = false
+var int    spExpectedTs = na
+var int    spBaseSide   = 0
+var int    spSessionKey = 0
+var bool   spTrendOk    = false
+var float  spTrendBps   = 0.0
+var array<float> spFeat = array.new<float>(FEATURES, 0.0)
+var array<float> stSide  = array.new<float>(2, 0.0)   // 0 = breakout, 1 = fade
+var array<float> stEntry = array.new<float>(2, 0.0)
+var array<float> stStop  = array.new<float>(2, 0.0)
+var array<float> stTgt   = array.new<float>(2, 0.0)
+var array<float> stRisk  = array.new<float>(2, 0.0)
+var array<float> stTrig  = array.new<float>(2, 0.0)
+var array<float> stLock  = array.new<float>(2, 0.0)
+var array<float> stExit  = array.new<float>(2, 0.0)
+var array<int>   stPend  = array.new<int>(2, 0)
+var array<int>   stDone  = array.new<int>(2, 0)
+
+// Direction-model training rows (features flattened, 14 per row) and the frozen quarterly fit.
+var array<float> trFeat  = array.new<float>()
+var array<int>   trFlip  = array.new<int>()
+var int          qFrozenRows = 0
+var int          qPrevKey    = 0
+var array<float> qMean   = array.new<float>(FEATURES, 0.0)
+var array<float> qScale  = array.new<float>(FEATURES, 1.0)
+var bool         qModelOk = false
+
+// Run counters (the NinjaScript Analyzer summary).
+var int cEligible = 0
+var int cAdmitted = 0
+var int cGeometry = 0
+var int cTouchVeto = 0
+var int cPriorOvr = 0
+var int cKnnPred = 0
+var int cKnnOvr = 0
+var int cWeak = 0
+var int cVote = 0
+var int cVoteFlip = 0
+var int cPriorCond = 0
+var int cIntraCond = 0
+var int cPriorRev = 0
+var int cIntraRev = 0
+var int cIntraKeep = 0
+var int cLabels = 0
+var int cSizeSkip = 0
+var int cFailClosed = 0
+var int cBlocked = 0
+
+// ---------------------------------------------------------------- 15-nearest-neighbour flip vote
+// Population-standardised Euclidean distance over the frozen quarterly rows.
+// Strict "<" insertion keeps the lower training sequence on distance ties, as
+// the NinjaScript comparator does.
+f_knnFlipCount(qf) =>
+    nbD = array.new<float>(NEIGHBORS, 1.0e300)
+    nbF = array.new<int>(NEIGHBORS, 0)
+    if qFrozenRows > 0
+        for r = 0 to qFrozenRows - 1
+            d = 0.0
+            base = r * FEATURES
+            for j = 0 to FEATURES - 1
+                m = array.get(qMean, j)
+                sc = array.get(qScale, j)
+                diff = (array.get(trFeat, base + j) - m) / sc - (array.get(qf, j) - m) / sc
+                d += diff * diff
+            if d < array.get(nbD, NEIGHBORS - 1)
+                pos = NEIGHBORS - 1
+                while pos > 0 and d < array.get(nbD, pos - 1)
+                    array.set(nbD, pos, array.get(nbD, pos - 1))
+                    array.set(nbF, pos, array.get(nbF, pos - 1))
+                    pos -= 1
+                array.set(nbD, pos, d)
+                array.set(nbF, pos, array.get(trFlip, r))
+    flips = 0
+    for i = 0 to NEIGHBORS - 1
+        flips += array.get(nbF, i)
+    flips
+
+// ---------------------------------------------------------------- Per-bar time frame
+// NinjaTrader stamps a minute bar with its close; Pine stamps it with its open.
+tsOpen    = time
+tsClose   = time + 60000
+openMin   = hour(tsOpen, tz) * 60 + minute(tsOpen, tz)
+closeMin  = hour(tsClose, tz) * 60 + minute(tsClose, tz)
+cashTs    = tsOpen + (24 - rollHour) * 3600000
+cashKey   = f_dateKey(cashTs)
+sameCash  = f_dateKey(tsOpen) == cashKey and f_dateKey(tsClose) == cashKey
+cashDow   = dayofweek(cashTs, tz)
+isWeekday = cashDow >= dayofweek.monday and cashDow <= dayofweek.friday
+quarterKey= year(cashTs, tz) * 10 + int((month(cashTs, tz) - 1) / 3) + 1
+excluded  = str.contains(exclDates, str.tostring(cashKey))
+barsOk    = bar_index >= EXPECTED_ORB_BARS and timeframe.isminutes and timeframe.multiplier == 1
+posSide   = strategy.position_size > 0 ? 1 : strategy.position_size < 0 ? -1 : 0
+
+// ---------------------------------------------------------------- Management regime
+// High opening-range volatility takes precedence over countertrend management.
+f_managementPlan(side, trendOk, trendBps) =>
+    highVol      = priorOrbQ75Ok and orbBps > priorOrbQ75
+    countertrend = trendOk and side * trendBps < 0
+    targetR = highVol ? HIGH_ORB_TARGET_R : BASELINE_TARGET_R
+    trig    = highVol ? BASE_MG_TRIGGER_R : countertrend ? CT_MG_TRIGGER_R : BASE_MG_TRIGGER_R
+    lock    = highVol ? BASE_MG_LOCK_R    : countertrend ? CT_MG_LOCK_R    : BASE_MG_LOCK_R
+    regime  = highVol ? "high_orb_short_target" : countertrend ? "countertrend_early_guard" : "baseline"
+    [targetR, trig, lock, regime]
+
+// Signal candle: the 15 completed one-minute bars ending on this bar.
+sigHigh  = ta.highest(high, EXPECTED_ORB_BARS)
+sigLow   = ta.lowest(low, EXPECTED_ORB_BARS)
+sigOpen  = open[EXPECTED_ORB_BARS - 1]
+sigExact = time[EXPECTED_ORB_BARS - 1] == tsOpen - (EXPECTED_ORB_BARS - 1) * 60000
+
+// ---------------------------------------------------------------- Per-bar working values
+bool   halt        = not barsOk
+bool   applyFinal  = false
+int    afSide      = 0
+float  afF1        = 0.0
+float  afF5        = 0.0
+float  afSignalCl  = 0.0
+string afSource    = ""
+string afPath      = ""
+bool   afSubmit    = false
+int    afBaseSide  = 0
+bool   doSubmit    = false
+int    subSide     = 0
+string subSource   = ""
+string subPath     = ""
+
+// ---------------------------------------------------------------- BeginCashDate
+if not halt and (na(cashKeyCur) or cashKey != cashKeyCur)
+    inherited = strategy.position_size != 0
+    if spActive or pdActive or pfActive
+        cFailClosed += 1
+    spActive        := false
+    pdActive        := false
+    pfActive        := false
+    cashKeyCur      := cashKey
+    sessionEligible := true
+    refCaptured     := false
+    refOpen         := 0.0
+    dayBlocked      := inherited
+    sessionEnding   := inherited
+    orbFinalized    := false
+    breakoutUsed    := inherited
+    cashExitDone    := false
+    cashIntegrity   := false
+    orbHistDone     := false
+    rthHistDone     := false
+    initStopTicks   := 0
+    initTargetTicks := 0
+    mgActivated     := false
+    condExitDone    := false
+    mgTriggerR      := 0.0
+    mgLockR         := 0.0
+    mgRegime        := ""
+    orbBarCount     := 0
+    expectedOrbMin  := ORB_START_MIN
+    orbHigh         := na
+    orbLow          := na
+    orbOpen         := na
+    orbClose        := na
+    orbBps          := 0.0
+    priorOrbQ75     := 0.0
+    priorOrbQ75Ok   := false
+    rthBarCount     := 0
+    tpvSum          := 0.0
+    volSum          := 0.0
+    lastCashCloseTs := na
+
+    // 20-session trend over the eligible RTH closes, frozen for the whole date.
+    nClose = array.size(closeHist)
+    float firstC = na
+    float lastC  = na
+    if nClose >= TREND_CLOSES
+        firstC := array.get(closeHist, nClose - TREND_CLOSES)
+        lastC  := array.get(closeHist, nClose - 1)
+    priorTrendOk  := not na(firstC) and not na(lastC) and firstC > 0 and lastC > 0
+    priorTrendBps := priorTrendOk ? (lastC / firstC - 1.0) * 10000.0 : 0.0
+
+    // Quarterly refit: only labels from sessions before this quarter are usable.
+    if quarterKey != qPrevKey
+        qPrevKey    := quarterKey
+        qFrozenRows := array.size(trFlip)
+        qModelOk    := qFrozenRows >= math.max(MIN_TRAIN_ROWS, NEIGHBORS)
+        if qModelOk
+            for j = 0 to FEATURES - 1
+                sum = 0.0
+                for r = 0 to qFrozenRows - 1
+                    sum += array.get(trFeat, r * FEATURES + j)
+                mean = sum / qFrozenRows
+                sq = 0.0
+                for r = 0 to qFrozenRows - 1
+                    d = array.get(trFeat, r * FEATURES + j) - mean
+                    sq += d * d
+                scale = math.sqrt(sq / qFrozenRows)
+                array.set(qMean, j, mean)
+                array.set(qScale, j, scale > 0 ? scale : 1.0)
+
+    if not isWeekday or excluded
+        sessionEligible := false
+        dayBlocked      := true
+    else if inherited
+        breakoutUsed := true
+    else
+        // NinjaTrader also pre-checks the Trading Hours schedule here. Pine cannot
+        // look ahead, so integrity is asserted now and revoked by the contiguity,
+        // opening-range and 16:00 checks below.
+        cashIntegrity := true
+
+// ---------------------------------------------------------------- Reference session open (23:00 UTC)
+if not halt and sessionEligible and not refCaptured and hour(tsOpen, "UTC") == 23 and minute(tsOpen, "UTC") == 0
+    if not (open > 0)
+        dayBlocked    := true
+        breakoutUsed  := true
+        cashIntegrity := false
+        cBlocked      += 1
+    else
+        refOpen     := open
+        refCaptured := true
+
+// ---------------------------------------------------------------- Session-ending backstop
+if not halt and sessionEnding
+    if spActive or pdActive or pfActive
+        cFailClosed += 1
+    spActive := false
+    pdActive := false
+    pfActive := false
+    if posSide != 0
+        strategy.close("FMS", comment = "SessionEnding")
+    halt := true
+
+// ---------------------------------------------------------------- Cash-window integrity + RTH accumulation
+if not halt and sameCash and openMin >= ORB_START_MIN and closeMin <= FLATTEN_MIN
+    if not na(lastCashCloseTs) and tsOpen != lastCashCloseTs
+        dayBlocked    := true
+        breakoutUsed  := true
+        cashIntegrity := false
+        cBlocked      += 1
+        cFailClosed   += spActive or pdActive or pfActive ? 1 : 0
+        spActive      := false
+        pdActive      := false
+        pfActive      := false
+        sessionEnding := true
+        if posSide != 0
+            strategy.close("FMS", comment = "CashDataGap")
+        halt := true
+    else
+        lastCashCloseTs := tsClose
+        if openMin == ORB_START_MIN and not refCaptured
+            dayBlocked    := true
+            breakoutUsed  := true
+            cashIntegrity := false
+            cBlocked      += 1
+            spActive      := false
+            pdActive      := false
+            pfActive      := false
+            halt          := true
+        else if not dayBlocked
+            if na(volume) or volume < 0
+                dayBlocked    := true
+                breakoutUsed  := true
+                cashIntegrity := false
+                cBlocked      += 1
+                spActive      := false
+                pdActive      := false
+                pfActive      := false
+                halt          := true
+            else
+                rthBarCount += 1
+                tpvSum      += ((high + low + close) / 3.0) * volume
+                volSum      += volume
+
+// ---------------------------------------------------------------- Shadow pair (direction-model labels)
+if not halt and sameCash and spActive and not spInvalid and not spLabelDone
+    if not spInit and tsOpen >= spExpectedTs
+        if tsOpen != spExpectedTs
+            spInvalid   := true
+            cFailClosed += 1
+        else
+            rawStop = math.max(MIN_STOP_POINTS, math.min(MAX_STOP_POINTS, (orbHigh - orbLow) * STOP_ORB_MULT))
+            for i = 0 to 1
+                side = i == 0 ? spBaseSide : -spBaseSide
+                entry = open + side * MODEL_ENTRY_SLIP_TICKS * tick
+                stop  = f_roundPrice(entry - side * rawStop)
+                risk  = side * (entry - stop)
+                highVolS = priorOrbQ75Ok and orbBps > priorOrbQ75
+                ctS      = spTrendOk and side * spTrendBps < 0
+                tR  = highVolS ? HIGH_ORB_TARGET_R : BASELINE_TARGET_R
+                trg = highVolS ? BASE_MG_TRIGGER_R : ctS ? CT_MG_TRIGGER_R : BASE_MG_TRIGGER_R
+                lck = highVolS ? BASE_MG_LOCK_R    : ctS ? CT_MG_LOCK_R    : BASE_MG_LOCK_R
+                array.set(stSide,  i, side)
+                array.set(stEntry, i, entry)
+                array.set(stStop,  i, stop)
+                array.set(stTgt,   i, f_roundPrice(entry + side * rawStop * tR))
+                array.set(stRisk,  i, risk)
+                array.set(stTrig,  i, trg)
+                array.set(stLock,  i, lck)
+                array.set(stPend,  i, 0)
+                array.set(stDone,  i, risk > 0 ? 0 : 1)
+                array.set(stExit,  i, entry)
+            spInit := true
+
+    if spInit and not spInvalid
+        for i = 0 to 1
+            if array.get(stDone, i) == 0
+                side = array.get(stSide, i)
+                if array.get(stPend, i) == 1
+                    array.set(stExit, i, open - side * MODEL_FLAT_SLIP_TICKS * tick)
+                    array.set(stDone, i, 1)
+                    array.set(stPend, i, 0)
+                else
+                    stopLvl = array.get(stStop, i)
+                    tgtLvl  = array.get(stTgt, i)
+                    stopHit = side == 1 ? low <= stopLvl : high >= stopLvl
+                    tgtHit  = side == 1 ? high >= tgtLvl : low <= tgtLvl
+                    if stopHit
+                        basePrice = side == 1 ? math.min(stopLvl, open) : math.max(stopLvl, open)
+                        array.set(stExit, i, basePrice - side * MODEL_STOP_SLIP_TICKS * tick)
+                        array.set(stDone, i, 1)
+                    else if tgtHit
+                        array.set(stExit, i, side == 1 ? math.max(tgtLvl, open) : math.min(tgtLvl, open))
+                        array.set(stDone, i, 1)
+                    else if closeMin < FLATTEN_MIN and closeMin % 15 == 0
+                        risk = array.get(stRisk, i)
+                        entry = array.get(stEntry, i)
+                        closeR = side * (close - entry) / risk
+                        if closeR >= array.get(stTrig, i)
+                            proposed = f_roundPrice(entry + side * risk * array.get(stLock, i))
+                            array.set(stStop, i, side == 1 ? math.max(stopLvl, proposed) : math.min(stopLvl, proposed))
+                        if closeMin == COND_EXIT_MIN and (closeR < COND_LOSS_R or closeR >= COND_PROFIT_R)
+                            array.set(stPend, i, 1)
+
+        if array.get(stDone, 0) == 1 and array.get(stDone, 1) == 1
+            netB = array.get(stSide, 0) * (array.get(stExit, 0) - array.get(stEntry, 0)) * pointValue - MODEL_ROUND_TURN_COST
+            netF = array.get(stSide, 1) * (array.get(stExit, 1) - array.get(stEntry, 1)) * pointValue - MODEL_ROUND_TURN_COST
+            if (netB > 0) != (netF > 0)
+                for j = 0 to FEATURES - 1
+                    array.push(trFeat, array.get(spFeat, j))
+                array.push(trFlip, netF > 0 ? 1 : 0)
+                cLabels += 1
+            spLabelDone := true
+            spActive    := false
+
+// ---------------------------------------------------------------- Pending entry refinement
+if not halt and sameCash and pdActive and not dayBlocked and tsOpen >= pdExpectedTs
+    if tsOpen != pdExpectedTs
+        // Refinement needs contiguous completed one-minute bars; no late substitute.
+        cFailClosed += 1
+        pdActive    := false
+        dayBlocked  := true
+    else
+        if pdObserved == 0
+            pdFirstOpen := open
+        pdObserved   += 1
+        pdExpectedTs := tsClose
+        if pdObserved >= pdRequired
+            finalSide = pdSide
+            path      = pdBranch
+            if pdBranch == "high_vol_touch_vote"
+                move = finalSide * (close - pdFirstOpen)
+                frac = (orbHigh - orbLow) > 0 ? move / (orbHigh - orbLow) : 0.0
+                if frac <= HIGH_VOL_VOTE_THR
+                    finalSide := -finalSide
+                    path      := "high_vol_vote_flip"
+                    cVoteFlip += 1
+                else
+                    path := "high_vol_vote_keep"
+            applyFinal := true
+            afSide     := finalSide
+            afF1       := pdF1
+            afF5       := pdF5
+            afSignalCl := pdSignalClose
+            afSource   := pdSource
+            afPath     := path
+            afSubmit   := pdSubmit
+            afBaseSide := pdBaseSide
+            pdActive   := false
+
+// ---------------------------------------------------------------- Pending final refinement
+if not halt and sameCash and pfActive and not dayBlocked and tsOpen >= pfExpectedTs
+    if tsOpen != pfExpectedTs
+        cFailClosed += 1
+        pfActive    := false
+        dayBlocked  := true
+    else
+        if pfObserved == 0
+            pfFirstOpen := open
+        pfObserved   += 1
+        pfExpectedTs := tsClose
+        if pfObserved >= pfRequired
+            move = pfSide * (close - pfFirstOpen)
+            finalSide = pfSide
+            path = ""
+            if pfBranch == "prior_session_disagreement"
+                finalSide := -pfSide
+                path      := "prior_session_disagreement_reverse"
+                cPriorRev += 1
+            else if move > 0.0
+                finalSide := -pfSide
+                path      := "intraday_continuation_reverse"
+                cIntraRev += 1
+            else
+                path       := "intraday_continuation_keep"
+                cIntraKeep += 1
+            if pfSubmit
+                doSubmit  := true
+                subSide   := finalSide
+                subSource := pfSource + "+" + pfBranch
+                subPath   := pfPath + "->" + path
+            pfActive := false
+
+// ---------------------------------------------------------------- 16:00 ET cash close
+if not halt and sameCash and closeMin >= FLATTEN_MIN
+    lastMin = na(lastCashCloseTs) ? -1 : hour(lastCashCloseTs, tz) * 60 + minute(lastCashCloseTs, tz)
+    if lastMin != FLATTEN_MIN or f_dateKey(nz(lastCashCloseTs, 0)) != cashKey
+        dayBlocked    := true
+        breakoutUsed  := true
+        cashIntegrity := false
+        cBlocked      += 1
+        cFailClosed   += spActive or pdActive or pfActive ? 1 : 0
+        spActive      := false
+        pdActive      := false
+        pfActive      := false
+        sessionEnding := true
+        strategy.cancel_all()
+        if posSide != 0
+            strategy.close("FMS", comment = "CashDataGapAtClose")
+    else
+        // Finalize the shadow pair on the cash close, then record causal history.
+        if spActive and not spInvalid and spInit and not spLabelDone
+            for i = 0 to 1
+                if array.get(stDone, i) == 0
+                    array.set(stExit, i, close - array.get(stSide, i) * MODEL_FLAT_SLIP_TICKS * tick)
+                    array.set(stDone, i, 1)
+            netB = array.get(stSide, 0) * (array.get(stExit, 0) - array.get(stEntry, 0)) * pointValue - MODEL_ROUND_TURN_COST
+            netF = array.get(stSide, 1) * (array.get(stExit, 1) - array.get(stEntry, 1)) * pointValue - MODEL_ROUND_TURN_COST
+            if (netB > 0) != (netF > 0)
+                for j = 0 to FEATURES - 1
+                    array.push(trFeat, array.get(spFeat, j))
+                array.push(trFlip, netF > 0 ? 1 : 0)
+                cLabels += 1
+            spLabelDone := true
+        spActive := false
+
+        if not rthHistDone and sessionEligible and cashIntegrity and orbFinalized and refCaptured
+            if not orbHistDone
+                array.push(orbHist, orbBps)
+                while array.size(orbHist) > ORB_LOOKBACK
+                    array.shift(orbHist)
+                orbHistDone := true
+            if close > 0
+                priorSessionBps := f_safeBps(close, refOpen)
+                priorSessionOk  := true
+                array.push(closeHist, close)
+                while array.size(closeHist) > TREND_CLOSES
+                    array.shift(closeHist)
+                rthHistDone := true
+            cEligible += 1
+
+        if not cashExitDone
+            cashExitDone := true
+            dayBlocked   := true
+        strategy.cancel_all()
+        if posSide != 0
+            strategy.close("FMS", comment = "CashClose1600ET")
+    halt := true
+
+// ---------------------------------------------------------------- Early exchange close backstop
+if not halt and useLastBar and session.islastbar and not cashExitDone
+    cashIntegrity := false
+    cFailClosed   += spActive or pdActive or pfActive ? 1 : 0
+    spActive      := false
+    pdActive      := false
+    pfActive      := false
+    sessionEnding := true
+    dayBlocked    := true
+    strategy.cancel_all()
+    if posSide != 0
+        strategy.close("FMS", comment = "NativeSessionEnd")
+    halt := true
+
+if not halt and cashExitDone
+    if posSide != 0
+        strategy.close("FMS", comment = "CashExitFollowup")
+    halt := true
+
+// ---------------------------------------------------------------- Open-position management
+isQuarterClose = sameCash and closeMin >= FIRST_DEC_MIN and closeMin < FLATTEN_MIN and closeMin % 15 == 0
+if not halt and posSide != 0
+    riskPts = initStopTicks * tick
+    avg     = strategy.position_avg_price
+    if isQuarterClose and not mgActivated and initStopTicks >= 1 and riskPts > 0 and avg > 0
+        closeR = posSide * (close - avg) / riskPts
+        if closeR >= mgTriggerR
+            // Protection for the following one-minute bar; the trigger bar keeps
+            // the stop and target it traded against.
+            mgStop = f_roundPrice(avg + posSide * riskPts * mgLockR)
+            mgTgt  = f_roundPrice(avg + posSide * initTargetTicks * tick)
+            strategy.exit("FMSX", from_entry = "FMS", stop = mgStop, limit = mgTgt, comment_loss = "ManagedStop", comment_profit = "Target")
+            mgActivated := true
+    if sameCash and closeMin == COND_EXIT_MIN and not condExitDone and initStopTicks >= 1 and riskPts > 0 and avg > 0
+        closeR = posSide * (close - avg) / riskPts
+        if closeR < COND_LOSS_R or closeR >= COND_PROFIT_R
+            condExitDone := true
+            strategy.close("FMS", comment = "Conditional1530ET")
+    halt := true
+
+if not halt and (dayBlocked or not isWeekday)
+    halt := true
+
+// ---------------------------------------------------------------- Opening range (09:30-09:45 ET)
+if not halt and not orbFinalized
+    insideOrb = sameCash and openMin >= ORB_START_MIN and openMin < ORB_END_MIN
+    if insideOrb
+        if openMin != expectedOrbMin or closeMin != openMin + 1
+            dayBlocked    := true
+            breakoutUsed  := true
+            cashIntegrity := false
+            cBlocked      += 1
+        else
+            orbOpen  := orbBarCount == 0 ? open : orbOpen
+            orbHigh  := orbBarCount == 0 ? high : math.max(orbHigh, high)
+            orbLow   := orbBarCount == 0 ? low  : math.min(orbLow, low)
+            orbClose := close
+            orbBarCount    += 1
+            expectedOrbMin += 1
+            if closeMin == ORB_END_MIN
+                if orbBarCount != EXPECTED_ORB_BARS or orbHigh < orbLow
+                    dayBlocked    := true
+                    breakoutUsed  := true
+                    cashIntegrity := false
+                    cBlocked      += 1
+                else
+                    orbFinalized  := true
+                    mid           = (orbHigh + orbLow) / 2.0
+                    orbBps        := mid > 0 ? (orbHigh - orbLow) / mid * 10000.0 : 0.0
+                    priorOrbQ75Ok := array.size(orbHist) == ORB_LOOKBACK
+                    priorOrbQ75   := 0.0
+                    if priorOrbQ75Ok
+                        priorOrbQ75 := f_percentile(orbHist, ORB_QUANTILE)
+    else if sameCash and closeMin > ORB_END_MIN
+        dayBlocked    := true
+        breakoutUsed  := true
+        cashIntegrity := false
+        cBlocked      += 1
+
+if not halt and (dayBlocked or not orbFinalized or breakoutUsed)
+    halt := true
+
+// ---------------------------------------------------------------- Admission and direction selection
+if not halt and isQuarterClose
+    confirm  = CONFIRMATION_TICKS * tick
+    longBrk  = close >= f_roundPrice(orbHigh + confirm)
+    shortBrk = close <= f_roundPrice(orbLow - confirm)
+    if longBrk or shortBrk
+        baseSide = longBrk ? 1 : -1
+        if not sigExact or not (sigHigh > sigLow)
+            breakoutUsed  := true
+            dayBlocked    := true
+            cashIntegrity := false
+            cBlocked      += 1
+            cFailClosed   += spActive or pdActive or pfActive ? 1 : 0
+            spActive := false
+            pdActive := false
+            pfActive := false
+        else
+            sigRange = sigHigh - sigLow
+            bodyFrac = baseSide * (close - sigOpen) / sigRange
+            closeLoc = baseSide == 1 ? (close - sigLow) / sigRange : (sigHigh - close) / sigRange
+            if bodyFrac < BODY_FRACTION or closeLoc < CLOSE_LOCATION
+                // A geometry rejection keeps scanning later decision candles.
+                cGeometry += 1
+            else
+                upLevel = orbHigh + confirm
+                dnLevel = orbLow - confirm
+                touchUp = 0
+                touchDn = 0
+                for b = 0 to EXPECTED_ORB_BARS - 1
+                    touchUp += high[b] >= upLevel ? 1 : 0
+                    touchDn += low[b] <= dnLevel ? 1 : 0
+                admissionTouches = baseSide == 1 ? touchUp : touchDn
+                if admissionTouches < MIN_TOUCHES
+                    // A touch veto consumes the cash date.
+                    breakoutUsed := true
+                    cTouchVeto   += 1
+                else if not (orbOpen > 0 and orbClose > 0 and volSum > 0 and rthBarCount > 0)
+                    breakoutUsed  := true
+                    dayBlocked    := true
+                    cashIntegrity := false
+                    cBlocked      += 1
+                else
+                    nClose       = array.size(closeHist)
+                    float priorClose = orbOpen
+                    if nClose > 0
+                        priorClose := array.get(closeHist, nClose - 1)
+                    priorRet5    = f_lagBps(closeHist, 5)
+                    priorRet20   = f_lagBps(closeHist, 20)
+                    vwap         = tpvSum / volSum
+                    trailingBase = rthBarCount > 30 ? close[30] : orbClose
+                    gapBps       = f_safeBps(orbOpen, priorClose)
+                    vwapDistBps  = f_safeBps(close, vwap)
+                    trail30Bps   = f_safeBps(close, trailingBase)
+                    elapsed15    = (closeMin - ORB_END_MIN) / 15.0
+                    wd           = (dayofweek(cashTs, tz) + 5) % 7
+                    mo           = month(cashTs, tz)
+
+                    feat = array.new<float>(FEATURES, 0.0)
+                    array.set(feat, 0,  baseSide * gapBps)
+                    array.set(feat, 1,  baseSide * priorSessionBps)
+                    array.set(feat, 2,  baseSide * priorRet5)
+                    array.set(feat, 3,  baseSide * priorRet20)
+                    array.set(feat, 4,  baseSide * vwapDistBps)
+                    array.set(feat, 5,  baseSide * trail30Bps)
+                    array.set(feat, 6,  baseSide)
+                    array.set(feat, 7,  elapsed15)
+                    array.set(feat, 8,  orbBps)
+                    array.set(feat, 9,  admissionTouches)
+                    array.set(feat, 10, math.sin(2.0 * math.pi * wd / 5.0))
+                    array.set(feat, 11, math.cos(2.0 * math.pi * wd / 5.0))
+                    array.set(feat, 12, math.sin(2.0 * math.pi * (mo - 1) / 12.0))
+                    array.set(feat, 13, math.cos(2.0 * math.pi * (mo - 1) / 12.0))
+                    featOk = true
+                    for j = 0 to FEATURES - 1
+                        featOk := featOk and not na(array.get(feat, j))
+
+                    if not featOk
+                        breakoutUsed  := true
+                        dayBlocked    := true
+                        cashIntegrity := false
+                        cBlocked      += 1
+                    else
+                        breakoutUsed := true
+                        cAdmitted    += 1
+
+                        priorOverride = usePriorRule and baseSide * priorSessionBps < -PRIOR_DAY_BPS
+                        cPriorOvr += priorOverride ? 1 : 0
+
+                        predictionOk = false
+                        flipProb     = 0.0
+                        if useModel and cashKey >= PREDICT_START_KEY and qModelOk
+                            flips        = f_knnFlipCount(feat)
+                            flipProb     := (flips + 2.0) / (NEIGHBORS + 4.0)
+                            predictionOk := true
+                            cKnnPred     += 1
+                        knnOverride = predictionOk and flipProb > FLIP_PROB_LIMIT
+                        cKnnOvr += knnOverride ? 1 : 0
+
+                        dirSide = priorOverride or knnOverride ? -baseSide : baseSide
+                        dirSource = priorOverride and knnOverride ? "prior_session_and_quarterly_knn" : priorOverride ? "prior_session" : knnOverride ? "quarterly_knn" : "breakout"
+
+                        // Causal label pair for the direction model.
+                        if cashKey >= TRAIN_START_KEY
+                            if spActive
+                                cFailClosed += 1
+                                spActive    := false
+                                dayBlocked  := true
+                            else
+                                spActive     := true
+                                spInit       := false
+                                spInvalid    := false
+                                spLabelDone  := false
+                                spExpectedTs := tsClose
+                                spBaseSide   := baseSide
+                                spSessionKey := cashKey
+                                spTrendOk    := priorTrendOk
+                                spTrendBps   := priorTrendBps
+                                for j = 0 to FEATURES - 1
+                                    array.set(spFeat, j, array.get(feat, j))
+
+                        if not dayBlocked
+                            dirBody   = dirSide * (close - sigOpen) / sigRange
+                            weak      = dirBody <= WEAK_BODY_FRACTION
+                            highVol   = priorOrbQ75Ok and orbBps > priorOrbQ75
+                            dirTouch  = dirSide == 1 ? touchUp : touchDn
+                            highVote  = highVol and dirTouch <= HIGH_VOL_TOUCH_MAX
+                            submitOk  = cashKey >= tradeStart
+
+                            if weak or highVote
+                                pdActive     := true
+                                pdExpectedTs := tsClose
+                                pdSide       := dirSide
+                                pdRequired   := weak ? WEAK_DELAY_BARS : HIGH_VOL_VOTE_BARS
+                                pdObserved   := 0
+                                pdFirstOpen  := na
+                                pdSubmit     := submitOk
+                                pdBranch     := weak ? "weak_signal_delay_keep" : "high_vol_touch_vote"
+                                pdSource     := dirSource
+                                pdBaseSide   := baseSide
+                                pdF1         := array.get(feat, 1)
+                                pdF5         := array.get(feat, 5)
+                                pdSignalClose := close
+                                if weak
+                                    cWeak += 1
+                                else
+                                    cVote += 1
+                            else
+                                applyFinal := true
+                                afSide     := dirSide
+                                afF1       := array.get(feat, 1)
+                                afF5       := array.get(feat, 5)
+                                afSignalCl := close
+                                afSource   := dirSource
+                                afPath     := "condition_not_met"
+                                afSubmit   := submitOk
+                                afBaseSide := baseSide
+
+// ---------------------------------------------------------------- Final entry conditions
+// prior_session_disagreement takes priority over intraday_continuation.
+if applyFinal
+    orbRange = orbHigh - orbLow
+    if not (orbRange > 0)
+        cFailClosed += 1
+        dayBlocked  := true
+    else
+        orientation  = afSide * afBaseSide
+        alignedPrior = orientation * afF1
+        alignedRet30 = orientation * afF5
+        orbBody      = afSide * (orbClose - orbOpen) / orbRange
+        edge         = afSide == 1 ? orbHigh : orbLow
+        signalExt    = afSide * (afSignalCl - edge) / orbRange
+        priorCond    = alignedPrior > PRIOR_DIS_BPS and orbBody <= PRIOR_DIS_MAX_BODY
+        intraCond    = alignedRet30 > INTRADAY_BPS and signalExt <= INTRADAY_MAX_EXT
+        cPriorCond += priorCond ? 1 : 0
+        cIntraCond += intraCond ? 1 : 0
+        if not priorCond and not intraCond
+            if afSubmit
+                doSubmit  := true
+                subSide   := afSide
+                subSource := afSource
+                subPath   := afPath + "->entry_condition_not_met"
+        else
+            pfActive     := true
+            pfExpectedTs := tsClose
+            pfSide       := afSide
+            pfRequired   := priorCond ? PRIOR_DIS_OBS_BARS : INTRADAY_OBS_BARS
+            pfObserved   := 0
+            pfFirstOpen  := na
+            pfSubmit     := afSubmit
+            pfBranch     := priorCond ? "prior_session_disagreement" : "intraday_continuation"
+            pfSource     := afSource
+            pfPath       := afPath
+
+// ---------------------------------------------------------------- Entry submission and sizing
+if doSubmit and not cashExitDone and not sessionEnding
+    isLong  = subSide == 1
+    rawStop = math.max(MIN_STOP_POINTS, math.min(MAX_STOP_POINTS, (orbHigh - orbLow) * STOP_ORB_MULT))
+    stopTicks = f_offsetTicks(rawStop, isLong)
+    [targetR, trg, lck, regime] = f_managementPlan(subSide, priorTrendOk, priorTrendBps)
+    targetTicks = f_offsetTicks(rawStop * targetR, not isLong)
+
+    trendAligned = priorTrendOk and subSide * priorTrendBps >= 0
+    countertrend = priorTrendOk and not trendAligned
+    lowVol       = priorOrbQ75Ok and orbBps <= priorOrbQ75
+    highVol      = priorOrbQ75Ok and not lowVol
+    neutral      = not priorTrendOk or not priorOrbQ75Ok
+    score        = neutral ? 50 : 50 * ((trendAligned ? 1 : 0) + (lowVol ? 1 : 0))
+
+    riskFrac = MODE_FIXED ? 0.0 : MODE_CONF ? (score == 0 ? minRiskFrac : score == 50 ? baseRiskFrac : maxRiskFrac) : baseRiskFrac
+    cap = MODE_FIXED ? fixedCap : portCap
+    if not MODE_CONF and (highVol or countertrend)
+        cap := math.min(cap, DEFENSIVE_MAX_QTY)
+
+    equity       = MODE_FIXED ? startEq : startEq + strategy.netprofit
+    plannedEntry = close
+    plannedStop  = f_roundPrice(plannedEntry - subSide * stopTicks * tick)
+    signedStop   = subSide * (plannedEntry - plannedStop)
+    reserveTicks = math.max(stopSlipT, slipTicks)
+    perContract  = signedStop * pointValue + reserveTicks * tick * pointValue + rtCost
+
+    float qty = 0.0
+    if stopTicks >= 1 and cap >= 1 and signedStop > 0 and perContract > 0 and not na(equity)
+        if MODE_FIXED
+            qty := math.min(cap, f_floorQty(fixedRisk / perContract))
+        else
+            posEquity   = math.max(equity, 0.0)
+            budget      = posEquity * riskFrac
+            rawProxy    = plannedEntry - backAdjust
+            rawNotional = rawProxy * pointValue
+            qRisk       = f_floorQty(budget / perContract)
+            qLev        = rawNotional > 0 ? f_floorQty(posEquity * maxLev / rawNotional) : 0
+            qty         := math.min(cap, math.min(qRisk, qLev))
+
+    initStopTicks   := stopTicks
+    initTargetTicks := targetTicks
+    mgTriggerR      := trg
+    mgLockR         := lck
+    mgRegime        := regime
+    mgActivated     := false
+    condExitDone    := false
+
+    if stopTicks >= 1 and targetTicks >= 1
+        if qty < 1
+            // The breakout stays consumed: no trade on this cash date.
+            cSizeSkip += 1
+        else
+            strategy.entry("FMS", isLong ? strategy.long : strategy.short, qty = qty, comment = subPath)
+            // Ticks are measured from the actual fill, matching SetStopLoss /
+            // SetProfitTarget in CalculationMode.Ticks.
+            strategy.exit("FMSX", from_entry = "FMS", loss = stopTicks, profit = targetTicks,
+                 comment_loss = "Stop", comment_profit = "Target")
+
+// ---------------------------------------------------------------- Visuals
+inCash   = sameCash and openMin >= ORB_START_MIN and closeMin <= FLATTEN_MIN
+showOrb  = drawLevels and inCash and orbFinalized
+plot(showOrb ? orbHigh : na, "ORB high", color.new(color.teal, 0), 1, plot.style_linebr)
+plot(showOrb ? orbLow  : na, "ORB low",  color.new(color.teal, 0), 1, plot.style_linebr)
+
+inTrade   = posSide != 0 and initStopTicks >= 1
+avgFill   = strategy.position_avg_price
+stopPlot  = inTrade ? (mgActivated ? f_roundPrice(avgFill + posSide * initStopTicks * tick * mgLockR) : f_roundPrice(avgFill - posSide * initStopTicks * tick)) : na
+tgtPlot   = inTrade ? f_roundPrice(avgFill + posSide * initTargetTicks * tick) : na
+plot(drawLevels ? stopPlot : na, "Stop",   color.new(color.red, 0),   1, plot.style_linebr)
+plot(drawLevels ? tgtPlot  : na, "Target", color.new(color.green, 0), 1, plot.style_linebr)
+
+// ---------------------------------------------------------------- Run summary
+var table t = table.new(position.top_right, 2, 12, border_width = 1, frame_width = 1, frame_color = color.gray)
+if showTable and barstate.islast
+    modelState = not useModel ? "disabled" : qModelOk ? "fitted (" + str.tostring(qFrozenRows) + " rows)" : "warm-up (" + str.tostring(array.size(trFlip)) + "/" + str.tostring(MIN_TRAIN_ROWS) + " labels)"
+    table.cell(t, 0, 0, "FLAT MOON SOCIETY 1.4.0-rc.1", text_color = color.white, bgcolor = color.new(color.blue, 20), text_size = size.small)
+    table.cell(t, 1, 0, sizingIn, text_color = color.white, bgcolor = color.new(color.blue, 20), text_size = size.small)
+    table.cell(t, 0, 1,  "eligible sessions", text_size = size.tiny)
+    table.cell(t, 1, 1,  str.tostring(cEligible), text_size = size.tiny)
+    table.cell(t, 0, 2,  "admitted signals", text_size = size.tiny)
+    table.cell(t, 1, 2,  str.tostring(cAdmitted), text_size = size.tiny)
+    table.cell(t, 0, 3,  "geometry rejects / touch vetoes", text_size = size.tiny)
+    table.cell(t, 1, 3,  str.tostring(cGeometry) + " / " + str.tostring(cTouchVeto), text_size = size.tiny)
+    table.cell(t, 0, 4,  "prior-session / kNN overrides", text_size = size.tiny)
+    table.cell(t, 1, 4,  str.tostring(cPriorOvr) + " / " + str.tostring(cKnnOvr), text_size = size.tiny)
+    table.cell(t, 0, 5,  "weak delays / high-vol votes (flips)", text_size = size.tiny)
+    table.cell(t, 1, 5,  str.tostring(cWeak) + " / " + str.tostring(cVote) + " (" + str.tostring(cVoteFlip) + ")", text_size = size.tiny)
+    table.cell(t, 0, 6,  "prior-session reversals", text_size = size.tiny)
+    table.cell(t, 1, 6,  str.tostring(cPriorRev) + " of " + str.tostring(cPriorCond), text_size = size.tiny)
+    table.cell(t, 0, 7,  "intraday reversals / keeps", text_size = size.tiny)
+    table.cell(t, 1, 7,  str.tostring(cIntraRev) + " / " + str.tostring(cIntraKeep), text_size = size.tiny)
+    table.cell(t, 0, 8,  "model labels / predictions", text_size = size.tiny)
+    table.cell(t, 1, 8,  str.tostring(cLabels) + " / " + str.tostring(cKnnPred), text_size = size.tiny)
+    table.cell(t, 0, 9,  "direction model", text_size = size.tiny)
+    table.cell(t, 1, 9,  modelState, text_size = size.tiny)
+    table.cell(t, 0, 10, "sizing skips / blocked dates", text_size = size.tiny)
+    table.cell(t, 1, 10, str.tostring(cSizeSkip) + " / " + str.tostring(cBlocked), text_size = size.tiny)
+    table.cell(t, 0, 11, "fail-closed events", text_size = size.tiny)
+    table.cell(t, 1, 11, str.tostring(cFailClosed), text_size = size.tiny)
+
+// ---------------------------------------------------------------- Configuration guard
+if barstate.islastconfirmedhistory and not barsOk
+    label.new(bar_index, high, "FLAT MOON SOCIETY requires a 1-minute chart.\nCurrent: " + timeframe.period,
+         style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white)
