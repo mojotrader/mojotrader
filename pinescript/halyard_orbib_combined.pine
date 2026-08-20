@@ -167,7 +167,7 @@ orbMinRngPct = input.float(0.40, "Min ORB range (% of price, 0 = off)", minval =
 // ---------------------------------------------------------------- Automation (PickMyTrade webhook -> Tradovate)
 grpA      = "Automation - PickMyTrade"
 autoOn    = input.bool(false, "Enable webhook alerts", group = grpA,
-     tooltip = "Create ONE alert with condition 'alert() function calls only' and paste PickMyTrade's webhook URL. Alerts fire on the NET position; the seat rules keep the three setups from ever being open at once, so each alert maps to a single setup. Silent in Indicator mode.")
+     tooltip = "Create ONE alert, condition 'alert() function calls only', and paste PickMyTrade's webhook URL. ONE - if you also keep a second alert on this strategy with a JSON message of your own (the order-fill template), BOTH post to PickMyTrade and you get TWO trades per signal. Turn the manual break alerts OFF on this alert too: they are plain text and the webhook rejects them with 415. The seat rules keep the three setups from ever being open at once, so each message maps to a single setup. Silent in Indicator mode.")
 pmtToken  = input.string("", "PickMyTrade token", group = grpA)
 pmtAcct   = input.string("", "Tradovate account id", group = grpA)
 pmtSym    = input.string("MNQ1!", "Broker symbol", group = grpA)
@@ -176,7 +176,7 @@ pmtType   = input.string("market", "Order type", options = ["market", "limit"], 
 // ---------------------------------------------------------------- Break alerts (manual trading)
 grpBA     = "Break alerts (manual)"
 brkAlerts = input.bool(true, "Alert when a range breaks (Halyard / ORB / IB)", group = grpBA,
-     tooltip = "Fires a notification the moment a range breaks, with the direction and the planned entry/stop/target so you can place the trade yourself. Create ONE alert on this strategy with condition 'alert() function calls only'.")
+     tooltip = "Fires a notification the moment a range breaks, with the direction and the planned entry/stop/target so you can place the trade yourself. Create ONE alert on this strategy with condition 'alert() function calls only'. PLAIN TEXT, so it is for a phone or e-mail alert - pointing that alert at the PickMyTrade webhook makes every break fail with 415 Unsupported Media Type. Turn this off on the automation alert.")
 
 // ---------------------------------------------------------------- Risk/Reward tool
 grpRR     = "Risk / Reward tool"
@@ -540,7 +540,9 @@ halTrendOK = not halUseTrend or (not na(halEmaVal) and hal15C < halEmaVal)
 // the netted position now belongs to three setups, and Indicator mode has no position at all. The simulation
 // matches the orders exactly - entry at the 15m close (process_orders_on_close), exit when price trades the
 // stop or the target, stop taking precedence when a single bar covers both, which is what the Strategy Tester
-// assumes as well.
+// assumes as well. halExitNow is what the PickMyTrade webhook reads: Halyard's fills are known here, exactly
+// when they happen, and never have to be inferred from the netted position.
+halExitNow = false
 if halTrDir != 0 and bar_index > halEntBar
     halStopHit = halTrDir == 1 ? low <= halStp : high >= halStp
     halTpHit   = halTrDir == 1 ? high >= halTgt : low <= halTgt
@@ -548,6 +550,7 @@ if halTrDir != 0 and bar_index > halEntBar
         if halState == 1
             halState := halStopHit ? 2 : 3
         halTrDir := 0
+        halExitNow := true
 
 // TIME STOP: flat after the Nth 15m candle from the entry. Counted in the engine's own candles, so it does not
 // change with the chart timeframe. Off in the shipped config.
@@ -562,6 +565,7 @@ if halMaxBars > 0 and halTrDir != 0 and halBars15 >= halMaxBars
     if halState == 1
         halState := (halTrDir == 1 ? close < halEnt : close > halEnt) ? 2 : 3
     halTrDir := 0
+    halExitNow := true
 
 // ---------------------------------------------------------------- the break
 // halBroke latches the day's first break, so anything after it is ignored. The break is a 15-MINUTE close
@@ -695,6 +699,7 @@ if halDayFlat
     if halState == 1
         halState := (halTrDir == 1 ? close < halEnt : close > halEnt) ? 2 : 3
     halTrDir := 0
+    halExitNow := true
 
 // live Halyard trade -> the ORB and IB limits are held back behind it (see the ORB/IB engines below)
 halLive = halTrDir != 0
@@ -1382,7 +1387,7 @@ if dayHalt
         strategy.cancel_all()
     halTrDir := 0
 
-// ---------------------------------------------------------------- Automation: PickMyTrade webhook (net position)
+// ---------------------------------------------------------------- Automation: PickMyTrade webhook
 f_pmt(string act, float q, float slp, float tpp) =>
     '{"token":"' + pmtToken + '","account_id":"' + pmtAcct + '","symbol":"' + pmtSym +
       '","action":"' + act + '","quantity":' + str.tostring(q) +
@@ -1392,15 +1397,41 @@ f_pmt(string act, float q, float slp, float tpp) =>
 liveORB  = (or_f1 or or_f2) and not or_closed
 autoStop = halLive ? halStp : liveORB ? or_curStop : ib_curStop
 autoTP   = halLive ? halTgt : liveORB ? or_curTP  : ib_curTP
-autoQty  = math.abs(strategy.position_size)   // actual net contracts
-buyNow   = strategy.position_size > 0 and (strategy.position_size[1] <= 0 or strategy.position_size > strategy.position_size[1])
-sellNow  = strategy.position_size < 0 and (strategy.position_size[1] >= 0 or strategy.position_size < strategy.position_size[1])
-closeNow = strategy.position_size == 0 and strategy.position_size[1] != 0
+
+// WHY THE POSITION IS NOT READ AS ONE NUMBER ANY MORE. A market order sent under process_orders_on_close is
+// filled at THIS bar's close, i.e. after the script has finished running on the bar, so strategy.position_size
+// only shows it on the NEXT chart bar. Halyard's entries are exactly those orders: a 15m break that alerts at
+// 02:15 on a 5m chart would have posted its webhook at 02:20, one bar late, and at that moment the net-position
+// read would have been the source of the quantity too. So the three setups are now split:
+//   - HALYARD alerts off its own state machine, on the bar the order is sent, with its own contract count.
+//   - ORB / IB alert off the net size of ORB/IB entries ONLY (Halyard's ids are excluded), which is exact for
+//     their resting limits and their stop/target exits - those fill intrabar and are visible the same bar.
+//   - Every market CLOSE (15:30 flatten, daily-halt) fires on the bar it is sent, and the echo the position
+//     read shows one bar later is dropped.
+// QUANTITY on a buy/sell is now the contracts THAT ORDER adds, not the resulting net position: an ORB
+// average-down used to send "buy 2" then "buy 4" for a 4-lot setup. Check this against your PickMyTrade
+// template before trusting it live.
+f_orbibQty() =>
+    q = 0.0
+    if strategy.opentrades > 0
+        for i = 0 to strategy.opentrades - 1
+            if not str.startswith(strategy.opentrades.entry_id(i), "HAL")
+                q += strategy.opentrades.size(i)
+    q
+
+oiQty    = f_orbibQty()                       // net ORB/IB contracts, signed
+oiPrev   = nz(oiQty[1], 0)
+mktClose = strategy.position_size != 0 and ((flatten and not flatten[1]) or (dayHalt and not dayHalt[1]))
+buyNow   = oiQty > 0 and (oiPrev <= 0 or oiQty > oiPrev)
+sellNow  = oiQty < 0 and (oiPrev >= 0 or oiQty < oiPrev)
+closeNow = oiQty == 0 and oiPrev != 0 and not mktClose[1]
+if autoOn and ordersOn and halEntered
+    alert(f_pmt(halEntDir == 1 ? "buy" : "sell", halQty, halStp, halTgt), alert.freq_once_per_bar)
 if autoOn and ordersOn and buyNow
-    alert(f_pmt("buy",  autoQty, autoStop, autoTP), alert.freq_once_per_bar)
+    alert(f_pmt("buy",  math.abs(oiQty - oiPrev), autoStop, autoTP), alert.freq_once_per_bar)
 if autoOn and ordersOn and sellNow
-    alert(f_pmt("sell", autoQty, autoStop, autoTP), alert.freq_once_per_bar)
-if autoOn and ordersOn and closeNow
+    alert(f_pmt("sell", math.abs(oiQty - oiPrev), autoStop, autoTP), alert.freq_once_per_bar)
+if autoOn and ordersOn and (halExitNow or closeNow or mktClose)
     alert(f_pmt("close", 0, 0.0, 0.0), alert.freq_once_per_bar)
 
 // ---------------------------------------------------------------- Break alerts (fire once when each range breaks)
