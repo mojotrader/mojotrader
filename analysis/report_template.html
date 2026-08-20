@@ -1,0 +1,704 @@
+<title>Halyard × QuantFlow</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+:root {
+  color-scheme: light;
+  --bg:            #f5f6f8;
+  --panel:         #ffffff;
+  --panel-2:       #fafbfc;
+  --ink:           #111721;
+  --ink-2:         #59636f;
+  --ink-3:         #8b95a1;
+  --rule:          #e3e7eb;
+  --rule-strong:   #cfd6dd;
+  --s1:            #2a78d6;
+  --s2:            #eb6834;
+  --s3:            #1baf7a;
+  --neg:           #cc3a3a;
+  --grid:          #eceff2;
+  --shadow:        0 1px 2px rgba(17,23,33,.05), 0 8px 24px -16px rgba(17,23,33,.22);
+  --maxw:          1180px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --bg:          #101319;
+    --panel:       #181c23;
+    --panel-2:     #1d222a;
+    --ink:         #eef1f5;
+    --ink-2:       #a2acb9;
+    --ink-3:       #6f7a87;
+    --rule:        #272d36;
+    --rule-strong: #39414c;
+    --s1:          #3987e5;
+    --s2:          #d95926;
+    --s3:          #199e70;
+    --neg:         #e8807f;
+    --grid:        #21262e;
+    --shadow:      0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.7);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg:          #101319;
+  --panel:       #181c23;
+  --panel-2:     #1d222a;
+  --ink:         #eef1f5;
+  --ink-2:       #a2acb9;
+  --ink-3:       #6f7a87;
+  --rule:        #272d36;
+  --rule-strong: #39414c;
+  --s1:          #3987e5;
+  --s2:          #d95926;
+  --s3:          #199e70;
+  --neg:         #e8807f;
+  --grid:        #21262e;
+  --shadow:      0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.7);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px 96px; }
+
+h1, h2, h3, .hero { font-family: Archivo, "IBM Plex Sans", ui-sans-serif, sans-serif; }
+
+/* ---------- masthead ---------- */
+.mast {
+  border-bottom: 1px solid var(--rule);
+  background: var(--panel);
+  margin-bottom: 40px;
+}
+.mast .wrap { padding-top: 40px; padding-bottom: 32px; display: flex; flex-direction: column; gap: 18px; }
+.ticker {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px; font-weight: 500; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--ink-3);
+  display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center;
+}
+.ticker .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--s3); display: inline-block; flex: none; }
+.ticker > span:not(.dot) { white-space: nowrap; }
+h1 {
+  margin: 0; font-size: clamp(34px, 5vw, 52px); font-weight: 700;
+  letter-spacing: -.025em; line-height: 1.03; text-wrap: balance;
+}
+h1 .x { color: var(--ink-3); font-weight: 500; }
+.standfirst {
+  margin: 0; max-width: 66ch; color: var(--ink-2); font-size: 17px; line-height: 1.5;
+}
+.standfirst strong { color: var(--ink); font-weight: 600; }
+
+/* ---------- sections ---------- */
+section { margin-top: 56px; }
+.eyebrow {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px; font-weight: 500; letter-spacing: .16em; text-transform: uppercase;
+  color: var(--ink-3); margin: 0 0 6px;
+  display: flex; align-items: center; gap: 10px;
+}
+.eyebrow::after { content: ""; flex: 1; height: 1px; background: var(--rule); }
+h2 { margin: 0 0 6px; font-size: 25px; font-weight: 600; letter-spacing: -.015em; }
+.lede { margin: 0 0 22px; color: var(--ink-2); max-width: 72ch; }
+
+/* ---------- cards ---------- */
+.cards { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(258px, 1fr)); }
+.cards > *, .facts > * { min-width: 0; }
+.card {
+  background: var(--panel); border: 1px solid var(--rule); border-radius: 10px;
+  padding: 20px; box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 2px;
+}
+.card header { display: flex; align-items: center; gap: 9px; }
+.card h3 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -.005em; }
+.swatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.card.s1 .swatch { background: var(--s1); }
+.card.s2 .swatch { background: var(--s2); }
+.card.joined .swatch { background: var(--s3); }
+.card.joined { border-color: var(--rule-strong); background: var(--panel-2); }
+.card .sub { margin: 0 0 14px; font-size: 12.5px; color: var(--ink-3); }
+.card .hero {
+  margin: 0; font-size: 34px; font-weight: 700; letter-spacing: -.03em; line-height: 1.05;
+  font-variant-numeric: tabular-nums;
+}
+.card .heroSub { margin: 4px 0 16px; font-size: 12.5px; color: var(--ink-2); }
+.card dl { margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 12px 14px;
+           padding-top: 15px; border-top: 1px solid var(--rule); }
+.card dl div { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.card dt { font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-3); }
+.card dd { margin: 0; font-family: "IBM Plex Mono", monospace; font-size: 14px; font-weight: 500;
+           font-variant-numeric: tabular-nums; }
+.card dd .dim { color: var(--ink-3); font-weight: 400; }
+
+/* ---------- charts ---------- */
+.chartbox {
+  position: relative; background: var(--panel); border: 1px solid var(--rule);
+  border-radius: 10px; padding: 18px 18px 10px; box-shadow: var(--shadow);
+}
+.chartbox + .chartbox { margin-top: 14px; }
+.chart-head { display: flex; flex-wrap: wrap; justify-content: space-between;
+              align-items: baseline; gap: 10px; margin-bottom: 6px; }
+.chart-title { font-size: 13px; font-weight: 600; }
+.chart-note { font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 2px 0 10px; }
+.legend span { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--ink-2); }
+.legend i { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
+svg { display: block; width: 100%; overflow: visible; }
+svg text { font-family: "IBM Plex Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+.tip {
+  position: absolute; pointer-events: none; opacity: 0; transition: opacity .1s;
+  background: var(--panel); border: 1px solid var(--rule-strong); border-radius: 7px;
+  box-shadow: var(--shadow); padding: 9px 11px; font-size: 12.5px; min-width: 168px;
+  z-index: 5; font-variant-numeric: tabular-nums;
+}
+.tip.on { opacity: 1; }
+.tip .t-date { font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--ink-3);
+               letter-spacing: .04em; margin-bottom: 6px; }
+.tip .t-row { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+.tip .t-row b { font-weight: 500; color: var(--ink-2); display: flex; align-items: center; gap: 7px; }
+.tip .t-row i { width: 9px; height: 3px; border-radius: 2px; }
+.tip .t-row var { font-style: normal; font-family: "IBM Plex Mono", monospace; font-weight: 500; }
+
+/* ---------- tables ---------- */
+.scroll { overflow-x: auto; background: var(--panel); border: 1px solid var(--rule);
+          border-radius: 10px; box-shadow: var(--shadow); }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+thead th {
+  text-align: right; font-weight: 600; font-size: 11px; letter-spacing: .07em;
+  text-transform: uppercase; color: var(--ink-3); padding: 13px 16px;
+  border-bottom: 1px solid var(--rule-strong); white-space: nowrap; background: var(--panel);
+}
+thead th:first-child { text-align: left; }
+tbody th {
+  text-align: left; font-weight: 400; color: var(--ink-2); padding: 8px 16px;
+  white-space: nowrap; border-bottom: 1px solid var(--rule);
+}
+tbody td { padding: 8px 16px; border-bottom: 1px solid var(--rule); }
+tbody tr:last-child th, tbody tr:last-child td { border-bottom: 0; }
+td.num { text-align: right; font-family: "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums;
+         white-space: nowrap; }
+tbody tr:hover td, tbody tr:hover th { background: var(--panel-2); }
+tr.grp th {
+  background: var(--panel-2); color: var(--ink); font-family: Archivo, sans-serif;
+  font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase;
+  padding: 11px 16px; border-bottom: 1px solid var(--rule-strong);
+  border-top: 1px solid var(--rule-strong);
+}
+tr.grp:first-child th { border-top: 0; }
+.matrix tbody th { color: var(--ink); }
+.joined-col { background: color-mix(in srgb, var(--s3) 6%, transparent); }
+tbody tr:hover td.joined-col { background: color-mix(in srgb, var(--s3) 11%, transparent); }
+thead th.joined-col { color: var(--ink); }
+td.best { font-weight: 600; }
+td.best::after { content: " ●"; color: var(--s3); font-size: 8px; vertical-align: middle; }
+.joined-row th, .joined-row td { background: color-mix(in srgb, var(--s3) 6%, transparent); }
+.pos { color: var(--ink); }
+.neg { color: var(--neg); }
+.flat { color: var(--ink-3); }
+.side { font-family: "IBM Plex Mono", monospace; font-size: 11px; letter-spacing: .06em;
+        text-transform: uppercase; padding: 2px 7px; border-radius: 4px; border: 1px solid var(--rule-strong);
+        color: var(--ink-2); }
+.side-long { border-color: color-mix(in srgb, var(--s1) 45%, var(--rule-strong)); }
+.side-short { border-color: color-mix(in srgb, var(--s2) 45%, var(--rule-strong)); }
+.barcell { width: 168px; min-width: 130px; position: relative; white-space: nowrap; }
+.bar { display: inline-block; height: 8px; border-radius: 0 3px 3px 0; vertical-align: middle;
+       max-width: calc(100% - 40px); }
+.pair-a .bar-pos { background: color-mix(in srgb, var(--s1) 62%, transparent); }
+.pair-b .bar-pos { background: color-mix(in srgb, var(--s2) 62%, transparent); }
+.bar-pos { background: color-mix(in srgb, var(--s1) 62%, transparent); }
+.bar-neg { background: color-mix(in srgb, var(--neg) 62%, transparent); }
+.barpct { font-family: "IBM Plex Mono", monospace; font-size: 11.5px; color: var(--ink-3);
+          margin-left: 8px; vertical-align: middle; }
+.months tbody th { font-family: "IBM Plex Mono", monospace; color: var(--ink); }
+
+/* ---------- callouts ---------- */
+.facts { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.fact { background: var(--panel); border: 1px solid var(--rule); border-radius: 10px;
+        padding: 17px 18px; box-shadow: var(--shadow); }
+.fact .k { margin: 0 0 5px; font-size: 11px; letter-spacing: .07em; text-transform: uppercase;
+           color: var(--ink-3); }
+.fact .v { margin: 0; font-family: Archivo, sans-serif; font-size: 27px; font-weight: 700;
+           letter-spacing: -.02em; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.fact .n { margin: 6px 0 0; font-size: 12.5px; color: var(--ink-2); line-height: 1.45; }
+
+.notes { display: grid; gap: 0; background: var(--panel); border: 1px solid var(--rule);
+         border-radius: 10px; box-shadow: var(--shadow); overflow: hidden; }
+.note { padding: 17px 20px; border-bottom: 1px solid var(--rule); display: grid;
+        grid-template-columns: 132px 1fr; gap: 4px 22px; align-items: start; }
+.note:last-child { border-bottom: 0; }
+.note h4 { margin: 0; font-family: "IBM Plex Mono", monospace; font-size: 11px; font-weight: 500;
+           letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); padding-top: 3px; }
+.note p { margin: 0; color: var(--ink-2); max-width: 76ch; }
+.note p strong { color: var(--ink); font-weight: 600; }
+.note p + p { margin-top: 8px; }
+@media (max-width: 640px) {
+  .note { grid-template-columns: 1fr; }
+  .note h4 { padding-top: 0; }
+}
+
+.pair { display: grid; gap: 30px; grid-template-columns: 1fr; }
+.pair > div { min-width: 0; }   /* keep the scroll containers from setting the page width */
+.pair h3 { margin: 0 0 4px; font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 9px; }
+.pair h3 .swatch { width: 9px; height: 9px; }
+.pair .h3sub { margin: 0 0 11px; font-size: 12.5px; color: var(--ink-3); }
+.pair-a h3 .swatch { background: var(--s1); }
+.pair-b h3 .swatch { background: var(--s2); }
+
+footer { margin-top: 64px; padding-top: 22px; border-top: 1px solid var(--rule);
+         color: var(--ink-3); font-size: 12.5px; display: flex; flex-wrap: wrap; gap: 6px 20px; }
+footer code { font-family: "IBM Plex Mono", monospace; font-size: 12px; color: var(--ink-2); }
+a { color: var(--s1); }
+:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; border-radius: 3px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+
+<header class="mast">
+  <div class="wrap">
+    <p class="ticker"><span class="dot"></span><span>CME_MINI · MNQ1!</span><span>__WINDOW__</span><span>__YEARS__ years</span><span>__TRADES__ round turns</span></p>
+    <h1>Halyard <span class="x">×</span> QuantFlow V3</h1>
+    <p class="standfirst">Two intraday MNQ strategies measured apart and then as one book. Run together on
+      <strong>__JOINED_CAP__</strong> they returned <strong>__JOINED_NET__</strong> (__JOINED_ANN__ annualised)
+      against a __JOINED_DDPCT__ worst drawdown — a better risk profile than either curve alone, because their
+      losing days rarely line up.</p>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <section id="headline" style="margin-top:0">
+    <p class="eyebrow">Headline</p>
+    <h2>Where each book stands</h2>
+    <p class="lede">Every figure below is re-priced at a single commission rate so the two exports are
+      comparable. Returns are on fixed (non-compounding) capital, matching how the strategies size positions.</p>
+    <div class="cards">__CARDS__</div>
+  </section>
+
+  <section id="equity">
+    <p class="eyebrow">Equity</p>
+    <h2>Cumulative profit</h2>
+    <p class="lede">Closed-trade PnL booked on the exit date, starting from zero. The joined line is the
+      arithmetic sum of the two — one account trading both.</p>
+    <div class="chartbox">
+      <div class="chart-head">
+        <span class="chart-title">Cumulative net profit</span>
+        <span class="chart-note">USD · hover for a date</span>
+      </div>
+      <div class="legend" id="lg-eq"></div>
+      <div id="c-equity"></div>
+      <div class="tip" id="tip-equity"></div>
+    </div>
+  </section>
+
+  <section id="risk">
+    <p class="eyebrow">Risk</p>
+    <h2>Time spent under water</h2>
+    <p class="lede">Distance below the running equity peak, in dollars. Shown as three panels rather than
+      three overlaid areas — what matters is the shape and length of each book's holes, not their overlap.</p>
+    <div id="c-dd"></div>
+  </section>
+
+  <section id="diversification">
+    <p class="eyebrow">Diversification</p>
+    <h2>What joining them actually buys</h2>
+    <p class="lede">The case for running both is not extra profit — it is that the profit arrives on
+      different days.</p>
+    <div class="facts">
+      <div class="fact">
+        <p class="k">Daily PnL correlation</p>
+        <p class="v">__CORR__</p>
+        <p class="n">Near-independent. They traded together on __BOTH_DAYS__ of __ANY_DAYS__ active days.</p>
+      </div>
+      <div class="fact">
+        <p class="k">Drawdown saved</p>
+        <p class="v">__DD_SAVED__</p>
+        <p class="n">Standalone drawdowns sum to __DD_SUM__; the joined book bottomed at __JOINED_DD__.</p>
+      </div>
+      <div class="fact">
+        <p class="k">Sharpe, blended</p>
+        <p class="v">__JOINED_SHARPE__</p>
+        <p class="n">Against __SHARPE_WAVG__ for the capital-weighted average of the two standalone books.</p>
+      </div>
+      <div class="fact">
+        <p class="k">Peak concurrent size</p>
+        <p class="v">__CONTRACTS__ <span style="font-size:15px;font-weight:500;color:var(--ink-3)">contracts</span></p>
+        <p class="n">__NOTIONAL__ notional at the busiest moment — the margin the joined book must carry.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="matrix">
+    <p class="eyebrow">Full metric set</p>
+    <h2>Every number, side by side</h2>
+    <p class="lede">A dot marks the better of the two strategies on each comparable row. The joined column is
+      the combined book, not an average.</p>
+    __MATRIX__
+  </section>
+
+  <section id="monthly">
+    <p class="eyebrow">Consistency</p>
+    <h2>Month by month</h2>
+    <p class="lede">Thirteen calendar months, both books.</p>
+    <div class="chartbox">
+      <div class="chart-head">
+        <span class="chart-title">Monthly net profit</span>
+        <span class="chart-note">USD · hover a month</span>
+      </div>
+      <div class="legend" id="lg-mo"></div>
+      <div id="c-monthly"></div>
+      <div class="tip" id="tip-monthly"></div>
+    </div>
+    <div style="margin-top:14px">__MONTHLY__</div>
+  </section>
+
+  <section id="sides">
+    <p class="eyebrow">Direction</p>
+    <h2>Long versus short</h2>
+    <p class="lede">Both books lean long, and both are meaningfully weaker on the short side — the same
+      asymmetry, which means joining them does not diversify it away.</p>
+    __SIDES__
+  </section>
+
+  <section id="attribution">
+    <p class="eyebrow">Attribution</p>
+    <h2>Which entries carried the year</h2>
+    <p class="lede">Net profit by entry signal, as a share of each strategy's total. Bars are scaled to the
+      largest contributor within each book.</p>
+    <div class="pair">
+      <div class="pair-a">
+        <h3><span class="swatch"></span>__NAME_A__</h3>
+        <p class="h3sub">Break-then-pullback, opening range and initial balance entries</p>
+        __SIG_A__
+      </div>
+      <div class="pair-b">
+        <h3><span class="swatch"></span>__NAME_B__</h3>
+        <p class="h3sub">Order-flow ORB, aggressive continuation and power-of-three entries</p>
+        __SIG_B__
+      </div>
+    </div>
+  </section>
+
+  <section id="caveats">
+    <p class="eyebrow">Read before sizing</p>
+    <h2>What these numbers do not say</h2>
+    <p class="lede">Everything above is a backtest read off two TradingView exports. Four things materially
+      affect how the figures should be used.</p>
+    <div class="notes">
+      <div class="note">
+        <h4>Commission</h4>
+        <p>The exports were not run on the same cost basis: Halyard's charged <strong>__RAW_COMM_A__</strong>
+          over the year, QuantFlow's charged <strong>__RAW_COMM_B__</strong>. Every figure on this page
+          re-prices both at <strong>__COMM__ per contract per side</strong> (__COMM_RT__ round turn), which
+          costs QuantFlow roughly a thousand dollars of its raw net profit. Slippage is still not modelled
+          anywhere — at 765 round turns a single MNQ tick of slippage per side is about $8,000.</p>
+      </div>
+      <div class="note">
+        <h4>Capital base</h4>
+        <p>The two testers ran different accounts — <strong>__CAP_A__</strong> for Halyard against
+          <strong>__CAP_B__</strong> for QuantFlow — so the percentage returns are not like for like.
+          Halyard's __ANN_A__ and QuantFlow's __ANN_B__ describe the same dollar engine measured against
+          different denominators. Compare profit factor, expectancy and Sharpe across the two; compare the
+          percentages only against their own capital.</p>
+      </div>
+      <div class="note">
+        <h4>Tail risk</h4>
+        <p>Halyard's worst single day was <strong>__WORST_DAY_A__</strong>, or __WORST_DAY_A_PCT__ of its
+          stated capital, and it runs up to four contracts. A book that can lose a tenth of its account in a
+          session is sized for the backtest's best case, not for a gap. The joined book's peak of
+          __CONTRACTS__ concurrent contracts is the number to check margin against, not the average of 2.57.</p>
+      </div>
+      <div class="note">
+        <h4>Sample</h4>
+        <p>One year, one instrument, one regime — a strongly trending Nasdaq. 765 trades is a healthy sample
+          for trade-level statistics but only thirteen independent months for the equity curve, so the
+          Sharpe, Calmar and drawdown figures carry far less certainty than their decimal places suggest.
+          No walk-forward or out-of-sample split is present in these exports.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span>Source: TradingView strategy-tester exports, MNQ1! · generated by <code>analysis/build_report.py</code></span>
+    <span>Commission normalised to __COMM__/contract/side</span>
+  </footer>
+</div>
+
+<script>
+const D = __CHART_DATA__;
+
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const SC = () => [css("--s1"), css("--s2"), css("--s3")];
+const fmtUsd = v => (v < 0 ? "-$" : "$") + Math.round(Math.abs(v)).toLocaleString();
+const fmtK = v => (v < 0 ? "-$" : "$") + (Math.abs(v) >= 1000
+  ? (Math.abs(v) / 1000).toFixed(Math.abs(v) % 1000 === 0 ? 0 : 1) + "k"
+  : Math.round(Math.abs(v)));
+const SVGNS = "http://www.w3.org/2000/svg";
+
+function el(tag, attrs, parent) {
+  const n = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(n);
+  return n;
+}
+
+/* "nice" axis bounds with a tick step that lands on 1/2/5 × 10^n */
+function ticks(lo, hi, want) {
+  const span = (hi - lo) || 1;
+  const raw = span / want;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= raw) || 10 * mag;
+  const start = Math.floor(lo / step) * step, end = Math.ceil(hi / step) * step;
+  const out = [];
+  for (let v = start; v <= end + step / 2; v += step) out.push(Math.abs(v) < step / 1e6 ? 0 : v);
+  return { out, lo: start, hi: end };
+}
+
+function monthTicks(dates) {
+  const marks = [];
+  let last = "";
+  dates.forEach((d, i) => {
+    const m = d.slice(0, 7);
+    if (m !== last) { marks.push({ i, label: d }); last = m; }
+  });
+  return marks;
+}
+
+const MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const monLabel = (d, withYear) =>
+  MON[+d.slice(5, 7) - 1] + (withYear || d.slice(5, 7) === "01" ? " ’" + d.slice(2, 4) : "");
+
+/* Gridlines stay on round numbers; the domain hugs the data so the plot isn't
+   mostly empty axis. Both are returned — they are not the same range. */
+function scale(lo, hi, want) {
+  const T = ticks(lo, hi, want);
+  const span = (hi - lo) || 1;
+  const dLo = Math.max(T.lo, lo - span * 0.05);
+  const dHi = Math.min(T.hi, hi + span * 0.07);
+  return { ticks: T.out.filter(v => v >= dLo - 1e-9 && v <= dHi + 1e-9), lo: dLo, hi: dHi };
+}
+
+/* ------------------------------------------------------------------ equity */
+function drawEquity() {
+  const host = document.getElementById("c-equity");
+  const tip = document.getElementById("tip-equity");
+  host.innerHTML = "";
+  const W = host.clientWidth || 900;
+  const narrow = W < 620;
+  const H = narrow ? 300 : 380;
+  const P = { t: 14, r: narrow ? 14 : 104, b: 30, l: 58 };
+  const iw = W - P.l - P.r, ih = H - P.t - P.b;
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img",
+    "aria-label": "Cumulative net profit for each strategy and the joined book" }, host);
+
+  const all = D.series.flatMap(s => s.equity);
+  const T = scale(Math.min(...all), Math.max(...all), 5);
+  const x = i => P.l + (iw * i) / (D.dates.length - 1);
+  const y = v => P.t + ih - ((v - T.lo) / (T.hi - T.lo)) * ih;
+
+  T.ticks.forEach(v => {
+    el("line", { x1: P.l, x2: P.l + iw, y1: y(v), y2: y(v),
+      stroke: v === 0 ? css("--rule-strong") : css("--grid"), "stroke-width": 1 }, svg);
+    const t = el("text", { x: P.l - 10, y: y(v) + 4, "text-anchor": "end", "font-size": 11,
+      fill: css("--ink-3") }, svg);
+    t.textContent = fmtK(v);
+  });
+
+  let lastX = -1e9;
+  monthTicks(D.dates).forEach((m, k, arr) => {
+    if (narrow && k % 3 !== 0) return;
+    if (!narrow && arr.length > 14 && k % 2 !== 0) return;
+    if (x(m.i) - lastX < 40) return;   /* a short first month must not collide */
+    lastX = x(m.i);
+    const t = el("text", { x: x(m.i), y: H - 10, "text-anchor": "middle", "font-size": 11,
+      fill: css("--ink-3") }, svg);
+    t.textContent = monLabel(m.label);
+  });
+
+  const colors = SC();
+  D.series.forEach((s, si) => {
+    const d = s.equity.map((v, i) => (i ? "L" : "M") + x(i).toFixed(1) + " " + y(v).toFixed(1)).join(" ");
+    el("path", { d, fill: "none", stroke: colors[si], "stroke-width": 2,
+      "stroke-linejoin": "round", "stroke-linecap": "round" }, svg);
+    if (!narrow) {
+      const yy = y(s.equity[s.equity.length - 1]);
+      el("circle", { cx: x(D.dates.length - 1) + 12, cy: yy - 4, r: 3.5, fill: colors[si] }, svg);
+      const t1 = el("text", { x: x(D.dates.length - 1) + 21, y: yy - 0.5, "font-size": 11.5,
+        fill: css("--ink"), "font-weight": 500 }, svg);
+      t1.textContent = s.name;
+      const t2 = el("text", { x: x(D.dates.length - 1) + 21, y: yy + 14, "font-size": 11.5,
+        fill: css("--ink-3") }, svg);
+      t2.textContent = fmtK(s.equity[s.equity.length - 1]);
+    }
+  });
+
+  const cross = el("line", { y1: P.t, y2: P.t + ih, stroke: css("--rule-strong"),
+    "stroke-width": 1, opacity: 0 }, svg);
+  const dots = D.series.map((s, si) => el("circle", { r: 4, fill: colors[si], stroke: css("--panel"),
+    "stroke-width": 2, opacity: 0 }, svg));
+
+  const hit = el("rect", { x: P.l, y: P.t, width: iw, height: ih, fill: "transparent",
+    style: "cursor:crosshair" }, svg);
+  const move = ev => {
+    const r = svg.getBoundingClientRect();
+    const px = ((ev.touches ? ev.touches[0].clientX : ev.clientX) - r.left) * (W / r.width);
+    let i = Math.round(((px - P.l) / iw) * (D.dates.length - 1));
+    i = Math.max(0, Math.min(D.dates.length - 1, i));
+    cross.setAttribute("x1", x(i)); cross.setAttribute("x2", x(i)); cross.setAttribute("opacity", 1);
+    D.series.forEach((s, si) => {
+      dots[si].setAttribute("cx", x(i)); dots[si].setAttribute("cy", y(s.equity[i]));
+      dots[si].setAttribute("opacity", 1);
+    });
+    tip.innerHTML = `<div class="t-date">${D.dates[i]}</div>` + D.series.map((s, si) =>
+      `<div class="t-row"><b><i style="background:${colors[si]}"></i>${s.name}</b>
+       <var>${fmtUsd(s.equity[i])}</var></div>`).join("");
+    tip.classList.add("on");
+    const left = (x(i) / W) * host.clientWidth;
+    tip.style.left = Math.min(host.clientWidth - 180, Math.max(0, left + 16)) + 18 + "px";
+    tip.style.top = "44px";
+  };
+  const leave = () => {
+    cross.setAttribute("opacity", 0);
+    dots.forEach(d => d.setAttribute("opacity", 0));
+    tip.classList.remove("on");
+  };
+  hit.addEventListener("mousemove", move);
+  hit.addEventListener("mouseleave", leave);
+  hit.addEventListener("touchmove", move, { passive: true });
+  hit.addEventListener("touchend", leave);
+
+  document.getElementById("lg-eq").innerHTML = D.series.map((s, si) =>
+    `<span><i style="background:${colors[si]}"></i>${s.name}</span>`).join("");
+}
+
+/* ------------------------------------------------------------- underwater */
+function drawDD() {
+  const host = document.getElementById("c-dd");
+  host.innerHTML = "";
+  const colors = SC();
+  /* One scale for all three panels — small multiples only compare if they share it. */
+  const T = scale(Math.min(...D.series.flatMap(s => s.dd)), 0, 2);
+  D.series.forEach((s, si) => {
+    const box = document.createElement("div");
+    box.className = "chartbox";
+    box.innerHTML = `<div class="chart-head">
+        <span class="chart-title"><span style="display:inline-block;width:10px;height:10px;border-radius:3px;
+          background:${colors[si]};margin-right:8px;vertical-align:-1px"></span>${s.name}</span>
+        <span class="chart-note">worst ${fmtUsd(-s.maxdd)} · ${s.maxddpct.toFixed(1)}% of ${fmtUsd(s.capital)}</span>
+      </div><div class="slot"></div>`;
+    host.appendChild(box);
+    const slot = box.querySelector(".slot");
+    const W = slot.clientWidth || 900, H = 118;
+    const P = { t: 8, r: 8, b: 22, l: 58 };
+    const iw = W - P.l - P.r, ih = H - P.t - P.b;
+    const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img",
+      "aria-label": `${s.name} drawdown` }, slot);
+    const x = i => P.l + (iw * i) / (s.dd.length - 1);
+    const y = v => P.t + ih - ((v - T.lo) / (T.hi - T.lo)) * ih;
+
+    T.ticks.forEach(v => {
+      el("line", { x1: P.l, x2: P.l + iw, y1: y(v), y2: y(v),
+        stroke: v === 0 ? css("--rule-strong") : css("--grid"), "stroke-width": 1 }, svg);
+      const t = el("text", { x: P.l - 10, y: y(v) + 4, "text-anchor": "end", "font-size": 10.5,
+        fill: css("--ink-3") }, svg);
+      t.textContent = fmtK(v);
+    });
+    let lastX = -1e9;
+    monthTicks(D.dates).forEach((m, k, arr) => {
+      if (W < 620 ? k % 3 : (arr.length > 14 && k % 2)) return;
+      if (x(m.i) - lastX < 40) return;
+      lastX = x(m.i);
+      const t = el("text", { x: x(m.i), y: H - 6, "text-anchor": "middle", "font-size": 10.5,
+        fill: css("--ink-3") }, svg);
+      t.textContent = monLabel(m.label);
+    });
+
+    const line = s.dd.map((v, i) => (i ? "L" : "M") + x(i).toFixed(1) + " " + y(v).toFixed(1)).join(" ");
+    el("path", { d: `${line} L${x(s.dd.length - 1).toFixed(1)} ${y(0)} L${x(0).toFixed(1)} ${y(0)} Z`,
+      fill: colors[si], opacity: .16 }, svg);
+    el("path", { d: line, fill: "none", stroke: colors[si], "stroke-width": 2,
+      "stroke-linejoin": "round" }, svg);
+  });
+}
+
+/* ---------------------------------------------------------------- monthly */
+function drawMonthly() {
+  const host = document.getElementById("c-monthly");
+  const tip = document.getElementById("tip-monthly");
+  host.innerHTML = "";
+  const names = D.monthNames.slice(0, 2);
+  const colors = SC();
+  const W = host.clientWidth || 900, H = 260;
+  const P = { t: 12, r: 10, b: 30, l: 58 };
+  const iw = W - P.l - P.r, ih = H - P.t - P.b;
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img",
+    "aria-label": "Monthly net profit by strategy" }, host);
+
+  const all = names.flatMap(n => D.monthly[n]);
+  const T = scale(Math.min(...all), Math.max(...all), 4);
+  const y = v => P.t + ih - ((v - T.lo) / (T.hi - T.lo)) * ih;
+  const bandW = iw / D.months.length;
+  const barW = Math.max(5, (bandW - 12) / 2 - 1);
+
+  T.ticks.forEach(v => {
+    el("line", { x1: P.l, x2: P.l + iw, y1: y(v), y2: y(v),
+      stroke: v === 0 ? css("--rule-strong") : css("--grid"), "stroke-width": 1 }, svg);
+    const t = el("text", { x: P.l - 10, y: y(v) + 4, "text-anchor": "end", "font-size": 11,
+      fill: css("--ink-3") }, svg);
+    t.textContent = fmtK(v);
+  });
+
+  /* rounded only on the data end, square on the baseline */
+  const barPath = (bx, v) => {
+    const y0 = y(0), y1 = y(v), h = Math.abs(y1 - y0);
+    const r = Math.min(4, barW / 2, h);
+    if (h < .5) return `M${bx} ${y0} h${barW}`;
+    return v >= 0
+      ? `M${bx} ${y0} V${y0 - h + r} a${r} ${r} 0 0 1 ${r} ${-r} h${barW - 2 * r} a${r} ${r} 0 0 1 ${r} ${r} V${y0} Z`
+      : `M${bx} ${y0} V${y0 + h - r} a${r} ${r} 0 0 0 ${r} ${r} h${barW - 2 * r} a${r} ${r} 0 0 0 ${r} ${-r} V${y0} Z`;
+  };
+
+  D.months.forEach((m, mi) => {
+    const bx0 = P.l + bandW * mi + 6;
+    names.forEach((n, ni) => {
+      el("path", { d: barPath(bx0 + ni * (barW + 2), D.monthly[n][mi]), fill: colors[ni] }, svg);
+    });
+    const t = el("text", { x: P.l + bandW * mi + bandW / 2, y: H - 9, "text-anchor": "middle",
+      "font-size": 11, fill: css("--ink-3") }, svg);
+    t.textContent = monLabel(m + "-01", mi === 0);
+
+    const hit = el("rect", { x: P.l + bandW * mi, y: P.t, width: bandW, height: ih,
+      fill: "transparent" }, svg);
+    hit.addEventListener("mouseenter", () => {
+      tip.innerHTML = `<div class="t-date">${m}</div>` + D.monthNames.map((n, ni) =>
+        `<div class="t-row"><b><i style="background:${ni < 2 ? colors[ni] : colors[2]}"></i>${n}</b>
+         <var${D.monthly[n][mi] < 0 ? ' class="neg" style="color:var(--neg)"' : ""}>${fmtUsd(D.monthly[n][mi])}</var></div>`).join("");
+      tip.classList.add("on");
+      const left = ((P.l + bandW * mi + bandW / 2) / W) * host.clientWidth;
+      tip.style.left = Math.min(host.clientWidth - 180, Math.max(0, left - 84)) + 18 + "px";
+      tip.style.top = "40px";
+    });
+    hit.addEventListener("mouseleave", () => tip.classList.remove("on"));
+  });
+
+  document.getElementById("lg-mo").innerHTML = names.map((n, ni) =>
+    `<span><i style="background:${colors[ni]}"></i>${n}</span>`).join("")
+    + `<span style="color:var(--ink-3)">Joined totals in the table below</span>`;
+}
+
+function drawAll() { drawEquity(); drawDD(); drawMonthly(); }
+drawAll();
+let rt;
+addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(drawAll, 140); });
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", drawAll);
+new MutationObserver(drawAll).observe(document.documentElement, { attributes: true,
+  attributeFilter: ["data-theme"] });
+</script>

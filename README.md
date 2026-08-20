@@ -30,3 +30,12 @@ slower structure. Configurable under the *Higher-timeframe structure* group:
 
 The HTF engine is **non-repainting**: a higher-timeframe bar is only processed
 once it has fully closed.
+
+## Performance analysis
+
+`analysis/` turns TradingView trade exports into a joined performance report —
+per-strategy metrics plus the combined book. See [`analysis/README.md`](analysis/README.md).
+
+```bash
+python3 analysis/build_report.py analysis/data/*.csv
+```
