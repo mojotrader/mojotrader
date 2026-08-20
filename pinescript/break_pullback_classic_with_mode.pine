@@ -1,8 +1,12 @@
 //@version=6
-// Break-then-pullback strategy (run on a 5m chart). Runs ORB (15-min) FIRST, then IB (1-hour).
+// Break-then-pullback strategy (run on a 5m chart). Runs ORB FIRST, then IB.
+// The two range windows, the session, the cutoffs and the flatten are all INPUTS ("Session & time ranges"), so
+// any opening can be tested: 09:30 RTH, the 01:00 European open, a 30-minute ORB, a two-hour IB. Defaults are
+// the classic 15-minute ORB and 1-hour IB off the 09:30 open. A window outside regular hours needs a chart with
+// extended hours enabled, or those bars do not exist.
 //
 // PRIORITY / INTERACTION (when both are enabled):
-//   - ORB may enter only BEFORE the IB forms (i.e. before 10:30). Its resting limit is cancelled at 10:30 if unfilled.
+//   - ORB may enter only BEFORE the IB forms (i.e. before the IB window closes). Its resting limit is cancelled at 10:30 if unfilled.
 //   - If ORB never traded by the time the IB forms -> ORB is abandoned for the day, only IB plays.
 //   - An OPEN ORB trade keeps the seat: while it runs, the IB order is HELD BACK - either direction, so the two
 //     never stack risk in one direction and never hedge each other. The ORB is left alone to reach its own target.
@@ -10,7 +14,7 @@
 //     entry level while the IB was held, in which case that pullback was missed and the IB is skipped for the day.
 //   - Net effect: both setups can play on the same day, but strictly one at a time.
 //   - OPTIONAL (checkbox, off by default): "Carry an unfilled ORB past the IB". Normally an ORB limit that never
-//     filled is cancelled when the IB forms. Armed, it keeps resting - so a pullback that only arrives after 10:30
+//     filled is cancelled when the IB forms. Armed, it keeps resting - so a pullback that only arrives after that
 //     is still taken - and it gives way the instant the IB breaks its range and arms a setup of its own.
 //
 // PER SETUP (each range, independently configurable below):
@@ -68,7 +72,7 @@ gStrat    = "Strategies (toggle to track each separately)"
 runORB    = input.bool(true, "Run ORB strategy", group = gStrat, tooltip = "Turn OFF to backtest the IB strategy alone in the Strategy Tester.")
 runIB     = input.bool(true, "Run IB strategy",  group = gStrat, tooltip = "Turn OFF to backtest the ORB strategy alone.")
 orbCarry  = input.bool(false, "Carry an unfilled ORB past the IB (test idea)", group = gStrat,
-     tooltip = "OFF: an ORB limit that has not filled by the time the IB forms is cancelled - the standard rule. ON: that unfilled limit keeps resting, so a pullback that finally arrives after 10:30 still gets taken. It gives way the moment the IB breaks its own range and arms a setup, and otherwise expires at the ORB cutoff or the EOD flatten. Only ever applies to a setup that broke and armed before the IB formed; it does not let the ORB arm late.")
+     tooltip = "OFF: an ORB limit that has not filled by the time the IB forms is cancelled - the standard rule. ON: that unfilled limit keeps resting, so a pullback that finally arrives after the IB has formed still gets taken. It gives way the moment the IB breaks its own range and arms a setup, and otherwise expires at the ORB cutoff or the EOD flatten. Only ever applies to a setup that broke and armed before the IB formed; it does not let the ORB arm late.")
 
 // ---------------------------------------------------------------- Trade-day filters (see which weekday hurts each)
 gDayO     = "Trade days - ORB"
@@ -115,14 +119,34 @@ rmFixed    = mFixed or not mDlr
 sizeByRisk = not rmFixed
 modeTxt    = rmFixed ? "Sizing: fixed contracts" : "Sizing: risk $ per entry"
 
+// ---------------------------------------------------------------- Session & time ranges (all editable)
+// Move the two range windows to test any opening you like - 09:30 RTH, the 01:00 European open, a 30-minute ORB,
+// a two-hour IB. Everything downstream follows: the levels, the fib lines, the R/R boxes, the probability table.
+// TWO RULES OF THUMB when you change them:
+//   - both windows must sit INSIDE the trading session, and the IB window must end LATER than the ORB window,
+//     or the ORB-first priority has nothing to be first about (the panel warns you if it does not);
+//   - the cutoffs and the flatten are separate inputs below - move them with the windows, or an overnight range
+//     ends up with an entry window that runs until the afternoon.
+// A window outside regular hours needs a chart with EXTENDED HOURS on, or those bars do not exist at all.
+gSess     = "Session & time ranges"
+tz        = input.string("America/New_York", "Timezone", group = gSess,
+     tooltip = "Every time below is read in this timezone, whatever the chart's own timezone is.")
+sess      = input.session("0930-1600", "Trading session", group = gSess,
+     tooltip = "Bars outside this window are ignored completely: no range building, no entries, no tracking. It also defines the day - the first bar inside it resets everything.")
+orbSess   = input.session("0930-0945", "ORB range window", group = gSess,
+     tooltip = "The opening range. 0930-0945 is the classic 15-minute ORB; 0930-1000 makes it 30 minutes; 0100-0115 tests the European open. The setup is decided on the first bar AFTER this window closes.")
+ibSess    = input.session("0930-1030", "IB range window", group = gSess,
+     tooltip = "The initial balance - 0930-1030 is the classic hour. Must end later than the ORB window: the ORB may only enter before the IB forms, so an IB that closes first leaves the ORB no time at all.")
+flatH     = input.int(15, "Flatten hour", minval = 0, maxval = 23, group = gSess)
+flatM     = input.int(30, "Flatten minute", minval = 0, maxval = 59, group = gSess,
+     tooltip = "Everything open is closed and every resting order cancelled at this time, whatever the trade is doing.")
+orbCutH   = input.int(15, "ORB entry cutoff hour", minval = 0, maxval = 23, group = gSess)
+orbCutM   = input.int(0,  "ORB entry cutoff minute", minval = 0, maxval = 59, group = gSess,
+     tooltip = "An ORB limit that has not filled by this time is cancelled. Note that while the IB also runs, the ORB is cut at the IB's formation instead - unless 'Carry an unfilled ORB past the IB' is armed.")
+ibCutH    = input.int(14, "IB entry cutoff hour", minval = 0, maxval = 23, group = gSess)
+ibCutM    = input.int(0,  "IB entry cutoff minute", minval = 0, maxval = 59, group = gSess)
+
 // ---------------------------------------------------------------- HARDCODED CONFIG (edit values here)
-// Session
-tz      = "America/New_York"
-sess    = "0930-1600"
-orbSess = "0930-0945"
-ibSess  = "0930-1030"
-flatH   = 15
-flatM   = 30
 // ORB settings
 orbLong   = true
 orbShort  = true
@@ -133,8 +157,6 @@ orbTpS    = "Ext 30%"
 orbBE     = false
 orbQty1   = orbQty1In         // contracts on the first ORB entry     (Risk sizing group)
 orbQty2   = orbQty2In         // contracts on the ORB avg-down entry  (Risk sizing group)
-orbCutH   = 15
-orbCutM   = 0
 // IB settings
 ibLong    = true
 ibShort   = true
@@ -145,8 +167,6 @@ ibTpS     = "Ext 30%"
 ibBE      = false
 ibQty1    = ibQty1In          // contracts on the first IB entry      (Risk sizing group)
 ibQty2    = ibQty2In          // contracts on the IB avg-down entry   (Risk sizing group)
-ibCutH    = 14
-ibCutM    = 0
 
 // ---------------------------------------------------------------- Filters
 gFilt     = "Filters"
@@ -157,7 +177,7 @@ orbDepth  = input.float(75, "ORB bias: max close depth into the range (%)", minv
 ibDepth   = input.float(75, "IB bias: max close depth into the range (%)", minval = 0, maxval = 100, step = 5, group = gFilt,
      tooltip = "How far the range may CLOSE into its own body and still count. Depth is measured from the level that will break: for a short that is the range low, for a long the range high. 50 is the classic rule - the close must sit in the half nearest the level that breaks - and it makes a knife edge of a range closing on its own midpoint. 75 allows a close three quarters of the way back and takes far more setups, at the cost of taking them when the range closed against the direction you are about to trade. 100 accepts any close and leaves only the which-extreme-came-first test.")
 orbMinRngPct = input.float(0.40, "Min ORB range (% of price, 0 = off)", minval = 0, step = 0.05, group = gFilt,
-     tooltip = "Skip ORB setups whose 15-min opening range is smaller than this % of price (range / range-low * 100). The segmentation test showed the smallest-range ORB bucket (<~0.4%) is the only unprofitable segment - 36% win, PF 0.71. IB is NOT filtered. Set 0 to disable. Tune to your own data; the test sample was limited.")
+     tooltip = "Skip ORB setups whose opening range is smaller than this % of price (range / range-low * 100). The segmentation test showed the smallest-range ORB bucket (<~0.4%) is the only unprofitable segment - 36% win, PF 0.71. IB is NOT filtered. Set 0 to disable. Tune to your own data; the test sample was limited.")
 
 // ---------------------------------------------------------------- Automation (PickMyTrade webhook -> Tradovate)
 grpA      = "Automation - PickMyTrade"
@@ -249,6 +269,14 @@ f_size(float budget, float ptDist) =>
     raw  = perC > 0 ? budget / perC : 0.0
     fr   = raw - math.floor(raw)
     fr > 0.5 ? math.ceil(raw) : math.floor(raw)
+
+// "0930-1600" -> the end of the window in minutes from midnight, so the panel can sanity-check the two ranges.
+// Anything that is not a plain HHMM-HHMM string returns na and the check simply stays quiet.
+f_sessEnd(string ss) =>
+    hh = str.tonumber(str.substring(ss, 5, 7))
+    mm = str.tonumber(str.substring(ss, 7, 9))
+    na(hh) or na(mm) ? na : hh * 60 + mm
+f_hm(int h, int m) => str.tostring(h, "00") + ":" + str.tostring(m, "00")
 
 // TP resolver
 f_tp(int d, float rH, float rL, float rg, float dHi, float dLo, string tpL, string tpS) =>
@@ -1114,7 +1142,11 @@ if showInfo and barstate.islast
     info := table.new(position.top_right, 1, 15, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
     table.cell(info, 0, 0,  (ordersOn ? "" : "[INDICATOR - no orders]  ") + "BREAK-THEN-PULLBACK  (ORB + IB)",
          text_color = ordersOn ? color.aqua : color.orange, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 1,  "Ranges: ORB 09:30-09:45 | IB 09:30-10:30 (ET)",      text_color = color.white,  text_size = size.small, text_halign = text.align_left)
+    orbEnd = f_sessEnd(orbSess)
+    ibEnd  = f_sessEnd(ibSess)
+    rangeBad = not na(orbEnd) and not na(ibEnd) and ibEnd <= orbEnd
+    table.cell(info, 0, 1,  "Ranges: ORB " + orbSess + " | IB " + ibSess + (rangeBad ? "  <- IB must end after ORB" : ""),
+         text_color = rangeBad ? color.red : color.white, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 2,  "Direction: low-first = LONG, high-first = SHORT",     text_color = color.white,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 3,  "  + close no deeper than " + str.tostring(orbDepth, "#") + "% (ORB) / " + str.tostring(ibDepth, "#") + "% (IB) into the range",
          text_color = color.silver, text_size = size.small, text_halign = text.align_left)
@@ -1124,8 +1156,10 @@ if showInfo and barstate.islast
     table.cell(info, 0, 7,  "Target: ORB L +10% / S +30% ; IB +30% extension",    text_color = color.white,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 8,  "Avg-down: 2nd unit @ 50% - own size & risk",          text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 9,  "One at a time: IB waits for an open ORB to close",    text_color = color.silver, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 13, orbCarry ? "ORB carry ON: unfilled ORB rests past 10:30" : "ORB carry off (unfilled ORB dies at 10:30)", text_color = orbCarry ? color.orange : color.gray, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 10, "Skip double-break days | Flatten 15:30 ET",           text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 13, (orbCarry ? "ORB carry ON: unfilled ORB rests past the IB, to " + f_hm(orbCutH, orbCutM) : "ORB carry off (unfilled ORB dies when the IB forms)"),
+         text_color = orbCarry ? color.orange : color.gray, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 10, (noDbl ? "Skip double-break days | " : "") + "Entries to " + f_hm(orbCutH, orbCutM) + " / " + f_hm(ibCutH, ibCutM) + " | Flat " + f_hm(flatH, flatM),
+         text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 11, "Toggle Run ORB/IB + weekdays to isolate results",     text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 12, "Odds live in the table; > marks where price is now",  text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 14, modeTxt + (maxDayLoss > 0 ? "  | day stop $" + str.tostring(maxDayLoss, "#") + (dayHalt ? " - HIT" : "") : "") + (rmFixed ? "" : " (per entry, fixed capital)"), text_color = dayHalt ? color.red : color.yellow, text_size = size.small, text_halign = text.align_left)
