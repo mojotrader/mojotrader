@@ -70,6 +70,19 @@ runIB     = input.bool(true, "Run IB strategy",  group = gStrat, tooltip = "Turn
 orbCarry  = input.bool(false, "Carry an unfilled ORB past the IB (test idea)", group = gStrat,
      tooltip = "OFF: an ORB limit that has not filled by the time the IB forms is cancelled - the standard rule. ON: that unfilled limit keeps resting, so a pullback that finally arrives after 10:30 still gets taken. It gives way the moment the IB breaks its own range and arms a setup, and otherwise expires at the ORB cutoff or the EOD flatten.")
 
+// ---------------------------------------------------------------- Halyard - daily trade cap
+// A hard ceiling on how many trades HALYARD may take in one day, counted PER DIRECTION and counted on the New
+// York calendar day. Halyard's own rules already allow one break per session (two with the reversal armed), so
+// with the defaults below this is a belt-and-braces ceiling rather than a new restriction: it sits underneath
+// the break latch and cannot be cleared by the 13:30 / 14:30 ET session roll, which is the one thing that does
+// reset Halyard's own per-session counter. ORB and IB have their own one-setup-per-day rules and are not
+// counted here.
+gCap      = "Halyard - daily trade cap"
+halMaxL   = input.int(1, "Halyard: max LONG trades per day",  minval = 0, maxval = 20, group = gCap,
+     tooltip = "Counted in TRADES per New York calendar day. Once it is reached, a Halyard long break is skipped for the rest of the day - and the break still consumes the day, exactly like any other rejected filter. 0 means NO long trades at all; it is not an 'unlimited' switch, raise the number to loosen the cap.")
+halMaxS   = input.int(1, "Halyard: max SHORT trades per day", minval = 0, maxval = 20, group = gCap,
+     tooltip = "The short side of the same cap. 0 means NO short trades at all.")
+
 // ---------------------------------------------------------------- Trade-day filters (see which weekday hurts each)
 gDayO     = "Trade days - ORB"
 orbMon    = input.bool(true, "ORB Monday",    group = gDayO)
@@ -333,6 +346,23 @@ f_tp(int d, float rH, float rL, float rg, float dHi, float dLo, string tpL, stri
 // chart that is a one-minute lag on a gate that only matters when a fill and a 15m close land on the same bar.
 var bool orbibLive = false
 
+// ---------------------------------------------------------------- Halyard's daily trade counters
+// THE DAY IS THE NEW YORK CALENDAR DAY, deliberately not Halyard's own session. Its session rolls at 13:30 /
+// 14:30 ET and clears halTrades with it, so a per-session counter is not a daily ceiling. Midnight ET is the
+// boundary that is outside every trading window in this script: Halyard's range candle is 00:00 EST / 01:00
+// EDT, so the day's first trade always comes after the reset.
+// A slot is spent when the trade is TAKEN. Halyard enters at market on the 15m close, so taken and filled are
+// the same instant - there is no resting order that could burn a slot without trading.
+etDayKey = year(time, tz) * 10000 + month(time, tz) * 100 + dayofmonth(time, tz)
+newEtDay = nz(ta.change(etDayKey), 0) != 0
+var int halLongsToday  = 0
+var int halShortsToday = 0
+if newEtDay
+    halLongsToday  := 0
+    halShortsToday := 0
+halCapLongOK  = halLongsToday  < halMaxL
+halCapShortOK = halShortsToday < halMaxS
+
 // ================================================================ HALYARD ENGINE
 // Single-candle opening-range breakout with an optional loser-reversal, on 15-MINUTE candles that this engine
 // builds itself - so the chart can be 1m, 3m, 5m or 15m and the levels, the break and the fills are identical.
@@ -588,7 +618,7 @@ halEntered  = false
 halEntDir   = 0
 
 // --- First trade (take the FIRST breakout, if it passes the filters) ---
-halEnterL = halBrkUp and halLongOK and halDayOK and halSeatFree and halTrades < halMaxTrades and halTrDir == 0 and halState == 0
+halEnterL = halBrkUp and halLongOK and halDayOK and halSeatFree and halCapLongOK and halTrades < halMaxTrades and halTrDir == 0 and halState == 0
 if halEnterL
     sl = f_halLongStop(hal15C)
     tp = f_halLongTP(hal15C, sl, halRR)
@@ -605,11 +635,12 @@ if halEnterL
     halBars15 := 0
     halEntered := true
     halEntDir  := 1
+    halLongsToday += 1
     if ordersOn
         strategy.entry("HAL-L", strategy.long, qty = q)
         strategy.exit("HAL-Lx", from_entry = "HAL-L", stop = sl, limit = tp)
 
-halEnterS = halBrkDn and halShortOK and halDayOK and halTrendOK and halSeatFree and halTrades < halMaxTrades and halTrDir == 0 and halState == 0
+halEnterS = halBrkDn and halShortOK and halDayOK and halTrendOK and halSeatFree and halCapShortOK and halTrades < halMaxTrades and halTrDir == 0 and halState == 0
 if halEnterS
     sl = f_halShortStop(hal15C)
     tp = f_halShortTP(hal15C, sl, halRR)
@@ -626,6 +657,7 @@ if halEnterS
     halBars15 := 0
     halEntered := true
     halEntDir  := -1
+    halShortsToday += 1
     if ordersOn
         strategy.entry("HAL-S", strategy.short, qty = q)
         strategy.exit("HAL-Sx", from_entry = "HAL-S", stop = sl, limit = tp)
@@ -636,7 +668,7 @@ if halEnterS
 // NOT filtered. The reversal is gated on the day-of-week, the direction and the losing first trade only - the
 // entry filters apply to the FIRST trade. Note the per-day direction grid DOES reach it: a weekday set to one
 // side can never take the reversal, since the reversal is by definition the opposite side of the loser.
-halRevL = halRevOn and runHAL and halNewBar and halState == 2 and halFirstDir == -1 and halLongOK and halDayOK and halSeatFree and halTrades < halMaxTrades and halTrDir == 0 and halLevels and hal15C > halRH
+halRevL = halRevOn and runHAL and halNewBar and halState == 2 and halFirstDir == -1 and halLongOK and halDayOK and halSeatFree and halCapLongOK and halTrades < halMaxTrades and halTrDir == 0 and halLevels and hal15C > halRH
 if halRevL
     sl = f_halLongStop(hal15C)
     tp = f_halLongTP(hal15C, sl, halRevRR)
@@ -652,11 +684,12 @@ if halRevL
     halBars15 := 0
     halEntered := true
     halEntDir  := 1
+    halLongsToday += 1
     if ordersOn
         strategy.entry("HAL-RL", strategy.long, qty = q)
         strategy.exit("HAL-RLx", from_entry = "HAL-RL", stop = sl, limit = tp)
 
-halRevS = halRevOn and runHAL and halNewBar and halState == 2 and halFirstDir == 1 and halShortOK and halDayOK and halSeatFree and halTrades < halMaxTrades and halTrDir == 0 and halLevels and hal15C < halRL
+halRevS = halRevOn and runHAL and halNewBar and halState == 2 and halFirstDir == 1 and halShortOK and halDayOK and halSeatFree and halCapShortOK and halTrades < halMaxTrades and halTrDir == 0 and halLevels and hal15C < halRL
 if halRevS
     sl = f_halShortStop(hal15C)
     tp = f_halShortTP(hal15C, sl, halRevRR)
@@ -672,6 +705,7 @@ if halRevS
     halBars15 := 0
     halEntered := true
     halEntDir  := -1
+    halShortsToday += 1
     if ordersOn
         strategy.entry("HAL-RS", strategy.short, qty = q)
         strategy.exit("HAL-RSx", from_entry = "HAL-RS", stop = sl, limit = tp)
@@ -1649,13 +1683,15 @@ if halGrow
 // ---------------------------------------------------------------- Strategy rules panel (top-right)
 var table info = na
 if showInfo and barstate.islast
-    info := table.new(position.top_right, 1, 18, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
+    info := table.new(position.top_right, 1, 19, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
     table.cell(info, 0, 0,  (ordersOn ? "" : "[INDICATOR - no orders]  ") + "HALYARD + BREAK-THEN-PULLBACK (ORB + IB)",
          text_color = ordersOn ? color.aqua : color.orange, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 1,  "HALYARD: 15m candles built from chart bars - any chart TF",  text_color = color.fuchsia, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 2,  "  range = the 00:00 EST / 01:00 EDT 15m candle",             text_color = color.silver,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 3,  "  first 15m CLOSE beyond it trades | stop = far edge | R:R " + str.tostring(halRR, "#.##"), text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 4,  "  one break per day | flat 13:30 / 14:30 ET",                text_color = color.silver,  text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 18, "  day cap " + str.tostring(halMaxL, "#") + "L / " + str.tostring(halMaxS, "#") + "S - taken today " + str.tostring(halLongsToday, "#") + "L / " + str.tostring(halShortsToday, "#") + "S",
+         text_color = (halCapLongOK or halCapShortOK) ? color.silver : color.red, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 5,  "Ranges: ORB 09:30-09:45 | IB 09:30-10:30 (ET)",              text_color = color.white,   text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 6,  "Direction: low-first = LONG, high-first = SHORT",            text_color = color.white,   text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 7,  "  + close no deeper than " + str.tostring(orbDepth, "#") + "% (ORB) / " + str.tostring(ibDepth, "#") + "% (IB) into the range",
