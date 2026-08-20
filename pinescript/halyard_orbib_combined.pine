@@ -180,7 +180,7 @@ orbMinRngPct = input.float(0.40, "Min ORB range (% of price, 0 = off)", minval =
 // ---------------------------------------------------------------- Automation (PickMyTrade webhook -> Tradovate)
 grpA      = "Automation - PickMyTrade"
 autoOn    = input.bool(false, "Enable webhook alerts", group = grpA,
-     tooltip = "VERIFY THE FIELD NAMES against PickMyTrade's own alert generator before running this with real money, and paper-test one round trip first - the JSON below is written to their documented schema but their parser is the authority, and a field it does not recognise is not an error, it is an order you did not intend. Create ONE alert, condition 'alert() function calls only', and paste PickMyTrade's webhook URL. ONE - if you also keep a second alert on this strategy with a JSON message of your own (the order-fill template), BOTH post to PickMyTrade and you get TWO trades per signal. Turn the manual break alerts OFF on this alert too: they are plain text and the webhook rejects them with 415. The seat rules keep the three setups from ever being open at once, so each message maps to a single setup. Silent in Indicator mode.")
+     tooltip = "VERIFY THE FIELD NAMES against PickMyTrade's own alert generator before running this with real money, and paper-test one round trip first - the JSON is written to their documented schema but their parser is the authority, and a field it does not recognise is not an error, it is an order you did not intend. CREATE ONE ALERT, and pick ONE condition: 'Order fills only' (every order carries its JSON as alert_message, so leave {{strategy.order.alert_message}} in the message box) OR 'alert() function calls only' (the message box is ignored). Both conditions send the same JSON. 'Order fills AND alert() function calls' sends both - two orders per signal. A second alert of your own carrying its own JSON template does the same thing. Turn the manual break alerts OFF on whichever alert you point at the webhook: they are plain text and come back 415. Silent in Indicator mode."
 pmtToken  = input.string("", "PickMyTrade token", group = grpA)
 pmtAcct   = input.string("", "Tradovate account id", group = grpA)
 pmtSym    = input.string("MNQ1!", "Broker symbol", group = grpA)
@@ -344,6 +344,25 @@ f_size(float budget, float ptDist) =>
 // TP resolver (ORB/IB)
 f_tp(int d, float rH, float rL, float rg, float dHi, float dLo, string tpL, string tpS) =>
     d == 1 ? (tpL == "HOD/LOD" ? dHi : tpL == "Ext 10%" ? rH + 0.10*rg : tpL == "Ext 30%" ? rH + 0.30*rg : tpL == "Ext 50%" ? rH + 0.50*rg : rH) : (tpS == "HOD/LOD" ? dLo : tpS == "Ext 10%" ? rL - 0.10*rg : tpS == "Ext 30%" ? rL - 0.30*rg : tpS == "Ext 50%" ? rL - 0.50*rg : rL)
+
+// ---------------------------------------------------------------- the PickMyTrade message, built once
+// Defined up here because every order below now carries its own copy as `alert_message`. That is what makes an
+// "Order fills only" alert work: TradingView's {{strategy.order.alert_message}} placeholder resolves to this
+// string, and with nothing to resolve to it posts the placeholder's own literal text, which is not JSON and
+// comes back 415 Unsupported Media Type. The same string is what the alert() calls at the bottom send, so
+// EITHER alert condition produces identical JSON - but pick ONE. "Order fills and alert() function calls"
+// sends both, and that is two orders per signal.
+f_pmt(string dir, float q, float entry, float stopPx, float tgtPx) =>
+    qq   = math.max(math.round(q), 1)
+    body = '{"token":"' + pmtToken + '","account_id":"' + pmtAcct + '","symbol":"' + pmtSym +
+       '","data":"' + dir + '","action":"' + dir + '","quantity":' + str.tostring(qq) +
+       ',"order_type":"' + pmtType + '"'
+    if pmtSlTp != "Do not send" and not na(entry) and not na(stopPx) and not na(tgtPx)
+        slv = pmtSlTp == "Points from entry" ? math.abs(entry - stopPx) : stopPx
+        tpv = pmtSlTp == "Points from entry" ? math.abs(tgtPx - entry) : tgtPx
+        body := body + ',"sl":' + str.tostring(math.round_to_mintick(slv)) + ',"tp":' + str.tostring(math.round_to_mintick(tpv))
+    body + '}'
+
 
 // The seat: an ORB or IB position that is open right now. Declared HERE, filled in at the bottom of the ORB/IB
 // engines, and read by Halyard above them - so Halyard sees the value as of the previous chart bar. On a 1m
@@ -594,10 +613,10 @@ if halNewBar and halTrDir != 0
     halBars15 += 1
 if halMaxBars > 0 and halTrDir != 0 and halBars15 >= halMaxBars
     if ordersOn
-        strategy.close("HAL-L", comment = "time stop")
-        strategy.close("HAL-S", comment = "time stop")
-        strategy.close("HAL-RL", comment = "time stop")
-        strategy.close("HAL-RS", comment = "time stop")
+        strategy.close("HAL-L", comment = "time stop", alert_message = f_pmt("sell", halQty, float(na), float(na), float(na)))
+        strategy.close("HAL-S", comment = "time stop", alert_message = f_pmt("buy", halQty, float(na), float(na), float(na)))
+        strategy.close("HAL-RL", comment = "time stop", alert_message = f_pmt("sell", halQty, float(na), float(na), float(na)))
+        strategy.close("HAL-RS", comment = "time stop", alert_message = f_pmt("buy", halQty, float(na), float(na), float(na)))
     if halState == 1
         halState := (halTrDir == 1 ? close < halEnt : close > halEnt) ? 2 : 3
     halExitDir := halTrDir
@@ -644,8 +663,8 @@ if halEnterL
     halEntDir  := 1
     halLongsToday += 1
     if ordersOn
-        strategy.entry("HAL-L", strategy.long, qty = q)
-        strategy.exit("HAL-Lx", from_entry = "HAL-L", stop = sl, limit = tp)
+        strategy.entry("HAL-L", strategy.long, qty = q, alert_message = f_pmt("buy", q, hal15C, sl, tp))
+        strategy.exit("HAL-Lx", from_entry = "HAL-L", stop = sl, limit = tp, alert_message = f_pmt("sell", q, float(na), float(na), float(na)))
 
 halEnterS = halBrkDn and halShortOK and halDayOK and halTrendOK and halSeatFree and halCapShortOK and halTrades < halMaxTrades and halTrDir == 0 and halState == 0
 if halEnterS
@@ -666,8 +685,8 @@ if halEnterS
     halEntDir  := -1
     halShortsToday += 1
     if ordersOn
-        strategy.entry("HAL-S", strategy.short, qty = q)
-        strategy.exit("HAL-Sx", from_entry = "HAL-S", stop = sl, limit = tp)
+        strategy.entry("HAL-S", strategy.short, qty = q, alert_message = f_pmt("sell", q, hal15C, sl, tp))
+        strategy.exit("HAL-Sx", from_entry = "HAL-S", stop = sl, limit = tp, alert_message = f_pmt("buy", q, float(na), float(na), float(na)))
 
 // --- Reversal trade (only if the FIRST trade closed at a LOSS) ---
 // OFF BY DEFAULT: Enable Reverse Trade ships unticked, so neither branch fires and the day's cap is 1 fill
@@ -693,8 +712,8 @@ if halRevL
     halEntDir  := 1
     halLongsToday += 1
     if ordersOn
-        strategy.entry("HAL-RL", strategy.long, qty = q)
-        strategy.exit("HAL-RLx", from_entry = "HAL-RL", stop = sl, limit = tp)
+        strategy.entry("HAL-RL", strategy.long, qty = q, alert_message = f_pmt("buy", q, hal15C, sl, tp))
+        strategy.exit("HAL-RLx", from_entry = "HAL-RL", stop = sl, limit = tp, alert_message = f_pmt("sell", q, float(na), float(na), float(na)))
 
 halRevS = halRevOn and runHAL and halNewBar and halState == 2 and halFirstDir == 1 and halShortOK and halDayOK and halSeatFree and halCapShortOK and halTrades < halMaxTrades and halTrDir == 0 and halLevels and hal15C < halRL
 if halRevS
@@ -714,8 +733,8 @@ if halRevS
     halEntDir  := -1
     halShortsToday += 1
     if ordersOn
-        strategy.entry("HAL-RS", strategy.short, qty = q)
-        strategy.exit("HAL-RSx", from_entry = "HAL-RS", stop = sl, limit = tp)
+        strategy.entry("HAL-RS", strategy.short, qty = q, alert_message = f_pmt("sell", q, hal15C, sl, tp))
+        strategy.exit("HAL-RSx", from_entry = "HAL-RS", stop = sl, limit = tp, alert_message = f_pmt("buy", q, float(na), float(na), float(na)))
 
 // ---------------------------------------------------------------- Halyard end-of-day flat
 // Never carry a position past the session its levels belong to, i.e. past 13:30 / 14:30 ET. This must fire on
@@ -733,10 +752,10 @@ if halRevS
 halDayFlat = halTrDir != 0 and (f_halSessionKey(time + chartMs) != halSessKey or halNewDay)
 if halDayFlat
     if ordersOn
-        strategy.close("HAL-L", comment = "day flat")
-        strategy.close("HAL-S", comment = "day flat")
-        strategy.close("HAL-RL", comment = "day flat")
-        strategy.close("HAL-RS", comment = "day flat")
+        strategy.close("HAL-L", comment = "day flat", alert_message = f_pmt("sell", halQty, float(na), float(na), float(na)))
+        strategy.close("HAL-S", comment = "day flat", alert_message = f_pmt("buy", halQty, float(na), float(na), float(na)))
+        strategy.close("HAL-RL", comment = "day flat", alert_message = f_pmt("sell", halQty, float(na), float(na), float(na)))
+        strategy.close("HAL-RS", comment = "day flat", alert_message = f_pmt("buy", halQty, float(na), float(na), float(na)))
     if halState == 1
         halState := (halTrDir == 1 ? close < halEnt : close > halEnt) ? 2 : 3
     halExitDir := halTrDir
@@ -985,15 +1004,16 @@ if runORB and or_dir != 0 and or_broke and not or_placed and not or_closed and h
     if (or_dir == 1 and low <= or_e1) or (or_dir == -1 and high >= or_e1)
         or_missed := true
 if runORB and or_dir != 0 and or_broke and not or_placed and not or_closed and orbWin and not flatten and (not noDbl or not or_oppBroke) and orbSz1 >= 1 and not halLive and not or_missed
+    orbTPnow = f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
     if ordersOn
         if or_dir == 1
-            strategy.entry("ORL", strategy.long, qty = orbSz1, limit = or_e1)
+            strategy.entry("ORL", strategy.long, qty = orbSz1, limit = or_e1, alert_message = f_pmt("buy", orbSz1, or_e1, or_zstop, orbTPnow))
             if or_useAdd and orbSz2 >= 1
-                strategy.entry("ORL2", strategy.long, qty = orbSz2, limit = or_e2)
+                strategy.entry("ORL2", strategy.long, qty = orbSz2, limit = or_e2, alert_message = f_pmt("buy", orbSz2, or_e2, or_zstop, orbTPnow))
         else
-            strategy.entry("ORS", strategy.short, qty = orbSz1, limit = or_e1)
+            strategy.entry("ORS", strategy.short, qty = orbSz1, limit = or_e1, alert_message = f_pmt("sell", orbSz1, or_e1, or_zstop, orbTPnow))
             if or_useAdd and orbSz2 >= 1
-                strategy.entry("ORS2", strategy.short, qty = orbSz2, limit = or_e2)
+                strategy.entry("ORS2", strategy.short, qty = orbSz2, limit = or_e2, alert_message = f_pmt("sell", orbSz2, or_e2, or_zstop, orbTPnow))
     or_placed := true                       // the setup is tracked in both modes; only the order is optional
 if or_placed and not or_closed
     if or_dir == 1
@@ -1021,10 +1041,10 @@ if orbBE and not or_beDone and (or_f1 or or_f2) and not or_closed
         or_curStop := math.min(or_curStop, or_avgPx)
         or_beDone := true
 if ordersOn and not na(or_curStop)
-    strategy.exit("ORLx",  from_entry = "ORL",  stop = or_curStop, limit = or_curTP)
-    strategy.exit("ORL2x", from_entry = "ORL2", stop = or_curStop, limit = or_curTP)
-    strategy.exit("ORSx",  from_entry = "ORS",  stop = or_curStop, limit = or_curTP)
-    strategy.exit("ORS2x", from_entry = "ORS2", stop = or_curStop, limit = or_curTP)
+    strategy.exit("ORLx",  from_entry = "ORL",  stop = or_curStop, limit = or_curTP, alert_message = f_pmt("sell", orbSz1, float(na), float(na), float(na)))
+    strategy.exit("ORL2x", from_entry = "ORL2", stop = or_curStop, limit = or_curTP, alert_message = f_pmt("sell", orbSz2, float(na), float(na), float(na)))
+    strategy.exit("ORSx",  from_entry = "ORS",  stop = or_curStop, limit = or_curTP, alert_message = f_pmt("buy", orbSz1, float(na), float(na), float(na)))
+    strategy.exit("ORS2x", from_entry = "ORS2", stop = or_curStop, limit = or_curTP, alert_message = f_pmt("buy", orbSz2, float(na), float(na), float(na)))
 if (or_f1 or or_f2) and not or_closed and not na(or_curStop)
     if or_dir == 1 and (low <= or_curStop or high >= or_curTP)
         or_closed := true
@@ -1241,15 +1261,16 @@ if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and ib
     if (ib_dir == 1 and low <= ib_e1) or (ib_dir == -1 and high >= ib_e1)
         ib_missed := true
 if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and ibWin and not flatten and (not noDbl or not ib_oppBroke) and ibSz1 >= 1 and not ibHeld and not ib_missed
+    ibTPnow = f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
     if ordersOn
         if ib_dir == 1
-            strategy.entry("IBL", strategy.long, qty = ibSz1, limit = ib_e1)
+            strategy.entry("IBL", strategy.long, qty = ibSz1, limit = ib_e1, alert_message = f_pmt("buy", ibSz1, ib_e1, ib_zstop, ibTPnow))
             if ib_useAdd and ibSz2 >= 1
-                strategy.entry("IBL2", strategy.long, qty = ibSz2, limit = ib_e2)
+                strategy.entry("IBL2", strategy.long, qty = ibSz2, limit = ib_e2, alert_message = f_pmt("buy", ibSz2, ib_e2, ib_zstop, ibTPnow))
         else
-            strategy.entry("IBS", strategy.short, qty = ibSz1, limit = ib_e1)
+            strategy.entry("IBS", strategy.short, qty = ibSz1, limit = ib_e1, alert_message = f_pmt("sell", ibSz1, ib_e1, ib_zstop, ibTPnow))
             if ib_useAdd and ibSz2 >= 1
-                strategy.entry("IBS2", strategy.short, qty = ibSz2, limit = ib_e2)
+                strategy.entry("IBS2", strategy.short, qty = ibSz2, limit = ib_e2, alert_message = f_pmt("sell", ibSz2, ib_e2, ib_zstop, ibTPnow))
     ib_placed := true
 if ib_placed and not ib_closed
     if ib_dir == 1
@@ -1277,10 +1298,10 @@ if ibBE and not ib_beDone and (ib_f1 or ib_f2) and not ib_closed
         ib_curStop := math.min(ib_curStop, ib_avgPx)
         ib_beDone := true
 if ordersOn and not na(ib_curStop)
-    strategy.exit("IBLx",  from_entry = "IBL",  stop = ib_curStop, limit = ib_curTP)
-    strategy.exit("IBL2x", from_entry = "IBL2", stop = ib_curStop, limit = ib_curTP)
-    strategy.exit("IBSx",  from_entry = "IBS",  stop = ib_curStop, limit = ib_curTP)
-    strategy.exit("IBS2x", from_entry = "IBS2", stop = ib_curStop, limit = ib_curTP)
+    strategy.exit("IBLx",  from_entry = "IBL",  stop = ib_curStop, limit = ib_curTP, alert_message = f_pmt("sell", ibSz1, float(na), float(na), float(na)))
+    strategy.exit("IBL2x", from_entry = "IBL2", stop = ib_curStop, limit = ib_curTP, alert_message = f_pmt("sell", ibSz2, float(na), float(na), float(na)))
+    strategy.exit("IBSx",  from_entry = "IBS",  stop = ib_curStop, limit = ib_curTP, alert_message = f_pmt("buy", ibSz1, float(na), float(na), float(na)))
+    strategy.exit("IBS2x", from_entry = "IBS2", stop = ib_curStop, limit = ib_curTP, alert_message = f_pmt("buy", ibSz2, float(na), float(na), float(na)))
 if (ib_f1 or ib_f2) and not ib_closed and not na(ib_curStop)
     if ib_dir == 1 and (low <= ib_curStop or high >= ib_curTP)
         ib_closed := true
@@ -1413,19 +1434,19 @@ if ibP_act
 // The 15:30 flatten closes the ORB/IB entries BY ID. Halyard has its own 13:30/14:30 ET boundary and closes its
 // own entries there, so neither engine can ever flatten the other's trade.
 if ordersOn and flatten
-    strategy.close("ORL",  comment = "EOD flat")
-    strategy.close("ORL2", comment = "EOD flat")
-    strategy.close("ORS",  comment = "EOD flat")
-    strategy.close("ORS2", comment = "EOD flat")
-    strategy.close("IBL",  comment = "EOD flat")
-    strategy.close("IBL2", comment = "EOD flat")
-    strategy.close("IBS",  comment = "EOD flat")
-    strategy.close("IBS2", comment = "EOD flat")
+    strategy.close("ORL",  comment = "EOD flat", alert_message = f_pmt("sell", orbSz1, float(na), float(na), float(na)))
+    strategy.close("ORL2", comment = "EOD flat", alert_message = f_pmt("sell", orbSz2, float(na), float(na), float(na)))
+    strategy.close("ORS",  comment = "EOD flat", alert_message = f_pmt("buy", orbSz1, float(na), float(na), float(na)))
+    strategy.close("ORS2", comment = "EOD flat", alert_message = f_pmt("buy", orbSz2, float(na), float(na), float(na)))
+    strategy.close("IBL",  comment = "EOD flat", alert_message = f_pmt("sell", ibSz1, float(na), float(na), float(na)))
+    strategy.close("IBL2", comment = "EOD flat", alert_message = f_pmt("sell", ibSz2, float(na), float(na), float(na)))
+    strategy.close("IBS",  comment = "EOD flat", alert_message = f_pmt("buy", ibSz1, float(na), float(na), float(na)))
+    strategy.close("IBS2", comment = "EOD flat", alert_message = f_pmt("buy", ibSz2, float(na), float(na), float(na)))
 // The daily max loss is the ONE rule that reaches across setups: it is an account circuit breaker, so it closes
 // everything that is open, Halyard included, and cancels every resting order.
 if dayHalt
     if ordersOn
-        strategy.close_all(comment = "Daily max loss")
+        strategy.close_all(comment = "Daily max loss", alert_message = f_pmt(strategy.position_size > 0 ? "sell" : "buy", math.abs(strategy.position_size), float(na), float(na), float(na)))
         strategy.cancel_all()
     halTrDir := 0
 
@@ -1444,17 +1465,6 @@ if dayHalt
 //     absolute price under that method is what produces an order with no usable bracket.
 // None of this is a substitute for checking the field names against PickMyTrade's own alert generator and
 // paper-testing a round trip. Their parser is the authority; this is written to their documented schema.
-f_pmt(string dir, float q, float entry, float stopPx, float tgtPx) =>
-    qq   = math.max(math.round(q), 1)
-    body = '{"token":"' + pmtToken + '","account_id":"' + pmtAcct + '","symbol":"' + pmtSym +
-       '","data":"' + dir + '","action":"' + dir + '","quantity":' + str.tostring(qq) +
-       ',"order_type":"' + pmtType + '"'
-    if pmtSlTp != "Do not send" and not na(entry) and not na(stopPx) and not na(tgtPx)
-        slv = pmtSlTp == "Points from entry" ? math.abs(entry - stopPx) : stopPx
-        tpv = pmtSlTp == "Points from entry" ? math.abs(tgtPx - entry) : tgtPx
-        body := body + ',"sl":' + str.tostring(math.round_to_mintick(slv)) + ',"tp":' + str.tostring(math.round_to_mintick(tpv))
-    body + '}'
-
 liveORB   = (or_f1 or or_f2) and not or_closed
 autoEntry = halLive ? halEnt : liveORB ? or_avgPx : ib_avgPx
 autoStop  = halLive ? halStp : liveORB ? or_curStop : ib_curStop
