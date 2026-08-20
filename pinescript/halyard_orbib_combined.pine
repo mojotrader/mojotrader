@@ -180,11 +180,15 @@ orbMinRngPct = input.float(0.40, "Min ORB range (% of price, 0 = off)", minval =
 // ---------------------------------------------------------------- Automation (PickMyTrade webhook -> Tradovate)
 grpA      = "Automation - PickMyTrade"
 autoOn    = input.bool(false, "Enable webhook alerts", group = grpA,
-     tooltip = "Create ONE alert, condition 'alert() function calls only', and paste PickMyTrade's webhook URL. ONE - if you also keep a second alert on this strategy with a JSON message of your own (the order-fill template), BOTH post to PickMyTrade and you get TWO trades per signal. Turn the manual break alerts OFF on this alert too: they are plain text and the webhook rejects them with 415. The seat rules keep the three setups from ever being open at once, so each message maps to a single setup. Silent in Indicator mode.")
+     tooltip = "VERIFY THE FIELD NAMES against PickMyTrade's own alert generator before running this with real money, and paper-test one round trip first - the JSON below is written to their documented schema but their parser is the authority, and a field it does not recognise is not an error, it is an order you did not intend. Create ONE alert, condition 'alert() function calls only', and paste PickMyTrade's webhook URL. ONE - if you also keep a second alert on this strategy with a JSON message of your own (the order-fill template), BOTH post to PickMyTrade and you get TWO trades per signal. Turn the manual break alerts OFF on this alert too: they are plain text and the webhook rejects them with 415. The seat rules keep the three setups from ever being open at once, so each message maps to a single setup. Silent in Indicator mode.")
 pmtToken  = input.string("", "PickMyTrade token", group = grpA)
 pmtAcct   = input.string("", "Tradovate account id", group = grpA)
 pmtSym    = input.string("MNQ1!", "Broker symbol", group = grpA)
 pmtType   = input.string("market", "Order type", options = ["market", "limit"], group = grpA)
+pmtSlTp   = input.string("Points from entry", "SL / TP sent as", options = ["Points from entry", "Absolute price", "Do not send"], group = grpA,
+     tooltip = "PickMyTrade's Point/Dollar method reads sl and tp as the DISTANCE from the entry, which is the default here. 'Absolute price' sends the level itself - only correct if your PickMyTrade SL/TP method is set to price. Getting this wrong is why an order arrives with no bracket: a stop distance of 29604 points on MNQ is not a stop. 'Do not send' leaves the exit entirely to the flatten message below.")
+pmtExit   = input.string("Opposite-side order", "How an exit is sent", options = ["Opposite-side order", "Do not send - the bracket exits"], group = grpA,
+     tooltip = "When the strategy closes a trade, flatten by sending the OPPOSITE side for the same number of contracts - which nets to flat on a futures account. This replaces an earlier message that used an \"action\":\"close\" verb with quantity 0: PickMyTrade did not read it as a flatten and opened a fresh 1-lot LONG instead, with no stop and no target. There is now no close verb anywhere in this script.")
 
 // ---------------------------------------------------------------- Break alerts (manual trading)
 grpBA     = "Break alerts (manual)"
@@ -573,12 +577,14 @@ halTrendOK = not halUseTrend or (not na(halEmaVal) and hal15C < halEmaVal)
 // assumes as well. halExitNow is what the PickMyTrade webhook reads: Halyard's fills are known here, exactly
 // when they happen, and never have to be inferred from the netted position.
 halExitNow = false
+halExitDir = 0
 if halTrDir != 0 and bar_index > halEntBar
     halStopHit = halTrDir == 1 ? low <= halStp : high >= halStp
     halTpHit   = halTrDir == 1 ? high >= halTgt : low <= halTgt
     if halStopHit or halTpHit
         if halState == 1
             halState := halStopHit ? 2 : 3
+        halExitDir := halTrDir
         halTrDir := 0
         halExitNow := true
 
@@ -594,6 +600,7 @@ if halMaxBars > 0 and halTrDir != 0 and halBars15 >= halMaxBars
         strategy.close("HAL-RS", comment = "time stop")
     if halState == 1
         halState := (halTrDir == 1 ? close < halEnt : close > halEnt) ? 2 : 3
+    halExitDir := halTrDir
     halTrDir := 0
     halExitNow := true
 
@@ -732,6 +739,7 @@ if halDayFlat
         strategy.close("HAL-RS", comment = "day flat")
     if halState == 1
         halState := (halTrDir == 1 ? close < halEnt : close > halEnt) ? 2 : 3
+    halExitDir := halTrDir
     halTrDir := 0
     halExitNow := true
 
@@ -1422,29 +1430,48 @@ if dayHalt
     halTrDir := 0
 
 // ---------------------------------------------------------------- Automation: PickMyTrade webhook
-f_pmt(string act, float q, float slp, float tpp) =>
-    '{"token":"' + pmtToken + '","account_id":"' + pmtAcct + '","symbol":"' + pmtSym +
-      '","action":"' + act + '","quantity":' + str.tostring(q) +
-      ',"order_type":"' + pmtType +
-      '","sl":' + str.tostring(math.round_to_mintick(slp)) +
-      ',"tp":' + str.tostring(math.round_to_mintick(tpp)) + '}'
-liveORB  = (or_f1 or or_f2) and not or_closed
-autoStop = halLive ? halStp : liveORB ? or_curStop : ib_curStop
-autoTP   = halLive ? halTgt : liveORB ? or_curTP  : ib_curTP
+// THE DIRECTION IS THE DANGEROUS FIELD. An earlier version of this message named it "action" and sent
+// "action":"close" with quantity 0 to flatten. PickMyTrade did not read that as a flatten: it opened a fresh
+// 1-lot LONG at the moment a winning short covered, with no stop and no target and no matching trade anywhere
+// in the strategy. The lesson is that an unrecognised field is not an error - the order still goes in, on
+// whatever the defaults are. So:
+//   - the direction is sent under BOTH "data" (PickMyTrade's documented key) and "action", always with the
+//     same buy/sell value, so whichever one their parser reads it gets the same answer;
+//   - there is no "close" verb anywhere any more. An exit is an ordinary opposite-side order for the same
+//     number of contracts, which nets to flat on a futures account;
+//   - quantity is never 0 - it is rounded and floored at 1;
+//   - sl / tp default to the DISTANCE from the entry, which is PickMyTrade's Point/Dollar method. Sending the
+//     absolute price under that method is what produces an order with no usable bracket.
+// None of this is a substitute for checking the field names against PickMyTrade's own alert generator and
+// paper-testing a round trip. Their parser is the authority; this is written to their documented schema.
+f_pmt(string dir, float q, float entry, float stopPx, float tgtPx) =>
+    qq   = math.max(math.round(q), 1)
+    body = '{"token":"' + pmtToken + '","account_id":"' + pmtAcct + '","symbol":"' + pmtSym +
+       '","data":"' + dir + '","action":"' + dir + '","quantity":' + str.tostring(qq) +
+       ',"order_type":"' + pmtType + '"'
+    if pmtSlTp != "Do not send" and not na(entry) and not na(stopPx) and not na(tgtPx)
+        slv = pmtSlTp == "Points from entry" ? math.abs(entry - stopPx) : stopPx
+        tpv = pmtSlTp == "Points from entry" ? math.abs(tgtPx - entry) : tgtPx
+        body := body + ',"sl":' + str.tostring(math.round_to_mintick(slv)) + ',"tp":' + str.tostring(math.round_to_mintick(tpv))
+    body + '}'
 
-// WHY THE POSITION IS NOT READ AS ONE NUMBER ANY MORE. A market order sent under process_orders_on_close is
-// filled at THIS bar's close, i.e. after the script has finished running on the bar, so strategy.position_size
-// only shows it on the NEXT chart bar. Halyard's entries are exactly those orders: a 15m break that alerts at
-// 02:15 on a 5m chart would have posted its webhook at 02:20, one bar late, and at that moment the net-position
-// read would have been the source of the quantity too. So the three setups are now split:
+liveORB   = (or_f1 or or_f2) and not or_closed
+autoEntry = halLive ? halEnt : liveORB ? or_avgPx : ib_avgPx
+autoStop  = halLive ? halStp : liveORB ? or_curStop : ib_curStop
+autoTP    = halLive ? halTgt : liveORB ? or_curTP  : ib_curTP
+
+// WHY THE POSITION IS NOT READ AS ONE NUMBER. A market order sent under process_orders_on_close is filled at
+// THIS bar's close, i.e. after the script has finished running on the bar, so strategy.position_size only shows
+// it on the NEXT chart bar. Halyard's entries are exactly those orders: a 15m break that alerts at 02:15 on a
+// 5m chart would post its webhook at 02:20, one bar late, and the quantity would read as zero on the bar the
+// order was actually sent. So the setups are split:
 //   - HALYARD alerts off its own state machine, on the bar the order is sent, with its own contract count.
 //   - ORB / IB alert off the net size of ORB/IB entries ONLY (Halyard's ids are excluded), which is exact for
 //     their resting limits and their stop/target exits - those fill intrabar and are visible the same bar.
 //   - Every market CLOSE (15:30 flatten, daily-halt) fires on the bar it is sent, and the echo the position
 //     read shows one bar later is dropped.
-// QUANTITY on a buy/sell is now the contracts THAT ORDER adds, not the resulting net position: an ORB
-// average-down used to send "buy 2" then "buy 4" for a 4-lot setup. Check this against your PickMyTrade
-// template before trusting it live.
+// QUANTITY on an entry is the contracts THAT ORDER adds, not the resulting net position: an ORB average-down
+// used to send "buy 2" then "buy 4" for a 4-lot setup.
 f_orbibQty() =>
     q = 0.0
     if strategy.opentrades > 0
@@ -1459,14 +1486,22 @@ mktClose = strategy.position_size != 0 and ((flatten and not flatten[1]) or (day
 buyNow   = oiQty > 0 and (oiPrev <= 0 or oiQty > oiPrev)
 sellNow  = oiQty < 0 and (oiPrev >= 0 or oiQty < oiPrev)
 closeNow = oiQty == 0 and oiPrev != 0 and not mktClose[1]
+sendExit = pmtExit == "Opposite-side order"
+
+// --- entries ---
 if autoOn and ordersOn and halEntered
-    alert(f_pmt(halEntDir == 1 ? "buy" : "sell", halQty, halStp, halTgt), alert.freq_once_per_bar)
+    alert(f_pmt(halEntDir == 1 ? "buy" : "sell", halQty, halEnt, halStp, halTgt), alert.freq_once_per_bar)
 if autoOn and ordersOn and buyNow
-    alert(f_pmt("buy",  math.abs(oiQty - oiPrev), autoStop, autoTP), alert.freq_once_per_bar)
+    alert(f_pmt("buy",  math.abs(oiQty - oiPrev), autoEntry, autoStop, autoTP), alert.freq_once_per_bar)
 if autoOn and ordersOn and sellNow
-    alert(f_pmt("sell", math.abs(oiQty - oiPrev), autoStop, autoTP), alert.freq_once_per_bar)
-if autoOn and ordersOn and (halExitNow or closeNow or mktClose)
-    alert(f_pmt("close", 0, 0.0, 0.0), alert.freq_once_per_bar)
+    alert(f_pmt("sell", math.abs(oiQty - oiPrev), autoEntry, autoStop, autoTP), alert.freq_once_per_bar)
+// --- exits: an opposite-side order for the size that is open, no bracket on it ---
+if autoOn and ordersOn and sendExit and halExitNow
+    alert(f_pmt(halExitDir == 1 ? "sell" : "buy", halQty, float(na), float(na), float(na)), alert.freq_once_per_bar)
+if autoOn and ordersOn and sendExit and closeNow
+    alert(f_pmt(oiPrev > 0 ? "sell" : "buy", math.abs(oiPrev), float(na), float(na), float(na)), alert.freq_once_per_bar)
+if autoOn and ordersOn and sendExit and mktClose
+    alert(f_pmt(strategy.position_size > 0 ? "sell" : "buy", math.abs(strategy.position_size), float(na), float(na), float(na)), alert.freq_once_per_bar)
 
 // ---------------------------------------------------------------- Break alerts (fire once when each range breaks)
 if brkAlerts and runHAL and (halBrkUp or halBrkDn)
