@@ -33,9 +33,26 @@
 //        the stop, on the correct side of it. Below that the limit is pulled and the day is simply not traded.
 //
 //   Everything else is untouched: the same ranges and clocks, the same low-first/high-first direction rule, the
-//   same close-depth, min-range, weekday, double-break and daily-loss filters, the same stop at the far range
-//   edge, the same range-extension targets, the same seat precedence, the same cutoffs and flattens, the same
-//   Halyard engine, the same probability study and the same webhook.
+//   same close-depth, min-range, weekday, double-break and daily-loss filters, the same seat precedence, the
+//   same cutoffs and flattens, the same Halyard engine, the same probability study and the same webhook.
+//
+// >>> SELECTABLE TARGETS AND STOPS (ORB / IB) <<<
+//   What used to be four hardcoded target strings and a stop welded to the far range edge is now the
+//   "Targets & stops - ORB / IB" input group. Defaults reproduce the old behaviour exactly, so an untouched
+//   copy of this file trades identically to the previous version.
+//     TARGET, per setup AND per direction (four dropdowns): Range edge (the broken level, no extension),
+//       Ext 10% / 30% / 50% (that far beyond it, as a fraction of the range), or HOD/LOD (the session high for
+//       a long, low for a short, taken AS IT STANDS ON THE FILL BAR and frozen there - a target that kept
+//       tracking the running high could never be reached, since price cannot exceed its own high).
+//     STOP, per setup: 50%, 75% or 100% of the range, measured as a retracement from the edge that broke. For
+//       a LONG, 100% is the range low, 75% is a quarter of the way up from it, 50% is the midpoint; mirrored
+//       for a short. This is the convention the probability table's "75% line" already used.
+//   ONE INTERACTION IS WORTH KNOWING. The stop choice feeds the entry filter: the setup is only armed while the
+//   VWAP sits at least orbibMinStopFrac (10%) of the range clear of the stop. A 100% stop leaves the whole
+//   range for the VWAP to sit in; a 50% stop leaves only the half nearest the breaking edge. Tightening the
+//   stop therefore does not just cut the risk per trade, it also cuts how many days qualify at all - expect
+//   noticeably fewer trades at 50%. Halyard is unaffected: it keeps its own Risk:Reward target and its own
+//   stop modes, in its own input groups.
 //
 // THE 15-MINUTE ENGINE (Halyard), in short
 //   Every chart bar is put in a 15-minute bucket (UTC-aligned, which is where TradingView's own 15m bars sit).
@@ -200,6 +217,20 @@ ibDepth   = input.float(75, "IB bias: max close depth into the range (%)", minva
 orbMinRngPct = input.float(0.40, "Min ORB range (% of price, 0 = off)", minval = 0, step = 0.05, group = gFilt,
      tooltip = "Skip ORB setups whose 15-min opening range is smaller than this % of price (range / range-low * 100). IB is NOT filtered. Set 0 to disable.")
 
+// ---------------------------------------------------------------- Targets & stops (ORB / IB)
+// Both are measured against the setup's OWN range (its high, its low, and the distance between them), so they
+// mean the same thing on any instrument and at any range size. Halyard is not here - it sizes its target off a
+// Risk:Reward multiple and stops on its own 15m range edge, which is a different scheme; see its own groups.
+gExit    = "Targets & stops - ORB / IB"
+tpTip    = "Range edge = the level that broke, i.e. no extension. Ext 10/30/50% = that far BEYOND the broken edge, as a fraction of the range. HOD/LOD = the session high (long) or low (short) AS IT STANDS ON THE FILL BAR, and it is frozen there - a target that kept tracking the running high could never be reached, since price cannot exceed its own high. Before the fill the box previews it against the high so far, so it moves until the entry fills and then stops."
+orbTpLIn = input.string("Ext 10%", "ORB target - LONG",  options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gExit, tooltip = tpTip)
+orbTpSIn = input.string("Ext 30%", "ORB target - SHORT", options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gExit)
+ibTpLIn  = input.string("Ext 30%", "IB target - LONG",   options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gExit)
+ibTpSIn  = input.string("Ext 30%", "IB target - SHORT",  options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gExit)
+slTip    = "How far back INTO the range the stop sits, measured from the edge that broke - the same convention the probability table's '75% line' uses. For a LONG: 100% is the range low, 75% is a quarter of the way up from it, 50% is the midpoint. Mirrored for a short.\n\nNOTE this interacts with the VWAP entry: a tighter stop leaves less room between it and the entry, and the setup is only armed while the VWAP is at least 10% of the range clear of the stop (orbibMinStopFrac). A 50% stop therefore only trades days whose VWAP has stayed close to the breaking edge, and will take noticeably fewer trades than 100%."
+orbSlIn  = input.string("100% of range (far edge)", "ORB stop", options = ["50% of range", "75% of range", "100% of range (far edge)"], group = gExit, tooltip = slTip)
+ibSlIn   = input.string("100% of range (far edge)", "IB stop",  options = ["50% of range", "75% of range", "100% of range (far edge)"], group = gExit)
+
 // ---------------------------------------------------------------- Automation (PickMyTrade webhook -> Tradovate)
 grpA      = "Automation - PickMyTrade"
 autoOn    = input.bool(false, "Enable webhook alerts", group = grpA,
@@ -273,8 +304,9 @@ orbLong   = true
 orbShort  = true
 orbBreak  = "Close beyond"
 orbAvg    = true              // UNREAD: the VWAP entry is a single unit, there is no average-down level
-orbTpL    = "Ext 10%"
-orbTpS    = "Ext 30%"
+orbTpL    = orbTpLIn          // target per direction   (Targets & stops group)
+orbTpS    = orbTpSIn
+orbSl     = orbSlIn           // stop as a % of the range (Targets & stops group)
 orbBE     = false
 orbQty1   = orbQty1In         // contracts on the ORB entry              (Risk sizing group)
 orbQty2   = orbQty2In         // UNREAD: no average-down unit
@@ -285,8 +317,9 @@ ibLong    = true
 ibShort   = true
 ibBreak   = "Wick (touch)"
 ibAvg     = true              // UNREAD: see orbAvg
-ibTpL     = "Ext 30%"
-ibTpS     = "Ext 30%"
+ibTpL     = ibTpLIn           // target per direction   (Targets & stops group)
+ibTpS     = ibTpSIn
+ibSl      = ibSlIn            // stop as a % of the range (Targets & stops group)
 ibBE      = false
 ibQty1    = ibQty1In          // contracts on the IB entry               (Risk sizing group)
 ibQty2    = ibQty2In          // UNREAD: no average-down unit
@@ -394,6 +427,15 @@ f_size(float budget, float ptDist) =>
 // TP resolver (ORB/IB)
 f_tp(int d, float rH, float rL, float rg, float dHi, float dLo, string tpL, string tpS) =>
     d == 1 ? (tpL == "HOD/LOD" ? dHi : tpL == "Ext 10%" ? rH + 0.10*rg : tpL == "Ext 30%" ? rH + 0.30*rg : tpL == "Ext 50%" ? rH + 0.50*rg : rH) : (tpS == "HOD/LOD" ? dLo : tpS == "Ext 10%" ? rL - 0.10*rg : tpS == "Ext 30%" ? rL - 0.30*rg : tpS == "Ext 50%" ? rL - 0.50*rg : rL)
+
+// STOP resolver (ORB/IB): the stop as a RETRACEMENT of the range, measured from the edge that broke. This is
+// the same convention the probability table's "75% line" uses, so the two agree by construction.
+//   LONG  (broke the high): 100% -> the range low, 75% -> a quarter of the way up from it, 50% -> the midpoint.
+//   SHORT (broke the low) : mirrored off the range high.
+// Anything other than the two tighter strings falls through to 100%, so the far edge stays the default.
+f_sl(int d, float rH, float rL, float rg, string mode) =>
+    f = mode == "50% of range" ? 0.50 : mode == "75% of range" ? 0.75 : 1.00
+    d == 1 ? rH - f * rg : rL + f * rg
 
 // The seat: an ORB or IB position that is open right now. Declared HERE, filled in at the bottom of the ORB/IB
 // engines, and read by Halyard above them - so Halyard sees the value as of the previous chart bar. On a 1m
@@ -977,10 +1019,10 @@ if or_rDone and not na(or_rH) and or_rH > or_rL
     orbDepF = orbDepth / 100.0                    // how deep the close may sit, measured from the breaking level
     if orbLong and or_lf and or_pos >= 1.0 - orbDepF
         or_dir := 1
-        or_zstop := or_rL                     // the stop is ALWAYS the far side of the range
+        or_zstop := f_sl(1, or_rH, or_rL, or_rng, orbSl)
     else if orbShort and (not or_lf) and or_pos <= orbDepF
         or_dir := -1
-        or_zstop := or_rH                     // the stop is ALWAYS the far side of the range
+        or_zstop := f_sl(-1, or_rH, or_rL, or_rng, orbSl)
 
 // ---- THE ENTRY, RE-PRICED EVERY BAR ----
 // or_e1 is the anchored VWAP as it stands on THIS bar, not a level frozen when the range closed. Everything
@@ -1237,10 +1279,10 @@ if ib_rDone and not na(ib_rH) and ib_rH > ib_rL
     ibDepF = ibDepth / 100.0
     if ibLong and ib_lf and ib_pos >= 1.0 - ibDepF
         ib_dir := 1
-        ib_zstop := ib_rL                     // the stop is ALWAYS the far side of the range
+        ib_zstop := f_sl(1, ib_rH, ib_rL, ib_rng, ibSl)
     else if ibShort and (not ib_lf) and ib_pos <= ibDepF
         ib_dir := -1
-        ib_zstop := ib_rH                     // the stop is ALWAYS the far side of the range
+        ib_zstop := f_sl(-1, ib_rH, ib_rL, ib_rng, ibSl)
 
 // ---- THE ENTRY, RE-PRICED EVERY BAR (same rule as the ORB, same VWAP) ----
 float ib_e1 = ib_dir != 0 ? avwap : na
@@ -1681,8 +1723,8 @@ if showInfo and barstate.islast
          text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 8,  "ENTRY: limit at the 09:30 ANCHORED VWAP",                    text_color = color.orange,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 9,  "  re-priced every bar - the limit rides the VWAP",           text_color = color.silver,  text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 10, "Stop: always the range extreme (100%)",                      text_color = color.white,   text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 11, "Target: ORB L +10% / S +30% ; IB +30% extension",            text_color = color.white,   text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 10, "Stop: ORB " + orbSl + "  |  IB " + ibSl,                     text_color = color.white,   text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 11, "Target: ORB " + orbTpL + " L / " + orbTpS + " S  |  IB " + ibTpL + " L / " + ibTpS + " S", text_color = color.white, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 12, "One unit per setup - no avg-down (VWAP is one price)",       text_color = color.silver,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 13, "SEAT: Halyard > ORB > IB - one trade at a time",             text_color = color.aqua,    text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 14, orbCarry ? "ORB carry ON: unfilled ORB rests past 10:30" : "ORB carry off (unfilled ORB dies at 10:30)", text_color = orbCarry ? color.orange : color.gray, text_size = size.small, text_halign = text.align_left)
@@ -1698,6 +1740,10 @@ if showInfo and barstate.islast
 //   "From 25/50% PB"   : RESEARCH ROWS, not the entry any more. Start = the moment price retraces to that fib
 //                        depth of the range. Reach = share of armed setups that pull back that far. Kept so the
 //                        old fib entry can still be compared against the VWAP one on the same chart.
+// The level columns are FIXED research levels, not your settings: TP0/10/30/50 are the range edge and its
+// extensions, "75% line" and "100% line" are the two retracement depths. They do not move when you change the
+// target or stop dropdowns - that is the point, the table stays a constant yardstick you can re-read after
+// every settings change. Read the column that matches the setting you are testing.
 // Halyard is not in this table: it has no resting entry and no range-extension targets, so none of these rows
 // would mean anything for it.
 tPos  = tblPos == "Top right" ? position.top_right : tblPos == "Bottom left" ? position.bottom_left : tblPos == "Top left" ? position.top_left : position.bottom_right
@@ -1728,7 +1774,7 @@ if showTable and barstate.islast
     stA  = array.from(orP_act ? (orP_r50 ? 3 : orP_r25 ? 2 : 1) : 0, ibP_act ? (ibP_r50 ? 3 : ibP_r25 ? 2 : 1) : 0)
     rgA  = array.from(orP_act ? orP_rngP : na, ibP_act ? ibP_rngP : na)
     filA = array.from((or_f1 and not or_closed) ? 1 : 0, (ib_f1 and not ib_closed) ? 1 : 0)
-    hdr  = array.from("From FILL - by range size", "N", "Reach", "TP0", "TP10", "TP30", "TP50", "75% line", "STOP")
+    hdr  = array.from("From FILL - by range size", "N", "Reach", "TP0", "TP10", "TP30", "TP50", "75% line", "100% line")
     for c = 0 to 8
         table.cell(probTbl, c, 0, array.get(hdr, c), text_color = color.black, bgcolor = color.white, text_size = size.normal, text_halign = c == 0 ? text.align_left : text.align_center)
     // ---- section 1: from the fill, segmented by range size ----
@@ -1746,7 +1792,7 @@ if showTable and barstate.islast
             lbl  = (inTr ? "> " : "") + (bkt == 0 ? nm + " S <" + s1 : bkt == 1 ? nm + " M " + s1 + "-" + s2 : nm + " L >=" + s2)
             f_tblRow(s * 3 + bkt + 1, lbl, nn, "-", a2, a3, a4, a5, a1, a0, color.white, inTr ? cNow : here ? cWas : cOff)
     // ---- section 2: from the 25% / 50% pullback (research rows - not the entry) ----
-    hdr2 = array.from("From PULLBACK (research)", "N", "Reach", "TP0", "TP10", "TP30", "TP50", "75% line", "STOP")
+    hdr2 = array.from("From PULLBACK (research)", "N", "Reach", "TP0", "TP10", "TP30", "TP50", "75% line", "100% line")
     for c = 0 to 8
         table.cell(probTbl, c, 7, array.get(hdr2, c), text_color = color.black, bgcolor = color.new(color.aqua, 20), text_size = size.normal, text_halign = c == 0 ? text.align_left : text.align_center)
     for s = 0 to 1

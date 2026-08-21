@@ -69,7 +69,22 @@ NY open**.
   own stop and would send the risk sizer's contract count to infinity. The setup only arms while
   the VWAP is at least `orbibMinStopFrac` (10%) of the range away from the stop.
 
+**Selectable targets and stops** (ORB / IB) live in the *Targets & stops* group. Defaults
+reproduce the previous hardcoded behaviour exactly.
+
+- **Target**, per setup *and* per direction: `Range edge` (the broken level, no extension),
+  `Ext 10% / 30% / 50%` (that far beyond it, as a fraction of the range), or `HOD/LOD` — the
+  session high for a long, low for a short, taken as it stands on the fill bar and frozen there.
+- **Stop**, per setup: `50%`, `75%` or `100%` of the range, measured as a retracement from the
+  edge that broke — for a long, 100% is the range low, 75% a quarter of the way up from it, 50%
+  the midpoint. Same convention the probability table's "75% line" already used.
+
+The stop choice feeds the entry filter: a setup only arms while the VWAP is at least 10% of the
+range clear of the stop, so tightening the stop also cuts how many days qualify. Expect
+noticeably fewer trades at 50%. Halyard is unaffected — it keeps its own Risk:Reward target and
+stop modes.
+
 Everything else is untouched: the same ranges and clocks, direction rule, close-depth /
-min-range / weekday / double-break / daily-loss filters, stop at the far range edge, range
-extension targets, seat precedence (Halyard > ORB > IB), cutoffs, flattens, the Halyard engine,
-the probability study and the webhook. Run it on a **1-minute** chart.
+min-range / weekday / double-break / daily-loss filters, seat precedence (Halyard > ORB > IB),
+cutoffs, flattens, the Halyard engine, the probability study and the webhook. Run it on a
+**1-minute** chart.
