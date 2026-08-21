@@ -157,3 +157,49 @@ resolution, gap fills, bracket arming, Wilder ATR, drawdown, DST boundaries,
 and a no-lookahead check that truncating future bars leaves earlier trades
 unchanged. A lookahead bug produces a beautiful equity curve, not an exception,
 which is why these are worth having.
+
+## Halyard + ORB + IB (combined)
+
+Port of `halyard_orbib_combined.pine` — three setups sharing one position under
+a strict precedence ("the seat"): a live Halyard trade holds it, ORB holds it
+against IB, and Halyard skips its break entirely if ORB or IB is live.
+
+```bash
+python3 import_parquet.py data.parquet --resolution 1m   # needs pyarrow
+python3 run_halyard.py --isolate --by-year
+```
+
+**Halyard is not an RTH strategy.** Its range candle is 10:30 Asia/Kolkata
+(05:00 UTC), which is 00:00 EST or 01:00 EDT, and its trading day rolls at
+13:30/14:30 ET. India has no daylight saving and the US does, so the New York
+hour of both anchors moves twice a year — the offset is read off each bar, not
+assumed. Backtesting this needs overnight data, roughly 00:00–15:30 ET.
+RTH-only bars silently disable Halyard altogether; `run_halyard.py` warns when
+the loaded data does not span enough hours.
+
+New engine pieces this required:
+
+- `backtest/portfolio.py` — multi-entry broker. Several named ids open at once,
+  each closable on its own, sharing a bracket per setup. The single-position
+  `Broker` cannot express `pyramiding > 0`. Netting is equivalent to Pine's
+  *provided no opposing ids are ever open together*, which the seat rules
+  guarantee; `net_position()` is exposed so a caller can assert it.
+- `backtest/tf.py` — builds 15m candles from 1m bars on the fly, so Halyard
+  trades exactly the 15m closes it would on a 15m chart while ORB/IB keep the
+  1m resolution their limit fills need. Includes the catch-up path, so a bucket
+  whose final bar never arrives is still closed rather than swallowed.
+- `import_parquet.py` — Parquet ingestion. **pyarrow is an ingestion-only
+  dependency**; once bars are cached the backtest runs on the standard library.
+
+### Two deliberate departures from the Pine
+
+Both are marked at their site in the source.
+
+`_ORB_FILL_TIMING` — the Pine's own fill tracker (`or_f1`) marks a unit filled
+on the same bar it places the limit, if that bar's range touches the level. An
+order placed at a bar's close cannot fill during that bar. This port treats the
+broker as authoritative, so a limit placed at bar N's close fills from N+1.
+
+`_HALYARD_SEAT_LAG` — Halyard reads the ORB/IB seat flag as it stood on the
+*previous* bar, because those engines run below it in the source. Reproduced
+rather than fixed, since changing it would change which trades are taken.
