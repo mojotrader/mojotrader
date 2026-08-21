@@ -1487,12 +1487,26 @@ if dayHalt
 // f_num turns an unknown level into 0 instead, which the schema accepts.
 f_num(float v) => na(v) ? "0" : str.tostring(math.round_to_mintick(v))
 
-f_pmt(string act, float q, float slp, float tpp) =>
+// `add` marks an ADD-ON to a position that is already open, and it changes three things in the payload:
+//   quantity  - the CALLER sends the INCREMENT, not the net (see the quantity note below);
+//   pyramid   - true lets PickMyTrade stack the fill onto the open position instead of treating a
+//               second same-direction signal as a fresh position;
+//   update_sl / update_tp - true amends the bracket already working on that symbol rather than
+//               creating a second one, so the whole enlarged position ends up under ONE stop and
+//               ONE target (both units of this strategy share the same two prices).
+// same_direction_ignore is pinned false: a same-direction signal must never be silently dropped, or
+// the add would vanish. reverse_order_close is pinned true so a direction flip flattens first - the
+// seat rules mean that should never happen, but if it ever did, flattening is the safe reading.
+f_pmt(string act, float q, float slp, float tpp, bool add) =>
     '{"token":"' + pmtToken + '","account_id":"' + pmtAcct + '","symbol":"' + pmtSym +
       '","data":"' + act + '","action":"' + act + '","quantity":' + str.tostring(q) +
       ',"order_type":"' + pmtType +
       '","sl":' + f_num(slp) +
-      ',"tp":' + f_num(tpp) + '}'
+      ',"tp":' + f_num(tpp) +
+      ',"pyramid":' + (add ? "true" : "false") +
+      ',"same_direction_ignore":false,"reverse_order_close":true' +
+      ',"update_sl":' + (add ? "true" : "false") +
+      ',"update_tp":' + (add ? "true" : "false") + '}'
 
 // WHICH setup's bracket to quote. This has to survive a lag: the alerts fire on a change in the NETTED
 // strategy.position_size, and that variable only reflects a fill on the bar AFTER the engine books it, so by
@@ -1517,20 +1531,37 @@ if ib_firstFill
     lastTgt  := ib_curTP
 autoStop = halLive ? halStp : liveORB ? or_curStop : liveIB ? ib_curStop : lastStop
 autoTP   = halLive ? halTgt : liveORB ? or_curTP  : liveIB ? ib_curTP  : lastTgt
-autoQty  = math.abs(strategy.position_size)   // actual net contracts
-buyNow   = strategy.position_size > 0 and (strategy.position_size[1] <= 0 or strategy.position_size > strategy.position_size[1])
-sellNow  = strategy.position_size < 0 and (strategy.position_size[1] >= 0 or strategy.position_size < strategy.position_size[1])
-closeNow = strategy.position_size == 0 and strategy.position_size[1] != 0
+// QUANTITY: THE INCREMENT, NOT THE NET.
+// This used to send math.abs(strategy.position_size) - the whole netted position - on every entry
+// alert. On a first entry those are the same number, so it looked right. On the AVERAGE-DOWN fill it
+// was not: holding 2 and adding 2, it transmitted "buy 4" to a broker that already had 2 on. A
+// platform reading quantity as the position it should end up holding can only reconcile that by
+// flattening the 2 and re-entering 4 - which realises the first unit's open loss at the worst moment
+// and re-opens the whole thing at the current price, destroying the averaging-down the setup exists
+// to do. What an add actually means is "buy 2 MORE", so that is what goes out now.
+//   from flat        -> increment == net, unchanged behaviour
+//   same-direction up -> the difference, flagged as an add so it stacks
+//   direction flip    -> the NEW position size, with reverse_order_close doing the flattening
+// A same-direction DECREASE (one unit's bracket fills while the other stays on) sends nothing, as
+// before: the broker's own stop and target orders are what close the units, not these alerts.
+posNow   = strategy.position_size
+posPrev  = strategy.position_size[1]
+sameDir  = posNow != 0 and posPrev != 0 and ((posNow > 0) == (posPrev > 0))
+isAdd    = sameDir and math.abs(posNow) > math.abs(posPrev)
+autoQty  = isAdd ? math.abs(posNow - posPrev) : math.abs(posNow)
+buyNow   = posNow > 0 and (posPrev <= 0 or posNow > posPrev)
+sellNow  = posNow < 0 and (posPrev >= 0 or posNow < posPrev)
+closeNow = posNow == 0 and posPrev != 0
 // The exact string that went out, kept for the on-chart debug readout below.
 var string pmtLast = ""
 if autoOn and ordersOn and buyNow
-    pmtLast := f_pmt("buy",  autoQty, autoStop, autoTP)
+    pmtLast := f_pmt("buy",  autoQty, autoStop, autoTP, isAdd)
     alert(pmtLast, alert.freq_once_per_bar)
 if autoOn and ordersOn and sellNow
-    pmtLast := f_pmt("sell", autoQty, autoStop, autoTP)
+    pmtLast := f_pmt("sell", autoQty, autoStop, autoTP, isAdd)
     alert(pmtLast, alert.freq_once_per_bar)
 if autoOn and ordersOn and closeNow
-    pmtLast := f_pmt("close", 0, 0.0, 0.0)
+    pmtLast := f_pmt("close", 0, 0.0, 0.0, false)
     alert(pmtLast, alert.freq_once_per_bar)
 
 // ---- on-chart readout of the LAST payload, so you can read what was actually transmitted ----
