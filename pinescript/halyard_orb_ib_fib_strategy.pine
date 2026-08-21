@@ -1,0 +1,1888 @@
+//@version=6
+// HALYARD + BREAK-THEN-PULLBACK (ORB + IB) - three setups, one script, one equity curve.
+//
+// WHY THIS FILE EXISTS
+//   Halyard is a 15-minute opening-range break that fires on the 15m CLOSE. Break-then-Pullback (ORB + IB) is a
+//   pullback-limit engine that wants a fast chart. Run separately you cannot see their combined equity curve,
+//   because a chart has one timeframe and Halyard would only be right on a 15m chart.
+//   Here Halyard builds its own 15-minute bars out of whatever bars the chart is showing, so the WHOLE file can
+//   be run on a 1-MINUTE chart and Halyard still trades exactly the 15m opens, highs, lows and closes it would
+//   have traded on a 15m chart. Run this on 1m: ORB/IB get the resolution their limit fills need, Halyard is
+//   unaffected by the chart timeframe, and the Strategy Tester shows the three of them together.
+//
+// >>> SELECTABLE TARGETS AND STOPS (ORB / IB) <<<
+//   What used to be four hardcoded target strings and a stop welded to the far range edge is now the
+//   "Targets & stops - ORB / IB" input group. The defaults reproduce the old behaviour exactly, so an
+//   untouched copy of this file trades identically to the version without them.
+//     TARGET, per setup AND per direction (four dropdowns): Range edge (the broken level, no extension),
+//       Ext 10% / 30% / 50% (that far beyond it, as a fraction of the range), or HOD/LOD (the session high for
+//       a long, low for a short, taken AS IT STANDS ON THE FILL BAR and frozen there - a target that kept
+//       tracking the running high could never be reached, since price cannot exceed its own high).
+//     STOP, per setup: 50%, 75% or 100% of the range, measured as a retracement from the edge that broke. For
+//       a LONG, 100% is the range low, 75% is a quarter of the way up from it, 50% is the midpoint; mirrored
+//       for a short. This is the convention the probability table's "75% line" already used, so the two agree.
+//
+//   ONE INTERACTION IS LOAD-BEARING, because this is a FIB-ENTRY engine and the entries are fixed levels of
+//   the same range the stop is now measured against. A fib entry used to be guaranteed to sit between the
+//   break and the stop, since the stop WAS the far edge. With a selectable stop it is not:
+//     - At a 100% stop everything behaves as before: the 75%-line entry is 0.75 of the range clear of the
+//       stop, the 50%-line entry 0.50.
+//     - At a 75% stop the shallow entry is 0.50 clear and the average-down unit 0.25. Both still trade.
+//     - At a 50% stop the stop lands EXACTLY ON the 50% line. The average-down unit lives on that line, and so
+//       does a deeper (non-shallow) first entry, so those would have a zero-point stop distance - a trade that
+//       cannot be sized and cannot be stopped.
+//   Each unit is therefore checked against the stop independently and dropped if it is not clear of it by at
+//   least orbibMinStopFrac of the range. In practice a 50% stop trades SHALLOW SETUPS ONLY and never with an
+//   average-down unit; that is not a bug, it is the only part of the fib grid that is still a real trade.
+//   Halyard is unaffected: it keeps its own Risk:Reward target and its own stop modes, in its own groups.
+//
+// THE 15-MINUTE ENGINE (Halyard), in short
+//   Every chart bar is put in a 15-minute bucket (UTC-aligned, which is where TradingView's own 15m bars sit).
+//   The LAST chart bar of a bucket closes that 15m bar, so on a 1m chart the 09:44 bar closes the 09:30-09:45
+//   candle - with process_orders_on_close = true the entry fills at that bar's close, i.e. at the 15m close
+//   price itself. A bucket that ends inside a data gap is caught up on the first bar of the next bucket.
+//   REQUIREMENT: use a chart timeframe that divides into 15 - 1, 3, 5 or 15 minutes. On anything larger the
+//   "15m" bar degrades to the chart bar and Halyard's levels stop matching a real 15m chart.
+//
+// HOW THE THREE SETUPS SHARE ONE POSITION
+//   Pine nets every order into ONE position: an opposite-side entry would REVERSE another setup's trade, not
+//   hedge it. So the seat is taken by one setup at a time, in this order of precedence:
+//     1. A live HALYARD trade holds the seat. ORB and IB limits are HELD BACK (not cancelled) while it runs; if
+//        price trades through their pullback entry during the hold, that setup is forfeited for the day.
+//     2. A live ORB trade holds the seat against IB (the original ORB/IB rule, unchanged).
+//     3. Halyard SKIPS its break if an ORB or IB trade is live. Halyard is a market order at the 15m close -
+//        it cannot rest and wait - and its break still consumes the day, exactly like any other rejected filter.
+//   Each engine flattens only its OWN entries (strategy.close per entry id), so Halyard's 13:30/14:30 ET day
+//   flat can never close an open ORB/IB trade and the 15:30 ET EOD flatten can never close a Halyard trade.
+//   The daily max-loss circuit breaker is the one exception: it closes everything, because that is its job.
+//
+// RISK/REWARD BOXES: all three setups now draw the SAME box - a green reward box from the entry to the target,
+//   a red risk box from the entry to the stop, a coloured border per setup (orange ORB, teal IB, fuchsia
+//   Halyard) and one label carrying contracts, $ risk, $ reward, the R multiple and the 1-contract numbers.
+//
+// WHAT CHANGED vs THE TWO STANDALONE FILES
+//   - One strategy() call, so ONE set of properties: commission $0.5/contract and 1 tick slippage (the ORB/IB
+//     settings) now apply to Halyard too, which shipped with zero of both. Halyard's share of the curve will
+//     therefore read slightly worse here than in its own backtest. Change it in Properties if you want parity.
+//   - process_orders_on_close = true (Halyard needs the 15m close as its fill). ORB/IB exits are stops and
+//     limits, which fill intrabar either way; their entry limits become live at the close of the break bar
+//     instead of the next bar's open, which is what the engine's own fill tracking already assumed, and their
+//     EOD flatten moves from the next bar's open to the flatten bar's close.
+//   - initial_capital 150000 - enough to carry both engines. Neither engine compounds: ORB/IB size from fixed
+//     dollar budgets or fixed contracts, Halyard from a fixed $ risk, so capital only affects the % figures.
+strategy("Halyard + Break-then-Pullback (ORB + IB)", overlay = true, pyramiding = 6,
+     max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500,
+     initial_capital = 150000, margin_long = 0, margin_short = 0,
+     default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = true,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
+
+// ---------------------------------------------------------------- Mode: strategy or indicator
+// Pine decides strategy() vs indicator() when the script compiles, so an input cannot change the file's type.
+// What this switch does is silence every ORDER. In Indicator mode the ranges, levels, fib lines, risk/reward
+// boxes, probability table and break alerts all keep running on identical rules - the chart is byte for byte
+// the same - while nothing is bought or sold. All three state machines (Halyard included) run in both modes,
+// so the boxes you see as an indicator are exactly the trades the strategy would have taken.
+gMode     = "Mode"
+runMode   = input.string("Strategy - place orders", "Run as", options = ["Strategy - place orders", "Indicator - drawings & alerts only"], group = gMode,
+     tooltip = "STRATEGY: the full engine - entries, exits, EOD flatten, daily-loss halt and the PickMyTrade webhook. INDICATOR: none of those, so no trades and an empty Strategy Tester, but every level, box, label, table and break alert still works.")
+ordersOn  = runMode == "Strategy - place orders"
+
+// ---------------------------------------------------------------- Strategy toggles (isolate each for backtesting)
+gStrat    = "Strategies (toggle to track each separately)"
+runHAL    = input.bool(true, "Run HALYARD strategy (15m break, timeframe-independent)", group = gStrat, tooltip = "Turn OFF to backtest ORB/IB alone.")
+runORB    = input.bool(true, "Run ORB strategy", group = gStrat, tooltip = "Turn OFF to backtest the IB strategy alone in the Strategy Tester.")
+runIB     = input.bool(true, "Run IB strategy",  group = gStrat, tooltip = "Turn OFF to backtest the ORB strategy alone.")
+orbCarry  = input.bool(false, "Carry an unfilled ORB past the IB (test idea)", group = gStrat,
+     tooltip = "OFF: an ORB limit that has not filled by the time the IB forms is cancelled - the standard rule. ON: that unfilled limit keeps resting, so a pullback that finally arrives after 10:30 still gets taken. It gives way the moment the IB breaks its own range and arms a setup, and otherwise expires at the ORB cutoff or the EOD flatten.")
+
+// ---------------------------------------------------------------- Trade-day filters (see which weekday hurts each)
+gDayO     = "Trade days - ORB"
+orbMon    = input.bool(true, "ORB Monday",    group = gDayO)
+orbTue    = input.bool(true, "ORB Tuesday",   group = gDayO)
+orbWed    = input.bool(true, "ORB Wednesday", group = gDayO)
+orbThu    = input.bool(true, "ORB Thursday",  group = gDayO)
+orbFri    = input.bool(true, "ORB Friday",    group = gDayO)
+gDayI     = "Trade days - IB"
+ibMon     = input.bool(true, "IB Monday",    group = gDayI)
+ibTue     = input.bool(true, "IB Tuesday",   group = gDayI)
+ibWed     = input.bool(true, "IB Wednesday", group = gDayI)
+ibThu     = input.bool(true, "IB Thursday",  group = gDayI)
+ibFri     = input.bool(true, "IB Friday",    group = gDayI)
+
+// ---------------------------------------------------------------- Risk sizing (PER ENTRY) - ORB / IB
+// TWO ways to size, one active at a time - tick the one you want; each is followed by its own inputs.
+// Either way the four entries are sized independently: ORB first, ORB average-down, IB first, IB average-down,
+// so the add can be bigger, smaller or the same as the entry it doubles up on.
+// Halyard has its own sizing block further down - it is a different setup with a different stop.
+gRisk       = "Risk sizing - ORB / IB"
+mFixed      = input.bool(true,  "1) Fixed contract size", group = gRisk,
+     tooltip = "MODE 1 (default). Trade exactly the four contract counts below - no risk maths at all. If both modes are ticked this one wins; if neither is ticked this one is used.")
+orbQty1In   = input.float(2, "   ORB contracts - FIRST entry",    minval = 1, step = 1, group = gRisk,
+     tooltip = "MODE 1. Contracts on the first ORB unit (the limit at the fib pullback).")
+orbQty2In   = input.float(2, "   ORB contracts - AVG-DOWN entry", minval = 1, step = 1, group = gRisk,
+     tooltip = "MODE 1. Contracts on the ORB average-down unit. Independent of the first entry - larger to scale in, smaller to add only a probe.")
+ibQty1In    = input.float(1, "   IB contracts - FIRST entry",     minval = 1, step = 1, group = gRisk,
+     tooltip = "MODE 1. Contracts on the first IB unit.")
+ibQty2In    = input.float(1, "   IB contracts - AVG-DOWN entry",  minval = 1, step = 1, group = gRisk,
+     tooltip = "MODE 1. Contracts on the IB average-down unit.")
+mDlr        = input.bool(false, "2) Risk $ per trade", group = gRisk,
+     tooltip = "MODE 2. Ignore the contract counts: size each entry so ITS OWN risk equals that entry's dollar amount below. The stop distance decides the count, so a wide range buys fewer contracts and a tight one more. Untick mode 1 for this to take effect. If the amount cannot cover a single contract at that stop distance, the setup is skipped.")
+orbRiskDlr1 = input.float(150, "   ORB $ risk - FIRST entry",     minval = 1, step = 25, group = gRisk,
+     tooltip = "MODE 2. Dollars risked on the first ORB entry, entry to stop.")
+orbRiskDlr2 = input.float(150, "   ORB $ risk - AVG-DOWN entry",  minval = 1, step = 25, group = gRisk,
+     tooltip = "MODE 2. Dollars risked on the ORB average-down unit. Its stop is the same price but its entry is deeper, so the same dollars buy more contracts than the first entry - lower it if you do not want the add to dominate the setup.")
+ibRiskDlr1  = input.float(150, "   IB $ risk - FIRST entry",      minval = 1, step = 25, group = gRisk)
+ibRiskDlr2  = input.float(150, "   IB $ risk - AVG-DOWN entry",   minval = 1, step = 25, group = gRisk)
+maxDayLoss  = input.float(0, "Daily max loss $ (0 = off)", minval = 0, step = 25, group = gRisk,
+     tooltip = "A flat dollar stop for the whole day, counted from the equity at the 09:30 session open and including open floating P&L. The moment the day is down this much, EVERY open trade - Halyard included - is closed at market, every resting order is cancelled and no new setup is taken until the next session; the block latches. NOTE it starts counting at 09:30 ET, so a Halyard trade taken overnight is only covered from the open onwards. 0 turns it off. Needs the strategy engine, so it does nothing in Indicator mode.")
+
+// One mode only: fixed contracts wins if both are ticked, and is the fallback if neither is.
+rmFixed    = mFixed or not mDlr
+sizeByRisk = not rmFixed
+modeTxt    = rmFixed ? "Sizing: fixed contracts" : "Sizing: risk $ per entry"
+
+// ---------------------------------------------------------------- Targets & stops (ORB / IB)
+// Both are measured against the setup's OWN range (its high, its low, and the distance between them), so they
+// mean the same thing on any instrument and at any range size. Halyard is not here - it sizes its target off a
+// Risk:Reward multiple and stops on its own 15m range edge, which is a different scheme; see its own groups.
+gExit    = "Targets & stops - ORB / IB"
+tpTip    = "Range edge = the level that broke, i.e. no extension. Ext 10/30/50% = that far BEYOND the broken edge, as a fraction of the range. HOD/LOD = the session high (long) or low (short) AS IT STANDS ON THE FILL BAR, frozen there - a target that kept tracking the running high could never be reached, since price cannot exceed its own high."
+orbTpLIn = input.string("Ext 10%", "ORB target - LONG",  options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gExit, tooltip = tpTip)
+orbTpSIn = input.string("Ext 30%", "ORB target - SHORT", options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gExit)
+ibTpLIn  = input.string("Ext 30%", "IB target - LONG",   options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gExit)
+ibTpSIn  = input.string("Ext 30%", "IB target - SHORT",  options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gExit)
+slTip    = "How far back INTO the range the stop sits, measured from the edge that broke - the same convention the probability table's '75% line' uses. For a LONG: 100% is the range low, 75% is a quarter of the way up from it, 50% is the midpoint. Mirrored for a short.\n\nMIND THE FIB ENTRIES. The entries are fixed levels of this same range, so tightening the stop can collide with them. At 50% the stop sits EXACTLY on the 50% line - which is where the average-down unit lives, and where a deeper first entry lives too - so those units have no stop distance at all and are dropped. A 50% stop therefore trades SHALLOW setups only, and never with an add. 75% and 100% leave every unit clear."
+orbSlIn  = input.string("100% of range (far edge)", "ORB stop", options = ["50% of range", "75% of range", "100% of range (far edge)"], group = gExit, tooltip = slTip)
+ibSlIn   = input.string("100% of range (far edge)", "IB stop",  options = ["50% of range", "75% of range", "100% of range (far edge)"], group = gExit)
+
+// ---------------------------------------------------------------- Halyard - Position sizing
+gHPS          = "Halyard - Position sizing"
+halUseRiskSz  = input.bool(true, "Use $ Risk Position Sizing", group = gHPS)
+halRiskUSD    = input.float(535, "Risk Per Trade ($)", minval = 0, group = gHPS)
+halQtyFixed   = input.int(1, "Contracts (If Risk Sizing Off)", minval = 1, group = gHPS)
+halMaxQty     = input.int(1000, "Max Contracts", minval = 1, group = gHPS, tooltip = "Hard cap on the risk-sized quantity.")
+
+// ---------------------------------------------------------------- Halyard - Trade management
+// Both R:R inputs are exposed, not just the first: the reverse one is UNREAD while the toggle is off but goes
+// LIVE the moment it is ticked, and shipping a toggle that silently arms a hidden number is a trap.
+gHTM          = "Halyard - Trade management"
+halRR         = input.float(0.8, "Risk:Reward (First Trade)", minval = 0.1, step = 0.01, group = gHTM)
+halRevOn      = input.bool(false, "Enable Reverse Trade", group = gHTM, tooltip = "Also sets the day's fill cap: 2 on, 1 off.")
+halRevRR      = input.float(1.0, "Risk:Reward (Reverse Trade)", minval = 0.1, step = 0.01, group = gHTM, tooltip = "Only read while Enable Reverse Trade is on.")
+
+// ---------------------------------------------------------------- Halyard - Day filter
+// One direction setting per weekday. "Off" is a day that never trades.
+gHD           = "Halyard - Day filter"
+halDayTip     = "Read on the SESSION's day, which ends 13:30 / 14:30 ET - not on the calendar day."
+halMon        = input.string("Long", "Monday", options = ["Both", "Long", "Short", "Off"], group = gHD, tooltip = halDayTip)
+halTue        = input.string("Both", "Tuesday", options = ["Both", "Long", "Short", "Off"], group = gHD)
+halWed        = input.string("Both", "Wednesday", options = ["Both", "Long", "Short", "Off"], group = gHD)
+halThu        = input.string("Both", "Thursday", options = ["Both", "Long", "Short", "Off"], group = gHD)
+halFri        = input.string("Both", "Friday", options = ["Both", "Long", "Short", "Off"], group = gHD)
+
+// ---------------------------------------------------------------- Halyard - Range filter
+// A DAY gate on the range candle's own size, in POINTS. 0 = off on either side. BOTH SHIP AT 0, so this
+// changes nothing until a value is set.
+gHR           = "Halyard - Range filter"
+halRngMin     = input.float(0, "Min ORB Range (pts, 0=off)", minval = 0, step = 0.25, group = gHR, tooltip = "Skip the day if the range is narrower than this.")
+halRngMax     = input.float(0, "Max ORB Range (pts, 0=off)", minval = 0, step = 0.25, group = gHR, tooltip = "Skip the day if the range is wider than this.")
+
+// Min above Max passes on NOTHING, and a strategy that silently stops trading reads as "no signals today"
+// rather than as a typo. Fail loudly instead.
+if halRngMax > 0 and halRngMin > halRngMax
+    runtime.error("Halyard Range Filter: Min ORB Range is above Max ORB Range, so no day can ever pass. Fix one of them.")
+
+// ---------------------------------------------------------------- Filters (ORB / IB)
+gFilt     = "Filters - ORB / IB"
+noDbl     = input.bool(true, "Skip double-break days (both range sides break)", group = gFilt,
+     tooltip = "If the side OPPOSITE the setup direction also breaks (long: price trades below the range low; short: above the range high), cancel the pending entry and take no trade that day.")
+orbDepth  = input.float(75, "ORB bias: max close depth into the range (%)", minval = 0, maxval = 100, step = 5, group = gFilt,
+     tooltip = "How far the range may CLOSE into its own body and still count. Depth is measured from the level that will break: for a short that is the range low, for a long the range high. 50 is the classic rule. 100 accepts any close and leaves only the which-extreme-came-first test.")
+ibDepth   = input.float(75, "IB bias: max close depth into the range (%)", minval = 0, maxval = 100, step = 5, group = gFilt,
+     tooltip = "Same measurement as the ORB depth filter, applied to the 1-hour initial-balance range.")
+orbMinRngPct = input.float(0.40, "Min ORB range (% of price, 0 = off)", minval = 0, step = 0.05, group = gFilt,
+     tooltip = "Skip ORB setups whose 15-min opening range is smaller than this % of price (range / range-low * 100). IB is NOT filtered. Set 0 to disable.")
+
+// ---------------------------------------------------------------- Automation (PickMyTrade webhook -> Tradovate)
+grpA      = "Automation - PickMyTrade"
+autoOn    = input.bool(false, "Enable webhook alerts", group = grpA,
+     tooltip = "Create ONE alert with condition 'alert() function calls only' and paste PickMyTrade's webhook URL. Alerts fire on the NET position; the seat rules keep the three setups from ever being open at once, so each alert maps to a single setup. Silent in Indicator mode.")
+pmtToken  = input.string("", "PickMyTrade token", group = grpA)
+pmtAcct   = input.string("", "Tradovate account id", group = grpA)
+pmtSym    = input.string("MNQ1!", "Broker symbol", group = grpA)
+pmtType   = input.string("market", "Order type", options = ["market", "limit"], group = grpA)
+pmtDebug  = input.bool(true, "Show the last webhook payload on the chart", group = grpA,
+     tooltip = "Prints the exact JSON the script last transmitted, as a label on the most recent bar. TradingView gives you no way to see an alert() message after it has fired, so this is how you check that sl and tp really are leaving with a price on them. Turn it off once you are satisfied.")
+
+// ---------------------------------------------------------------- Break alerts (manual trading)
+grpBA     = "Break alerts (manual)"
+brkAlerts = input.bool(true, "Alert when a range breaks (Halyard / ORB / IB)", group = grpBA,
+     tooltip = "Fires a notification the moment a range breaks, with the direction and the planned entry/stop/target so you can place the trade yourself. Create ONE alert on this strategy with condition 'alert() function calls only'.")
+
+// ---------------------------------------------------------------- Risk/Reward tool
+grpRR     = "Risk / Reward tool"
+showRR    = input.bool(true, "Show risk/reward box at the break", group = grpRR)
+showRR2   = input.bool(true, "  ... and a second box for the average-down unit (ORB / IB)", group = grpRR,
+     tooltip = "The average-down unit is a trade of its own - its own entry price, contract count, risk and reward. With this on it gets its own pair of boxes (dashed border, lighter fill) measured from the 50% line to the same stop and target, plus its own $ label. Nothing is drawn when the stop setting has squeezed that unit out (see the ORB/IB stop tooltip).")
+showRRHal = input.bool(true, "  ... and a box for the Halyard trade", group = grpRR,
+     tooltip = "Halyard's risk/reward box, drawn exactly like the ORB and IB ones: green reward box, red risk box, one label with contracts, $ risk, $ reward and the R multiple. Border is fuchsia so it is told apart from ORB orange and IB teal.")
+showFibs  = input.bool(true, "Show fib retracement lines (25/50/75) - ORB / IB", group = grpRR, tooltip = "Dotted lines only, no text: the 25/50/75 levels of the range. Which one is the entry is shown by the R/R box.")
+showInfo  = input.bool(true, "Show strategy rules panel", group = grpRR)
+ptVal     = input.float(2.0, "$ per point per contract", group = grpRR, tooltip = "MNQ=2, NQ=20, MES=5, ES=50. Used for the ORB/IB boxes and sizing. Halyard's own box and sizing read the symbol's point value directly.")
+keepBox   = input.int(0, "Keep R/R boxes for the last N setups (0 = all)", 0, 250, group = grpRR,
+     tooltip = "0 keeps every past setup's boxes and fib lines. Pine caps a script at 500 boxes and 500 lines: a setup with an average-down unit draws four boxes, so that is the most recent ~125 setups.")
+keepLab   = input.int(3, "Keep R/R labels for the last N setups (0 = all)", 0, 250, group = grpRR,
+     tooltip = "The boxes are cheap to look at; the text labels are what makes a chart unreadable when they stack up. This keeps the $ labels on the newest few setups only, while the boxes stay for the whole history. 0 keeps every label.")
+
+// ---------------------------------------------------------------- Historical probabilities (ORB / IB)
+grpP      = "Historical probabilities"
+hiLive    = input.bool(true, "Highlight the live setup in the table", group = grpP,
+     tooltip = "Tints the table row you are currently in: the range-size row of the setup that is running, and the pullback row for the depth price has reached so far. A > marks the row that is live right now.")
+showTable = input.bool(true, "Show probability table", group = grpP)
+tblPos    = input.string("Bottom right", "Table position", options = ["Top right", "Bottom right", "Bottom left", "Top left"], group = grpP)
+bMode     = input.string("Auto (equal thirds)", "Size buckets", options = ["Auto (equal thirds)", "Manual (%)"], group = grpP,
+     tooltip = "Applies to the size-segmented rows only. Range is measured as % of price so buckets stay comparable as price drifts. Auto: split each strategy's own range-% distribution into three equal-count buckets (S/M/L). Manual: use the fixed % thresholds below.")
+orbB1     = input.float(0.25, "Manual ORB small/med split (%)", step = 0.05, group = grpP, tooltip = "Used only in Manual mode.")
+orbB2     = input.float(0.40, "Manual ORB med/large split (%)", step = 0.05, group = grpP)
+ibB1      = input.float(0.50, "Manual IB small/med split (%)",  step = 0.05, group = grpP)
+ibB2      = input.float(0.80, "Manual IB med/large split (%)",  step = 0.05, group = grpP)
+pbSplit   = input.bool(false, "Split the pullback rows by size too", group = grpP,
+     tooltip = "OFF (default): one 'after 25% PB' and one 'after 50% PB' row per strategy, pooled across range sizes. ON: those rows are repeated per S/M/L bucket.")
+autoMode  = bMode == "Auto (equal thirds)"
+
+// ================================================================ HARDCODED CONFIG (edit values here)
+// ---- shared session clock ----
+tz      = "America/New_York"
+sess    = "0930-1600"
+orbSess = "0930-0945"
+ibSess  = "0930-1030"
+flatH   = 15
+flatM   = 30
+// The minimum distance an ENTRY must keep from its STOP, as a fraction of the range, before that unit is
+// allowed to trade. With the stop welded to the far edge this could never bind - a fib entry was always at
+// least a quarter of the range clear. With a selectable stop it can and does: at a 50% stop the 50%-line
+// entries land exactly on it. Below this fraction the unit is dropped rather than sized off a ~0 stop
+// distance, which would otherwise make the risk-$ contract count explode.
+orbibMinStopFrac = 0.10
+// ---- ORB settings ----
+orbLong   = true
+orbShort  = true
+orbBreak  = "Close beyond"
+orbAvg    = true
+orbTpL    = orbTpLIn          // target per direction     (Targets & stops group)
+orbTpS    = orbTpSIn
+orbSl     = orbSlIn           // stop as a % of the range (Targets & stops group)
+orbBE     = false
+orbQty1   = orbQty1In         // contracts on the first ORB entry     (Risk sizing group)
+orbQty2   = orbQty2In         // contracts on the ORB avg-down entry  (Risk sizing group)
+orbCutH   = 15
+orbCutM   = 0
+// ---- IB settings ----
+ibLong    = true
+ibShort   = true
+ibBreak   = "Wick (touch)"
+ibAvg     = true
+ibTpL     = ibTpLIn           // target per direction     (Targets & stops group)
+ibTpS     = ibTpSIn
+ibSl      = ibSlIn            // stop as a % of the range (Targets & stops group)
+ibBE      = false
+ibQty1    = ibQty1In          // contracts on the first IB entry      (Risk sizing group)
+ibQty2    = ibQty2In          // contracts on the IB avg-down entry   (Risk sizing group)
+ibCutH    = 14
+ibCutM    = 0
+// ---- HALYARD settings ----
+// Values marked UNREAD belong to a mode that is not selected - they are kept so the mode ternaries still
+// compile, and a constant condition folds anyway.
+// NOTE WHICH VALUES ARE LIVE: halTpType is Risk:Reward, so the Risk:Reward inputs above ARE read and
+// halTpTicks / halAtrTpMult are not.
+halDirection  = "Both"        // blanket override on top of the per-day grid
+halSlType     = "ORB Edge + Buffer"
+halSlBuf      = 0.0           // ZERO -> the stop sits exactly ON the opposite range edge
+halSlTicks    = 340           // UNREAD under ORB Edge + Buffer
+halAtrSlMult  = 3.8           // UNREAD under ORB Edge + Buffer
+// UNREAD under ORB Edge + Buffer. Set halSlType = "Breakout Candle" to arm the fourth mode: the stop goes
+// beyond the breakout candle instead of the far range edge, and halSlBuf is then measured past THAT extreme.
+// 1 = the breakout candle alone; 2 or 3 also take in the 1-2 FIFTEEN-MINUTE candles before it (the window is
+// built from the engine's own 15m bars, so it does not change with the chart timeframe), and since the level
+// is the lowest low / highest high of that window, raising it can only widen the stop, never tighten it.
+halSlBars     = 1
+halTpType     = "Risk:Reward"
+halTpTicks    = 90            // UNREAD under Risk:Reward
+halAtrTpMult  = 5.0           // UNREAD under Risk:Reward
+halAtrLen     = 32            // UNREAD: no ATR mode is picked
+halMaxBars    = 0             // 0 = TIME STOP OFF. Counted in 15m bars. Only TP, SL and the day flat close a trade
+// OFF, so there are no entry filters at all: the break, the weekday grid and the direction are the whole entry
+// condition. Set true to arm the trend filter (shorts only).
+halUseTrend   = false
+halTrendEma   = 190
+// Visual defaults. The breakout TRIANGLE marks the 15m bar that BREAKS the range, not the range candle itself.
+halShowMarker = true
+halUpCol      = color.new(color.green, 30)
+halDnCol      = color.new(color.red, 30)
+halSigCol     = color.new(color.fuchsia, 0)   // the Halyard R/R box border, vs ORB orange and IB teal
+
+// The day's fill cap is DERIVED from the reversal switch (2 on, 1 off) rather than being a second,
+// disagreeable input.
+halMaxTrades = halRevOn ? 2 : 1
+
+// ================================================================ Shared tracking (RTH session, ORB/IB clock)
+inSess     = not na(time(timeframe.period, sess, tz))
+newSession = inSess and not inSess[1]
+var float dHigh = na
+var float dLow  = na
+if newSession
+    dHigh := high
+    dLow  := low
+else if inSess
+    dHigh := math.max(dHigh, high)
+    dLow  := math.min(dLow, low)
+tod     = hour(time, tz) * 60 + minute(time, tz)
+flatten = tod >= (flatH*60 + flatM)
+
+// ---- daily loss limit: a flat $ stop for the whole session, floating P&L included ----
+var float dayStartEq = na
+var bool  dayHalt    = false
+if newSession
+    dayStartEq := strategy.equity
+    dayHalt    := false
+dayPnL = strategy.equity - dayStartEq                 // today's P&L, realised + open
+if maxDayLoss > 0 and dayPnL <= -maxDayLoss
+    dayHalt := true                                   // latched: the day stays shut once it trips
+
+// day-of-week gates (per strategy) - ORB/IB read the calendar day, Halyard its own shifted session day
+dow      = dayofweek(time, tz)
+orbDayOK = (dow == dayofweek.monday and orbMon) or (dow == dayofweek.tuesday and orbTue) or (dow == dayofweek.wednesday and orbWed) or (dow == dayofweek.thursday and orbThu) or (dow == dayofweek.friday and orbFri)
+ibDayOK  = (dow == dayofweek.monday and ibMon)  or (dow == dayofweek.tuesday and ibTue)  or (dow == dayofweek.wednesday and ibWed)  or (dow == dayofweek.thursday and ibThu)  or (dow == dayofweek.friday and ibFri)
+
+or_inR   = not na(time(timeframe.period, orbSess, tz))
+or_rDone = not or_inR and or_inR[1]
+ib_inR   = not na(time(timeframe.period, ibSess, tz))
+ib_rDone = not ib_inR and ib_inR[1]
+var bool ibFormed = false
+if newSession
+    ibFormed := false
+if ib_rDone
+    ibFormed := true
+
+// position sizer for ORB/IB: contracts for a $ budget at a given stop distance (points).
+// round: fractional <= .5 -> down, > .5 -> up. A budget too small for a single contract returns 0, and the
+// ">= 1" guards on the entries below simply skip that setup.
+f_size(float budget, float ptDist) =>
+    perC = ptDist * ptVal
+    raw  = perC > 0 ? budget / perC : 0.0
+    fr   = raw - math.floor(raw)
+    fr > 0.5 ? math.ceil(raw) : math.floor(raw)
+
+// TP resolver (ORB/IB). Anything that is not one of the four named modes falls through to the broken range
+// edge, which is what the "Range edge" option selects.
+f_tp(int d, float rH, float rL, float rg, float dHi, float dLo, string tpL, string tpS) =>
+    d == 1 ? (tpL == "HOD/LOD" ? dHi : tpL == "Ext 10%" ? rH + 0.10*rg : tpL == "Ext 30%" ? rH + 0.30*rg : tpL == "Ext 50%" ? rH + 0.50*rg : rH) : (tpS == "HOD/LOD" ? dLo : tpS == "Ext 10%" ? rL - 0.10*rg : tpS == "Ext 30%" ? rL - 0.30*rg : tpS == "Ext 50%" ? rL - 0.50*rg : rL)
+
+// STOP resolver (ORB/IB): the stop as a RETRACEMENT of the range, measured from the edge that broke. This is
+// the same convention the probability table's "75% line" uses, so the two agree by construction.
+//   LONG  (broke the high): 100% -> the range low, 75% -> a quarter of the way up from it, 50% -> the midpoint.
+//   SHORT (broke the low) : mirrored off the range high.
+// Anything other than the two tighter strings falls through to 100%, so the far edge stays the default.
+f_sl(int d, float rH, float rL, float rg, string mode) =>
+    f = mode == "50% of range" ? 0.50 : mode == "75% of range" ? 0.75 : 1.00
+    d == 1 ? rH - f * rg : rL + f * rg
+
+// The seat: an ORB or IB position that is open right now. Declared HERE, filled in at the bottom of the ORB/IB
+// engines, and read by Halyard above them - so Halyard sees the value as of the previous chart bar. On a 1m
+// chart that is a one-minute lag on a gate that only matters when a fill and a 15m close land on the same bar.
+var bool orbibLive = false
+
+// ================================================================ HALYARD ENGINE
+// Single-candle opening-range breakout with an optional loser-reversal, on 15-MINUTE candles that this engine
+// builds itself - so the chart can be 1m, 3m, 5m or 15m and the levels, the break and the fills are identical.
+//
+// The range is one 15-minute candle. The first 15m bar that CLOSES beyond it takes the day's trade and consumes
+// the day whichever side it fired on - there is no second attempt if the filters reject it. Stop sits on the
+// opposite edge of the range, target is a multiple of that distance. Flat before the session rolls; nothing is
+// ever carried overnight.
+//
+//
+// The clock is HARDCODED to New York and the chart's own timezone setting moves nothing: every clock read
+// passes `tz` explicitly. THE CONVERSION IS NOT A FIXED HOUR, which is the whole subtlety. The range candle is
+// anchored to 10:30 Asia/Kolkata = 05:00 UTC every day of the year, because India has no DST and the US does.
+// On the New York clock that is 00:00 under EST and 01:00 under EDT, so the ET hour has to FOLLOW the US
+// changeover or it sits on the wrong bars for half the year. Both seasonal values are derived per bar.
+
+// ET's UTC offset in minutes on bar `t`: 300 under EST, 240 under EDT. Read off the tape rather than assumed,
+// because the entire point is that it moves. The `+ 1440 % 1440` is there because New York and UTC are usually
+// on different calendar days, which sends the raw difference negative.
+f_halEtOffset(t) =>
+    etM = hour(t, tz) * 60 + minute(t, tz)
+    (hour(t, "Etc/UTC") * 60 + minute(t, "Etc/UTC") - etM + 1440) % 1440
+
+// 10:30 Asia/Kolkata written on the New York clock: 00:00 EST / 01:00 EDT.
+f_halOrbStartMin(t) => f_halEtOffset(t) == 240 ? 60 : 0
+
+// 00:00 Asia/Kolkata - the boundary the Halyard trading day rolls on - written on the same clock: 13:30 EST /
+// 14:30 EDT. It resets the day's state, picks the day-of-week and force-flattens.
+f_halSessionEndMin(t) => f_halEtOffset(t) == 240 ? 870 : 810
+
+// The instant this bar's session ENDS, on the New York clock. Shifting a bar forward to its own boundary makes
+// the session's date and weekday simply the ET date and weekday of the shifted instant - no wrap-around
+// arithmetic anywhere, and the key and the day filter cannot drift apart because they read the same shift.
+// Bumping a YYYYMMDD key by 1 instead LOOKS equivalent and is not: 20260531 + 1 is not 20260601, so every month
+// boundary would split one session into two, resetting the day's state and force-flattening mid-session.
+f_halSessionShift(t) => t + (1440 - f_halSessionEndMin(t)) * 60000
+
+f_halSessionKey(t) =>
+    s = f_halSessionShift(t)
+    year(s, tz) * 10000 + month(s, tz) * 100 + dayofmonth(s, tz)
+
+// ---------------------------------------------------------------- the 15-minute bar builder
+// Buckets are aligned to the epoch, i.e. to :00/:15/:30/:45 UTC, which is exactly where TradingView's own 15m
+// bars sit for these instruments (the CME reopen at 18:00 ET is on a 15-minute boundary in UTC too).
+halTfMs  = 15 * 60 * 1000
+chartMs  = timeframe.in_seconds(timeframe.period) * 1000
+halBkt   = math.floor(time / halTfMs)
+
+var int   halAggBkt  = na
+var float halAggH    = na
+var float halAggL    = na
+var float halAggC    = na
+var int   halAggT    = na
+var bool  halBktDone = false
+
+// set on the chart bar that CLOSES a 15-minute candle, together with that candle's H/L/C and open time
+halNewBar = false
+float hal15H = na
+float hal15L = na
+float hal15C = na
+int   hal15T = na
+
+// (1) CATCH-UP. A bucket whose last bar never arrived (a data gap, a halt, a session end) is closed here, on
+//     the first bar of the next bucket, out of the aggregate as it stood. The aggregate still holds the
+//     previous bar's values because it is rolled in step 2, below this.
+if not na(halAggBkt) and halBkt != halAggBkt and not halBktDone
+    halNewBar := true
+    hal15H := halAggH
+    hal15L := halAggL
+    hal15C := halAggC
+    hal15T := halAggT
+// (2) ROLL the aggregate: start a new one on a new bucket, otherwise extend it.
+if na(halAggBkt) or halBkt != halAggBkt
+    halAggBkt  := halBkt
+    halAggH    := high
+    halAggL    := low
+    halAggT    := time
+    halBktDone := false
+else
+    halAggH := math.max(halAggH, high)
+    halAggL := math.min(halAggL, low)
+halAggC := close
+// (3) PROJECTED CLOSE - the normal path. This chart bar is the last one of its bucket when the NEXT bar's time
+//     falls in a different bucket, so the 15m candle closes here, at this bar's close. barstate.isconfirmed
+//     keeps a forming bar from firing the break early.
+if not halBktDone and barstate.isconfirmed and math.floor((time + chartMs) / halTfMs) != halBkt
+    halBktDone := true
+    halNewBar  := true
+    hal15H := halAggH
+    hal15L := halAggL
+    hal15C := halAggC
+    hal15T := halAggT
+
+// the previous two CLOSED 15m candles, kept for the (unread) Breakout Candle stop mode; shifted at the very
+// end of this engine so that during the entry logic they are still the bars BEFORE the breakout candle.
+var float hal15L1 = na
+var float hal15L2 = na
+var float hal15H1 = na
+var float hal15H2 = na
+
+// ---------------------------------------------------------------- daily state
+// Reset once per session, on the 13:30 / 14:30 ET boundary - NOT on ET midnight.
+halSessKey = f_halSessionKey(time)
+halNewDay  = nz(ta.change(halSessKey), 0) != 0
+
+var float halRH   = na       // the range candle's high / low / open time
+var float halRL   = na
+var int   halRT   = na
+var bool  halBroke = false   // the day's first break latches here and consumes the day whichever side it fired on
+// State machine (per day):
+// 0 = no trade yet (wait for first breakout) | 1 = first trade running | 2 = first trade stopped out (wait for
+// an opposite-side 15m close beyond the range) | 3 = done for the day (first trade hit TP, or reversal taken)
+var int   halState  = 0
+var int   halFirstDir = 0
+var int   halTrades = 0
+// the live (simulated AND ordered) trade
+var int   halTrDir  = 0      // 0 flat, 1 long, -1 short
+var float halEnt    = na
+var float halStp    = na
+var float halTgt    = na
+var float halQty    = na
+var int   halEntBar = na
+var int   halBars15 = 0      // 15m candles elapsed since the entry, for the (off by default) time stop
+
+if halNewDay
+    halRH := na
+    halRL := na
+    halRT := na
+    halBroke := false
+    halState := 0
+    halFirstDir := 0
+    halTrades := 0
+
+// When a 15m candle closes AND it is the range candle, store its high/low as the day's levels.
+halIsRangeBar = halNewBar and (hour(hal15T, tz) * 60 + minute(hal15T, tz)) == f_halOrbStartMin(hal15T)
+if halIsRangeBar
+    halRH := hal15H
+    halRL := hal15L
+    halRT := hal15T
+    halBroke := false
+
+halLevels = not na(halRH) and not na(halRL)
+halRange  = halRH - halRL
+
+// RANGE is a DAY gate: it gates the BREAKOUT LATCH, not the entry. That distinction is the whole behaviour - a
+// day the range rejects is skipped ENTIRELY (no trade, no reversal, no triangle) and is NOT consumed, because
+// halBroke can only latch on a day allowed to break out in the first place. Knowable at the bars it gates: the
+// range is fixed when the range candle closes, which is before anything can trade that day.
+halRangeOK = not na(halRange) and (halRngMin <= 0 or halRange >= halRngMin) and (halRngMax <= 0 or halRange <= halRngMax)
+
+// ---------------------------------------------------------------- indicators (only read by unselected modes)
+// Taken from the 15-MINUTE series so they do not change with the chart timeframe. request.security publishes a
+// value on the first chart bar of the next 15m period, and the engine acts on the LAST bar of the current one,
+// so both are the value through the candle BEFORE the breakout candle. Both are off in the shipped config.
+halAtrVal = request.security(syminfo.tickerid, "15", ta.atr(halAtrLen), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+halEmaVal = request.security(syminfo.tickerid, "15", ta.ema(close, halTrendEma), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+
+// ---------------------------------------------------------------- stop / target / size
+// The Breakout Candle window, over the engine's own 15m candles. Only meaningful on a bar where a 15m candle
+// closed; the stop helpers are only ever called on such a bar.
+halWinLow  = halSlBars >= 3 ? math.min(hal15L, math.min(nz(hal15L1, hal15L), nz(hal15L2, hal15L))) : halSlBars == 2 ? math.min(hal15L, nz(hal15L1, hal15L)) : hal15L
+halWinHigh = halSlBars >= 3 ? math.max(hal15H, math.max(nz(hal15H1, hal15H), nz(hal15H2, hal15H))) : halSlBars == 2 ? math.max(hal15H, nz(hal15H1, hal15H)) : hal15H
+// Floored at one tick. halSlBuf ships at 0.0, and a breakout candle that closes on its own low puts the raw
+// level exactly ON the entry reference the sizer divides by, so the risk per contract would be zero and the
+// size would slam into the cap. The floor is what stops that.
+// NOTE the unit: halSlBuf is POINTS, not ticks. On MNQ/NQ one tick is 0.25 points.
+halCandleBuf = math.max(halSlBuf, syminfo.mintick)
+
+f_halLongStop(entryPx) =>
+    halSlType == "ORB Edge + Buffer" ? halRL - halSlBuf : halSlType == "Breakout Candle" ? halWinLow - halCandleBuf : halSlType == "Fixed Ticks" ? entryPx - halSlTicks * syminfo.mintick : entryPx - halAtrVal * halAtrSlMult
+
+f_halShortStop(entryPx) =>
+    halSlType == "ORB Edge + Buffer" ? halRH + halSlBuf : halSlType == "Breakout Candle" ? halWinHigh + halCandleBuf : halSlType == "Fixed Ticks" ? entryPx + halSlTicks * syminfo.mintick : entryPx + halAtrVal * halAtrSlMult
+
+// rr is only reached in Risk:Reward mode - under ATR / Fixed Ticks the first trade and the reversal get the
+// SAME distance.
+f_halLongTP(entryPx, stopPx, rr) =>
+    halTpType == "Risk:Reward" ? entryPx + (entryPx - stopPx) * rr : halTpType == "Fixed Ticks" ? entryPx + halTpTicks * syminfo.mintick : entryPx + halAtrVal * halAtrTpMult
+
+f_halShortTP(entryPx, stopPx, rr) =>
+    halTpType == "Risk:Reward" ? entryPx - (stopPx - entryPx) * rr : halTpType == "Fixed Ticks" ? entryPx - halTpTicks * syminfo.mintick : entryPx - halAtrVal * halAtrTpMult
+
+// Quantity is auto-calculated from: risk$ / (abs(entry - stop) * point value of the symbol)
+f_halQty(_entry, _sl) =>
+    riskPerContract = math.abs(_entry - _sl) * syminfo.pointvalue
+    q = halUseRiskSz ? math.max(math.floor(halRiskUSD / (riskPerContract > 0 ? riskPerContract : syminfo.mintick * syminfo.pointvalue)), 1) : halQtyFixed
+    math.min(q, halMaxQty)
+
+// ---------------------------------------------------------------- day / direction grid
+// The SESSION's day-of-week, not the bar's: a bar past the 13:30 / 14:30 ET boundary already belongs to
+// tomorrow's session. Read off the same shifted instant as the session key, so the two agree by construction.
+halDow  = dayofweek(f_halSessionShift(time), tz)
+// Saturday and Sunday fall through to "Off" - nothing here has to special-case the weekend.
+halMode = halDow == dayofweek.monday ? halMon : halDow == dayofweek.tuesday ? halTue : halDow == dayofweek.wednesday ? halWed : halDow == dayofweek.thursday ? halThu : halDow == dayofweek.friday ? halFri : "Off"
+halDayOK = halMode != "Off"
+// The per-day setting ANDs into the global direction rather than replacing it, so the global still works as a
+// blanket override on top of the per-day grid.
+halLongOK  = (halDirection == "Both" or halDirection == "Long")  and (halMode == "Both" or halMode == "Long")
+halShortOK = (halDirection == "Both" or halDirection == "Short") and (halMode == "Both" or halMode == "Short")
+// The per-BAR filter, and it is SHORTS ONLY. It ships off. Unlike the range gate, a bar filter rejecting a
+// break still CONSUMES the day - the latch fires on the break, not on the entry.
+halTrendOK = not halUseTrend or (not na(halEmaVal) and hal15C < halEmaVal)
+
+// ---------------------------------------------------------------- live-trade tracking (runs in BOTH modes)
+// The engine keeps its own copy of the open trade instead of reading strategy.position_size, for two reasons:
+// the netted position now belongs to three setups, and Indicator mode has no position at all. The simulation
+// matches the orders exactly - entry at the 15m close (process_orders_on_close), exit when price trades the
+// stop or the target, stop taking precedence when a single bar covers both, which is what the Strategy Tester
+// assumes as well.
+if halTrDir != 0 and bar_index > halEntBar
+    halStopHit = halTrDir == 1 ? low <= halStp : high >= halStp
+    halTpHit   = halTrDir == 1 ? high >= halTgt : low <= halTgt
+    if halStopHit or halTpHit
+        if halState == 1
+            halState := halStopHit ? 2 : 3
+        halTrDir := 0
+
+// TIME STOP: flat after the Nth 15m candle from the entry. Counted in the engine's own candles, so it does not
+// change with the chart timeframe. Off in the shipped config.
+if halNewBar and halTrDir != 0
+    halBars15 += 1
+if halMaxBars > 0 and halTrDir != 0 and halBars15 >= halMaxBars
+    if ordersOn
+        strategy.close("HAL-L", comment = "time stop")
+        strategy.close("HAL-S", comment = "time stop")
+        strategy.close("HAL-RL", comment = "time stop")
+        strategy.close("HAL-RS", comment = "time stop")
+    if halState == 1
+        halState := (halTrDir == 1 ? close < halEnt : close > halEnt) ? 2 : 3
+    halTrDir := 0
+
+// ---------------------------------------------------------------- the break
+// halBroke latches the day's first break, so anything after it is ignored. The break is a 15-MINUTE close
+// beyond the level; the range candle itself can never be the breakout candle.
+halBrkUp = runHAL and halNewBar and not halIsRangeBar and halLevels and halRangeOK and not halBroke and hal15C > halRH
+halBrkDn = runHAL and halNewBar and not halIsRangeBar and halLevels and halRangeOK and not halBroke and hal15C < halRL
+// The first break consumes the day whichever side it fires on, and whether or not it passes its filters, so a
+// filter can only ever REMOVE a trade, never substitute a later one.
+if halBrkUp or halBrkDn
+    halBroke := true
+
+// The seat: Halyard is a market order at the 15m close and cannot rest, so a live ORB/IB trade does not delay
+// it - it cancels it, and the break is still consumed. Same treatment as any other rejected filter.
+// TWO reads of the same fact, because neither is enough on its own: orbibLive is the ORB/IB engines' own fill
+// tracking, which is a chart bar stale here (those engines run below this one) but is all Indicator mode has;
+// strategy.position_size is exact but only exists when orders are actually being placed. Halyard's own trade
+// can never be the one showing in it - halTrDir == 0 is required below before any entry is considered.
+halSeatFree = not orbibLive and not dayHalt and (not ordersOn or strategy.position_size == 0)
+halEntered  = false
+halEntDir   = 0
+
+// --- First trade (take the FIRST breakout, if it passes the filters) ---
+halEnterL = halBrkUp and halLongOK and halDayOK and halSeatFree and halTrades < halMaxTrades and halTrDir == 0 and halState == 0
+if halEnterL
+    sl = f_halLongStop(hal15C)
+    tp = f_halLongTP(hal15C, sl, halRR)
+    q  = f_halQty(hal15C, sl)
+    halFirstDir := 1
+    halState  := 1
+    halTrades += 1
+    halTrDir  := 1
+    halEnt    := hal15C
+    halStp    := sl
+    halTgt    := tp
+    halQty    := q
+    halEntBar := bar_index
+    halBars15 := 0
+    halEntered := true
+    halEntDir  := 1
+    if ordersOn
+        strategy.entry("HAL-L", strategy.long, qty = q)
+        strategy.exit("HAL-Lx", from_entry = "HAL-L", stop = sl, limit = tp)
+
+halEnterS = halBrkDn and halShortOK and halDayOK and halTrendOK and halSeatFree and halTrades < halMaxTrades and halTrDir == 0 and halState == 0
+if halEnterS
+    sl = f_halShortStop(hal15C)
+    tp = f_halShortTP(hal15C, sl, halRR)
+    q  = f_halQty(hal15C, sl)
+    halFirstDir := -1
+    halState  := 1
+    halTrades += 1
+    halTrDir  := -1
+    halEnt    := hal15C
+    halStp    := sl
+    halTgt    := tp
+    halQty    := q
+    halEntBar := bar_index
+    halBars15 := 0
+    halEntered := true
+    halEntDir  := -1
+    if ordersOn
+        strategy.entry("HAL-S", strategy.short, qty = q)
+        strategy.exit("HAL-Sx", from_entry = "HAL-S", stop = sl, limit = tp)
+
+// --- Reversal trade (only if the FIRST trade closed at a LOSS) ---
+// OFF BY DEFAULT: Enable Reverse Trade ships unticked, so neither branch fires and the day's cap is 1 fill
+// until someone ticks it. Ticking it also makes the Risk:Reward (Reverse Trade) input live.
+// NOT filtered. The reversal is gated on the day-of-week, the direction and the losing first trade only - the
+// entry filters apply to the FIRST trade. Note the per-day direction grid DOES reach it: a weekday set to one
+// side can never take the reversal, since the reversal is by definition the opposite side of the loser.
+halRevL = halRevOn and runHAL and halNewBar and halState == 2 and halFirstDir == -1 and halLongOK and halDayOK and halSeatFree and halTrades < halMaxTrades and halTrDir == 0 and halLevels and hal15C > halRH
+if halRevL
+    sl = f_halLongStop(hal15C)
+    tp = f_halLongTP(hal15C, sl, halRevRR)
+    q  = f_halQty(hal15C, sl)
+    halState  := 3
+    halTrades += 1
+    halTrDir  := 1
+    halEnt    := hal15C
+    halStp    := sl
+    halTgt    := tp
+    halQty    := q
+    halEntBar := bar_index
+    halBars15 := 0
+    halEntered := true
+    halEntDir  := 1
+    if ordersOn
+        strategy.entry("HAL-RL", strategy.long, qty = q)
+        strategy.exit("HAL-RLx", from_entry = "HAL-RL", stop = sl, limit = tp)
+
+halRevS = halRevOn and runHAL and halNewBar and halState == 2 and halFirstDir == 1 and halShortOK and halDayOK and halSeatFree and halTrades < halMaxTrades and halTrDir == 0 and halLevels and hal15C < halRL
+if halRevS
+    sl = f_halShortStop(hal15C)
+    tp = f_halShortTP(hal15C, sl, halRevRR)
+    q  = f_halQty(hal15C, sl)
+    halState  := 3
+    halTrades += 1
+    halTrDir  := -1
+    halEnt    := hal15C
+    halStp    := sl
+    halTgt    := tp
+    halQty    := q
+    halEntBar := bar_index
+    halBars15 := 0
+    halEntered := true
+    halEntDir  := -1
+    if ordersOn
+        strategy.entry("HAL-RS", strategy.short, qty = q)
+        strategy.exit("HAL-RSx", from_entry = "HAL-RS", stop = sl, limit = tp)
+
+// ---------------------------------------------------------------- Halyard end-of-day flat
+// Never carry a position past the session its levels belong to, i.e. past 13:30 / 14:30 ET. This must fire on
+// the LAST bar of that session; a Pine script cannot see the next bar, so it projects one CHART bar forward
+// instead - exact on every ordinary boundary. halNewDay is the catch-up for boundaries inside a market gap.
+//
+// KNOWN GAP: that catch-up is NOT "one bar late". On a holiday early close the tape halts at 13:00 ET, BEFORE
+// the boundary, so no flat fires and halNewDay does not arrive until the next session opens. On those ~10
+// sessions a year the position is carried for hours. Watch those dates if you trade this live.
+//
+// This boundary is load-bearing: letting the position run to ET midnight instead leaves the morning's levels
+// armed into the 18:00 ET Globex reopen, which is a different session, and those trades lose money.
+//
+// It closes HALYARD'S OWN entries only - an open ORB or IB trade is none of its business.
+halDayFlat = halTrDir != 0 and (f_halSessionKey(time + chartMs) != halSessKey or halNewDay)
+if halDayFlat
+    if ordersOn
+        strategy.close("HAL-L", comment = "day flat")
+        strategy.close("HAL-S", comment = "day flat")
+        strategy.close("HAL-RL", comment = "day flat")
+        strategy.close("HAL-RS", comment = "day flat")
+    if halState == 1
+        halState := (halTrDir == 1 ? close < halEnt : close > halEnt) ? 2 : 3
+    halTrDir := 0
+
+// live Halyard trade -> the ORB and IB limits are held back behind it (see the ORB/IB engines below)
+halLive = halTrDir != 0
+
+// shift the closed-15m-candle registers, AFTER everything above has read them as "the candles before this one"
+if halNewBar
+    hal15L2 := hal15L1
+    hal15L1 := hal15L
+    hal15H2 := hal15H1
+    hal15H1 := hal15H
+
+// ================================================================ Historical-probability stats (ORB / IB)
+// TWO walk-forward studies are collected (a day is only added to the sample after its EOD flatten, so the
+// numbers shown on any bar never contain data from that day or later):
+//
+//   A) FILL -> EOD, segmented by range size. One record per FILLED trade: did price TOUCH each level between
+//      the fill and the EOD flatten? Range is stored as % of price (range / range-low * 100) so the S/M/L
+//      buckets stay comparable as price drifts over the years. These are the "size" rows of the table.
+//
+//   B) PULLBACK -> EOD. One record per SETUP THAT BROKE its range (whether or not the order was actually
+//      placed - a day where the IB was held back behind an open ORB or Halyard trade still tells you what
+//      price did). It answers: once price has retraced to the 25% fib, how often does it go on to tag each TP
+//      extension? And the same from the 50% fib. On the very bar that reaches the pullback, a level counts
+//      only if the CLOSE is already beyond it. From the next bar on, an ordinary wick touch counts.
+//      The 50% line can only be reached through the 25% line, so the 50% sample is a subset of the 25% one.
+f_pct(int hit, int n) => n > 0 ? 100.0 * hit / n : na
+f_pctStr(int hit, int n) =>
+    p = f_pct(hit, n)
+    na(p) ? "-" : str.tostring(p, "#") + "%"
+
+// ---- study A: one record per filled trade ----
+var tRng   = array.new_float(0)
+var tStrat = array.new_int(0)
+var tSL100 = array.new_int(0)
+var tSL75  = array.new_int(0)
+var tTP0   = array.new_int(0)
+var tTP10  = array.new_int(0)
+var tTP30  = array.new_int(0)
+var tTP50  = array.new_int(0)
+
+f_pushTrade(int s, float rng, bool s100, bool s75, bool t0, bool t10, bool t30, bool t50) =>
+    array.push(tRng,   rng)
+    array.push(tStrat, s)
+    array.push(tSL100, s100 ? 1 : 0)
+    array.push(tSL75,  s75  ? 1 : 0)
+    array.push(tTP0,   t0   ? 1 : 0)
+    array.push(tTP10,  t10  ? 1 : 0)
+    array.push(tTP30,  t30  ? 1 : 0)
+    array.push(tTP50,  t50  ? 1 : 0)
+
+// ranges recorded so far for one strategy (walk-forward: only days finalized before now)
+f_ranges(int s) =>
+    tmp = array.new_float(0)
+    if array.size(tRng) > 0
+        for i = 0 to array.size(tRng) - 1
+            if array.get(tStrat, i) == s
+                array.push(tmp, array.get(tRng, i))
+    tmp
+
+// tercile boundaries for a strategy (na until >=3 samples); in manual mode the caller passes fixed thresholds
+f_b1(array<float> rr) => array.size(rr) < 3 ? na : array.percentile_linear_interpolation(rr, 33.33333)
+f_b2(array<float> rr) => array.size(rr) < 3 ? na : array.percentile_linear_interpolation(rr, 66.66667)
+f_bkt(float rng, float b1, float b2) => (na(b1) or na(b2)) ? 0 : rng < b1 ? 0 : rng < b2 ? 1 : 2
+
+// counts [n, sl100, sl75, tp0, tp10, tp30, tp50] for one strategy+bucket given the boundaries
+f_seg(int s, int bkt, float b1, float b2) =>
+    nn = 0
+    a0 = 0
+    a1 = 0
+    a2 = 0
+    a3 = 0
+    a4 = 0
+    a5 = 0
+    if array.size(tRng) > 0
+        for i = 0 to array.size(tRng) - 1
+            if array.get(tStrat, i) == s and f_bkt(array.get(tRng, i), b1, b2) == bkt
+                nn := nn + 1
+                a0 := a0 + array.get(tSL100, i)
+                a1 := a1 + array.get(tSL75,  i)
+                a2 := a2 + array.get(tTP0,   i)
+                a3 := a3 + array.get(tTP10,  i)
+                a4 := a4 + array.get(tTP30,  i)
+                a5 := a5 + array.get(tTP50,  i)
+    [nn, a0, a1, a2, a3, a4, a5]
+
+// ---- study B: one record per armed setup, conditioned on how deep the pullback went ----
+// Level order used everywhere below: 0 TP0, 1 TP10, 2 TP30, 3 TP50, 4 SL75, 5 SL100.
+var pbStrat = array.new_int(0)
+var pbRngP  = array.new_float(0)
+var pbR25   = array.new_int(0)      // did price retrace to the 25% fib
+var pbR50   = array.new_int(0)      // ... and to the 50% fib
+var pb25_0  = array.new_int(0)      // levels reached from the 25% retrace onward
+var pb25_1  = array.new_int(0)
+var pb25_2  = array.new_int(0)
+var pb25_3  = array.new_int(0)
+var pb25_4  = array.new_int(0)
+var pb25_5  = array.new_int(0)
+var pb50_0  = array.new_int(0)      // levels reached from the 50% retrace onward
+var pb50_1  = array.new_int(0)
+var pb50_2  = array.new_int(0)
+var pb50_3  = array.new_int(0)
+var pb50_4  = array.new_int(0)
+var pb50_5  = array.new_int(0)
+
+f_pbPush(int s, float rngP, bool r25, bool r50, array<bool> h25, array<bool> h50) =>
+    array.push(pbStrat, s)
+    array.push(pbRngP,  rngP)
+    array.push(pbR25,   r25 ? 1 : 0)
+    array.push(pbR50,   r50 ? 1 : 0)
+    array.push(pb25_0, array.get(h25, 0) ? 1 : 0)
+    array.push(pb25_1, array.get(h25, 1) ? 1 : 0)
+    array.push(pb25_2, array.get(h25, 2) ? 1 : 0)
+    array.push(pb25_3, array.get(h25, 3) ? 1 : 0)
+    array.push(pb25_4, array.get(h25, 4) ? 1 : 0)
+    array.push(pb25_5, array.get(h25, 5) ? 1 : 0)
+    array.push(pb50_0, array.get(h50, 0) ? 1 : 0)
+    array.push(pb50_1, array.get(h50, 1) ? 1 : 0)
+    array.push(pb50_2, array.get(h50, 2) ? 1 : 0)
+    array.push(pb50_3, array.get(h50, 3) ? 1 : 0)
+    array.push(pb50_4, array.get(h50, 4) ? 1 : 0)
+    array.push(pb50_5, array.get(h50, 5) ? 1 : 0)
+
+// counts for one strategy at one pullback depth. depth 0 = reached the 25% fib, 1 = reached the 50% fib.
+// bkt = -1 pools all range sizes; 0/1/2 restricts to the S/M/L bucket defined by b1/b2.
+// Returns [setups armed, setups that reached that pullback, then TP0, TP10, TP30, TP50, SL75, SL100 counts].
+f_pbSeg(int s, int depth, int bkt, float b1, float b2) =>
+    nAll = 0
+    nn   = 0
+    h0 = 0
+    h1 = 0
+    h2 = 0
+    h3 = 0
+    h4 = 0
+    h5 = 0
+    if array.size(pbStrat) > 0
+        for i = 0 to array.size(pbStrat) - 1
+            if array.get(pbStrat, i) == s and (bkt < 0 or f_bkt(array.get(pbRngP, i), b1, b2) == bkt)
+                nAll := nAll + 1
+                if (depth == 0 ? array.get(pbR25, i) : array.get(pbR50, i)) == 1
+                    nn := nn + 1
+                    h0 := h0 + (depth == 0 ? array.get(pb25_0, i) : array.get(pb50_0, i))
+                    h1 := h1 + (depth == 0 ? array.get(pb25_1, i) : array.get(pb50_1, i))
+                    h2 := h2 + (depth == 0 ? array.get(pb25_2, i) : array.get(pb50_2, i))
+                    h3 := h3 + (depth == 0 ? array.get(pb25_3, i) : array.get(pb50_3, i))
+                    h4 := h4 + (depth == 0 ? array.get(pb25_4, i) : array.get(pb50_4, i))
+                    h5 := h5 + (depth == 0 ? array.get(pb25_5, i) : array.get(pb50_5, i))
+    [nAll, nn, h0, h1, h2, h3, h4, h5]
+
+// ================================================================ ORB ENGINE (runs first of the two pullbacks)
+var float or_rH = na
+var float or_rL = na
+var int   or_rHbar = na
+var int   or_rLbar = na
+var int   or_dir = 0
+var bool  or_shallow = false
+var float or_e1 = na
+var float or_e2 = na
+var bool  or_e2Ok = false        // is the avg-down unit far enough from the stop to be a real trade?
+var float or_zstop = na
+var float or_rng = na
+var bool  or_broke = false
+var bool  or_placed = false
+var bool  or_f1 = false
+var bool  or_f2 = false
+var float or_avgPx = na
+var float or_curStop = na
+var float or_curTP = na
+var bool  or_beDone = false
+var bool  or_closed = false
+var bool  or_oppBroke = false
+var bool  or_missed = false      // the ORB pullback traded through while a Halyard trade held the seat
+var float orbSz1 = na
+var float orbSz2 = na
+
+if newSession
+    or_rH := na
+    or_rL := na
+    or_dir := 0
+    or_shallow := false
+    or_e1 := na
+    or_e2 := na
+    or_e2Ok := false
+    or_zstop := na
+    or_rng := na
+    or_broke := false
+    or_placed := false
+    or_f1 := false
+    or_f2 := false
+    or_avgPx := na
+    or_curStop := na
+    or_curTP := na
+    or_beDone := false
+    or_closed := false
+    or_oppBroke := false
+    or_missed := false
+    orbSz1 := na
+    orbSz2 := na
+if or_inR
+    if na(or_rH) or high > or_rH
+        or_rH := high
+        or_rHbar := bar_index
+    if na(or_rL) or low < or_rL
+        or_rL := low
+        or_rLbar := bar_index
+if or_rDone and not na(or_rH) and or_rH > or_rL
+    or_rng := or_rH - or_rL
+    or_lf = or_rLbar < or_rHbar
+    or_pos = (close[1] - or_rL) / or_rng
+    orbDepF = orbDepth / 100.0                    // how deep the close may sit, measured from the breaking level
+    if orbLong and or_lf and or_pos >= 1.0 - orbDepF
+        or_dir := 1
+        or_shallow := or_pos >= 0.75
+        or_e1 := or_shallow ? or_rL + 0.75*or_rng : or_rL + 0.5*or_rng
+        or_e2 := or_rL + 0.5*or_rng
+        or_zstop := f_sl(1, or_rH, or_rL, or_rng, orbSl)
+    else if orbShort and (not or_lf) and or_pos <= orbDepF
+        or_dir := -1
+        or_shallow := or_pos <= 0.25
+        or_e1 := or_shallow ? or_rL + 0.25*or_rng : or_rL + 0.5*or_rng
+        or_e2 := or_rL + 0.5*or_rng
+        or_zstop := f_sl(-1, or_rH, or_rL, or_rng, orbSl)
+    // ENTRY-vs-STOP CLEARANCE. With the stop welded to the far edge this could never bind. With a selectable
+    // stop it does: at 50% the stop sits exactly on the 50% line, which is where the avg-down unit lives and
+    // where a deeper first entry lives too. Each unit is checked on its own distance and dropped if it is not
+    // clear - the first entry failing kills the whole setup, the add failing just removes the add.
+    if or_dir != 0
+        d1   = or_dir == 1 ? or_e1 - or_zstop : or_zstop - or_e1
+        d2   = or_dir == 1 ? or_e2 - or_zstop : or_zstop - or_e2
+        minD = orbibMinStopFrac * or_rng
+        if d1 < minD
+            or_dir := 0                           // no tradeable first entry at this stop -> no setup today
+            or_shallow := false
+            or_e1 := na
+            or_e2 := na
+            or_zstop := na
+        else
+            or_e2Ok := d2 >= minD
+            // each unit is sized on its own budget and its own stop distance (the add sits closer to the stop)
+            orbSz1 := sizeByRisk ? f_size(orbRiskDlr1, d1) : orbQty1
+            if or_e2Ok
+                orbSz2 := sizeByRisk ? f_size(orbRiskDlr2, d2) : orbQty2
+or_useAdd = orbAvg and or_shallow and or_e2Ok and not na(or_e2)
+// break by selected type
+or_brk = orbBreak == "Wick (touch)" ? ((or_dir == 1 and high >= or_rH) or (or_dir == -1 and low <= or_rL)) : ((or_dir == 1 and close > or_rH) or (or_dir == -1 and close < or_rL))
+if or_dir != 0 and or_brk
+    or_broke := true
+// double-break detection: opposite range extreme is violated
+if or_dir == 1 and low < or_rL
+    or_oppBroke := true
+if or_dir == -1 and high > or_rH
+    or_oppBroke := true
+// entry window: before IB forms (when IB is on), within ORB cutoff otherwise, on an allowed weekday
+orbSizeOK = orbMinRngPct <= 0 or (not na(or_rng) and or_rL > 0 and or_rng / or_rL * 100 >= orbMinRngPct)
+orbWin = inSess and not dayHalt and orbDayOK and tod <= (orbCutH*60 + orbCutM) and (not runIB or not ibFormed) and orbSizeOK
+// SEAT: a live HALYARD trade holds the ORB limit back rather than cancelling it - same rule the IB has always
+// had behind an open ORB. If the ORB pullback entry trades through during the hold, that fill was missed and
+// the ORB is done for the day.
+if runORB and or_dir != 0 and or_broke and not or_placed and not or_closed and halLive and not na(or_e1)
+    if (or_dir == 1 and low <= or_e1) or (or_dir == -1 and high >= or_e1)
+        or_missed := true
+if runORB and or_dir != 0 and or_broke and not or_placed and not or_closed and orbWin and not flatten and (not noDbl or not or_oppBroke) and orbSz1 >= 1 and not halLive and not or_missed
+    if ordersOn
+        if or_dir == 1
+            strategy.entry("ORL", strategy.long, qty = orbSz1, limit = or_e1)
+            if or_useAdd and orbSz2 >= 1
+                strategy.entry("ORL2", strategy.long, qty = orbSz2, limit = or_e2)
+        else
+            strategy.entry("ORS", strategy.short, qty = orbSz1, limit = or_e1)
+            if or_useAdd and orbSz2 >= 1
+                strategy.entry("ORS2", strategy.short, qty = orbSz2, limit = or_e2)
+    or_placed := true                       // the setup is tracked in both modes; only the order is optional
+if or_placed and not or_closed
+    if or_dir == 1
+        if not or_f1 and low <= or_e1
+            or_f1 := true
+        if or_useAdd and not or_f2 and low <= or_e2
+            or_f2 := true
+    if or_dir == -1
+        if not or_f1 and high >= or_e1
+            or_f1 := true
+        if or_useAdd and not or_f2 and high >= or_e2
+            or_f2 := true
+or_firstFill = (or_f1 or or_f2) and not (or_f1[1] or or_f2[1])
+if or_f1 or or_f2
+    or_avgPx := or_f1 and or_f2 ? (or_e1 + or_e2) / 2 : or_f1 ? or_e1 : or_e2
+if or_firstFill
+    or_curStop := or_zstop
+    or_curTP := f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
+    or_beDone := false
+if orbBE and not or_beDone and (or_f1 or or_f2) and not or_closed
+    if or_dir == 1 and high >= or_rH
+        or_curStop := math.max(or_curStop, or_avgPx)
+        or_beDone := true
+    if or_dir == -1 and low <= or_rL
+        or_curStop := math.min(or_curStop, or_avgPx)
+        or_beDone := true
+if ordersOn and not na(or_curStop)
+    strategy.exit("ORLx",  from_entry = "ORL",  stop = or_curStop, limit = or_curTP)
+    strategy.exit("ORL2x", from_entry = "ORL2", stop = or_curStop, limit = or_curTP)
+    strategy.exit("ORSx",  from_entry = "ORS",  stop = or_curStop, limit = or_curTP)
+    strategy.exit("ORS2x", from_entry = "ORS2", stop = or_curStop, limit = or_curTP)
+if (or_f1 or or_f2) and not or_closed and not na(or_curStop)
+    if or_dir == 1 and (low <= or_curStop or high >= or_curTP)
+        or_closed := true
+    if or_dir == -1 and (high >= or_curStop or low <= or_curTP)
+        or_closed := true
+// cancel resting ORB entries once the window closes unfilled, or done/flat/off/double-break/missed.
+// CARRY: with the option armed, an unfilled ORB limit survives the IB forming. It still dies at the ORB cutoff,
+// on a double-break, on the daily halt or at the flatten - and it gives way as soon as the IB arms its own
+// setup, which is handled after the IB engine below (ib_broke is not known this early in the bar).
+orbHold = orbCarry and or_placed and not (or_f1 or or_f2) and inSess and not dayHalt and orbDayOK and tod <= (orbCutH*60 + orbCutM)
+if ordersOn and (or_closed or flatten or not runORB or or_missed or (noDbl and or_oppBroke) or ((not orbWin) and not (or_f1 or or_f2) and not orbHold))
+    strategy.cancel("ORL")
+    strategy.cancel("ORL2")
+    strategy.cancel("ORS")
+    strategy.cancel("ORS2")
+// ---- ORB study A: from the fill to EOD, did price touch each level? ----
+var bool  or_trk    = false
+var int   or_tdir   = 0
+var float orL_sl100 = na
+var float orL_sl75  = na
+var float orL_tp0   = na
+var float orL_tp10  = na
+var float orL_tp30  = na
+var float orL_tp50  = na
+var bool  orR_sl100 = false
+var bool  orR_sl75  = false
+var bool  orR_tp0   = false
+var bool  orR_tp10  = false
+var bool  orR_tp30  = false
+var bool  orR_tp50  = false
+if newSession
+    or_trk := false
+if or_firstFill and not na(or_rng)
+    or_trk    := true
+    or_tdir   := or_dir
+    orL_sl100 := or_dir == 1 ? or_rL : or_rH
+    orL_sl75  := or_rL + (or_dir == 1 ? 0.25 : 0.75) * or_rng
+    orL_tp0   := or_dir == 1 ? or_rH : or_rL
+    orL_tp10  := or_dir == 1 ? or_rH + 0.10*or_rng : or_rL - 0.10*or_rng
+    orL_tp30  := or_dir == 1 ? or_rH + 0.30*or_rng : or_rL - 0.30*or_rng
+    orL_tp50  := or_dir == 1 ? or_rH + 0.50*or_rng : or_rL - 0.50*or_rng
+    orR_sl100 := false
+    orR_sl75  := false
+    orR_tp0   := false
+    orR_tp10  := false
+    orR_tp30  := false
+    orR_tp50  := false
+if or_trk
+    if or_tdir == 1
+        orR_tp0   := orR_tp0   or high >= orL_tp0
+        orR_tp10  := orR_tp10  or high >= orL_tp10
+        orR_tp30  := orR_tp30  or high >= orL_tp30
+        orR_tp50  := orR_tp50  or high >= orL_tp50
+        orR_sl75  := orR_sl75  or low  <= orL_sl75
+        orR_sl100 := orR_sl100 or low  <= orL_sl100
+    else
+        orR_tp0   := orR_tp0   or low  <= orL_tp0
+        orR_tp10  := orR_tp10  or low  <= orL_tp10
+        orR_tp30  := orR_tp30  or low  <= orL_tp30
+        orR_tp50  := orR_tp50  or low  <= orL_tp50
+        orR_sl75  := orR_sl75  or high >= orL_sl75
+        orR_sl100 := orR_sl100 or high >= orL_sl100
+    if flatten
+        f_pushTrade(0, or_rng / or_rL * 100, orR_sl100, orR_sl75, orR_tp0, orR_tp10, orR_tp30, orR_tp50)
+        or_trk := false
+
+// ---- ORB study B: armed -> 25% / 50% pullback -> which levels print from there, filed at the EOD flatten ----
+var bool  orP_act  = false
+var int   orP_dir  = 0
+var float orP_rngP = na
+var float orP_p25  = na
+var float orP_p50  = na
+var bool  orP_r25  = false
+var bool  orP_r50  = false
+var orP_lv  = array.new_float(6, na)      // 0 TP0, 1 TP10, 2 TP30, 3 TP50, 4 SL75, 5 SL100
+var orP_h25 = array.new_bool(6, false)
+var orP_h50 = array.new_bool(6, false)
+if newSession
+    orP_act := false
+if or_broke and not or_broke[1] and or_dir != 0 and not na(or_rng) and or_rL > 0
+    orP_act  := true
+    orP_dir  := or_dir
+    orP_rngP := or_rng / or_rL * 100
+    orP_p25  := or_rL + (or_dir == 1 ? 0.75 : 0.25) * or_rng
+    orP_p50  := or_rL + 0.50 * or_rng
+    orP_r25  := false
+    orP_r50  := false
+    array.set(orP_lv, 0, or_dir == 1 ? or_rH : or_rL)
+    array.set(orP_lv, 1, or_dir == 1 ? or_rH + 0.10*or_rng : or_rL - 0.10*or_rng)
+    array.set(orP_lv, 2, or_dir == 1 ? or_rH + 0.30*or_rng : or_rL - 0.30*or_rng)
+    array.set(orP_lv, 3, or_dir == 1 ? or_rH + 0.50*or_rng : or_rL - 0.50*or_rng)
+    array.set(orP_lv, 4, or_rL + (or_dir == 1 ? 0.25 : 0.75) * or_rng)
+    array.set(orP_lv, 5, or_dir == 1 ? or_rL : or_rH)
+    for k = 0 to 5
+        array.set(orP_h25, k, false)
+        array.set(orP_h50, k, false)
+if orP_act
+    up    = orP_dir == 1
+    new25 = false
+    new50 = false
+    if not orP_r25 and (up ? low <= orP_p25 : high >= orP_p25)
+        orP_r25 := true
+        new25    := true
+    if not orP_r50 and (up ? low <= orP_p50 : high >= orP_p50)
+        orP_r50 := true
+        new50    := true
+    // On the bar that REACHES the pullback the touch must be confirmed by the CLOSE: the last tick of that bar
+    // is beyond the level, so it traded there after the retrace. Later bars count an ordinary wick touch.
+    for k = 0 to 5
+        lv   = array.get(orP_lv, k)
+        isTp = k <= 3
+        wick = isTp ? (up ? high >= lv : low <= lv) : (up ? low <= lv : high >= lv)
+        cls  = isTp ? (up ? close >= lv : close <= lv) : (up ? close <= lv : close >= lv)
+        if orP_r25 and (new25 ? cls : wick)
+            array.set(orP_h25, k, true)
+        if orP_r50 and (new50 ? cls : wick)
+            array.set(orP_h50, k, true)
+    if flatten
+        f_pbPush(0, orP_rngP, orP_r25, orP_r50, orP_h25, orP_h50)
+        orP_act := false
+
+// ================================================================ IB ENGINE
+var float ib_rH = na
+var float ib_rL = na
+var int   ib_rHbar = na
+var int   ib_rLbar = na
+var int   ib_dir = 0
+var bool  ib_shallow = false
+var float ib_e1 = na
+var float ib_e2 = na
+var bool  ib_e2Ok = false        // is the avg-down unit far enough from the stop to be a real trade?
+var float ib_zstop = na
+var float ib_rng = na
+var bool  ib_broke = false
+var bool  ib_placed = false
+var bool  ib_f1 = false
+var bool  ib_f2 = false
+var float ib_avgPx = na
+var float ib_curStop = na
+var float ib_curTP = na
+var bool  ib_beDone = false
+var bool  ib_closed = false
+var bool  ib_oppBroke = false
+var bool  ib_missed = false      // the IB pullback was reached while another setup held the seat -> skip IB today
+var float ibSz1 = na
+var float ibSz2 = na
+
+if newSession
+    ib_rH := na
+    ib_rL := na
+    ib_dir := 0
+    ib_shallow := false
+    ib_e1 := na
+    ib_e2 := na
+    ib_e2Ok := false
+    ib_zstop := na
+    ib_rng := na
+    ib_broke := false
+    ib_placed := false
+    ib_f1 := false
+    ib_f2 := false
+    ib_avgPx := na
+    ib_curStop := na
+    ib_curTP := na
+    ib_beDone := false
+    ib_closed := false
+    ib_oppBroke := false
+    ib_missed := false
+    ibSz1 := na
+    ibSz2 := na
+if ib_inR
+    if na(ib_rH) or high > ib_rH
+        ib_rH := high
+        ib_rHbar := bar_index
+    if na(ib_rL) or low < ib_rL
+        ib_rL := low
+        ib_rLbar := bar_index
+if ib_rDone and not na(ib_rH) and ib_rH > ib_rL
+    ib_rng := ib_rH - ib_rL
+    ib_lf = ib_rLbar < ib_rHbar
+    ib_pos = (close[1] - ib_rL) / ib_rng
+    ibDepF = ibDepth / 100.0
+    if ibLong and ib_lf and ib_pos >= 1.0 - ibDepF
+        ib_dir := 1
+        ib_shallow := ib_pos >= 0.75
+        ib_e1 := ib_shallow ? ib_rL + 0.75*ib_rng : ib_rL + 0.5*ib_rng
+        ib_e2 := ib_rL + 0.5*ib_rng
+        ib_zstop := f_sl(1, ib_rH, ib_rL, ib_rng, ibSl)
+    else if ibShort and (not ib_lf) and ib_pos <= ibDepF
+        ib_dir := -1
+        ib_shallow := ib_pos <= 0.25
+        ib_e1 := ib_shallow ? ib_rL + 0.25*ib_rng : ib_rL + 0.5*ib_rng
+        ib_e2 := ib_rL + 0.5*ib_rng
+        ib_zstop := f_sl(-1, ib_rH, ib_rL, ib_rng, ibSl)
+    // ENTRY-vs-STOP CLEARANCE - the same rule as the ORB engine; see the note there.
+    if ib_dir != 0
+        d1   = ib_dir == 1 ? ib_e1 - ib_zstop : ib_zstop - ib_e1
+        d2   = ib_dir == 1 ? ib_e2 - ib_zstop : ib_zstop - ib_e2
+        minD = orbibMinStopFrac * ib_rng
+        if d1 < minD
+            ib_dir := 0
+            ib_shallow := false
+            ib_e1 := na
+            ib_e2 := na
+            ib_zstop := na
+        else
+            ib_e2Ok := d2 >= minD
+            ibSz1 := sizeByRisk ? f_size(ibRiskDlr1, d1) : ibQty1
+            if ib_e2Ok
+                ibSz2 := sizeByRisk ? f_size(ibRiskDlr2, d2) : ibQty2
+// SEAT: an OPEN trade of ANY other setup keeps priority - the IB order is held back (either direction, so the
+// two can never stack risk or hedge each other). The IB is not cancelled, only delayed: the moment the seat
+// frees the IB limit goes in, provided price has NOT already traded through the IB entry level while it was
+// held. If it has, that pullback was missed and the IB is done for the day.
+orbLive   = runORB and (or_f1 or or_f2) and not or_closed
+ibHeld    = orbLive or halLive
+ib_useAdd = ibAvg and ib_shallow and ib_e2Ok and not na(ib_e2)
+ib_brk = ibBreak == "Wick (touch)" ? ((ib_dir == 1 and high >= ib_rH) or (ib_dir == -1 and low <= ib_rL)) : ((ib_dir == 1 and close > ib_rH) or (ib_dir == -1 and close < ib_rL))
+if ib_dir != 0 and ib_brk
+    ib_broke := true
+if ib_dir == 1 and low < ib_rL
+    ib_oppBroke := true
+if ib_dir == -1 and high > ib_rH
+    ib_oppBroke := true
+ibWin = inSess and not dayHalt and ibDayOK and tod <= (ibCutH*60 + ibCutM)
+// hold the IB while another trade is live; if its entry level trades through during the hold, the IB is forfeited
+if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and ibHeld and not na(ib_e1)
+    if (ib_dir == 1 and low <= ib_e1) or (ib_dir == -1 and high >= ib_e1)
+        ib_missed := true
+if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and ibWin and not flatten and (not noDbl or not ib_oppBroke) and ibSz1 >= 1 and not ibHeld and not ib_missed
+    if ordersOn
+        if ib_dir == 1
+            strategy.entry("IBL", strategy.long, qty = ibSz1, limit = ib_e1)
+            if ib_useAdd and ibSz2 >= 1
+                strategy.entry("IBL2", strategy.long, qty = ibSz2, limit = ib_e2)
+        else
+            strategy.entry("IBS", strategy.short, qty = ibSz1, limit = ib_e1)
+            if ib_useAdd and ibSz2 >= 1
+                strategy.entry("IBS2", strategy.short, qty = ibSz2, limit = ib_e2)
+    ib_placed := true
+if ib_placed and not ib_closed
+    if ib_dir == 1
+        if not ib_f1 and low <= ib_e1
+            ib_f1 := true
+        if ib_useAdd and not ib_f2 and low <= ib_e2
+            ib_f2 := true
+    if ib_dir == -1
+        if not ib_f1 and high >= ib_e1
+            ib_f1 := true
+        if ib_useAdd and not ib_f2 and high >= ib_e2
+            ib_f2 := true
+ib_firstFill = (ib_f1 or ib_f2) and not (ib_f1[1] or ib_f2[1])
+if ib_f1 or ib_f2
+    ib_avgPx := ib_f1 and ib_f2 ? (ib_e1 + ib_e2) / 2 : ib_f1 ? ib_e1 : ib_e2
+if ib_firstFill
+    ib_curStop := ib_zstop
+    ib_curTP := f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
+    ib_beDone := false
+if ibBE and not ib_beDone and (ib_f1 or ib_f2) and not ib_closed
+    if ib_dir == 1 and high >= ib_rH
+        ib_curStop := math.max(ib_curStop, ib_avgPx)
+        ib_beDone := true
+    if ib_dir == -1 and low <= ib_rL
+        ib_curStop := math.min(ib_curStop, ib_avgPx)
+        ib_beDone := true
+if ordersOn and not na(ib_curStop)
+    strategy.exit("IBLx",  from_entry = "IBL",  stop = ib_curStop, limit = ib_curTP)
+    strategy.exit("IBL2x", from_entry = "IBL2", stop = ib_curStop, limit = ib_curTP)
+    strategy.exit("IBSx",  from_entry = "IBS",  stop = ib_curStop, limit = ib_curTP)
+    strategy.exit("IBS2x", from_entry = "IBS2", stop = ib_curStop, limit = ib_curTP)
+if (ib_f1 or ib_f2) and not ib_closed and not na(ib_curStop)
+    if ib_dir == 1 and (low <= ib_curStop or high >= ib_curTP)
+        ib_closed := true
+    if ib_dir == -1 and (high >= ib_curStop or low <= ib_curTP)
+        ib_closed := true
+if ordersOn and (ib_closed or flatten or not runIB or ib_missed or (noDbl and ib_oppBroke) or ((not ibWin) and not (ib_f1 or ib_f2)))
+    strategy.cancel("IBL")
+    strategy.cancel("IBL2")
+    strategy.cancel("IBS")
+    strategy.cancel("IBS2")
+
+// CARRY hand-over: the moment the IB breaks its range and has a valid setup, a carried ORB limit that is still
+// unfilled is dropped - the IB gets the seat. A carried ORB that HAS filled keeps it (see orbLive above).
+if runORB and orbCarry and not or_closed and not (or_f1 or or_f2) and ib_dir != 0 and ib_broke
+    if ordersOn
+        strategy.cancel("ORL")
+        strategy.cancel("ORL2")
+        strategy.cancel("ORS")
+        strategy.cancel("ORS2")
+    or_closed := true
+
+// The seat as Halyard reads it on the NEXT chart bar (declared above the Halyard engine).
+orbibLive := orbLive or (runIB and (ib_f1 or ib_f2) and not ib_closed)
+// ---- IB study A: from the fill to EOD, did price touch each level? ----
+var bool  ib_trk    = false
+var int   ib_tdir   = 0
+var float ibL_sl100 = na
+var float ibL_sl75  = na
+var float ibL_tp0   = na
+var float ibL_tp10  = na
+var float ibL_tp30  = na
+var float ibL_tp50  = na
+var bool  ibR_sl100 = false
+var bool  ibR_sl75  = false
+var bool  ibR_tp0   = false
+var bool  ibR_tp10  = false
+var bool  ibR_tp30  = false
+var bool  ibR_tp50  = false
+if newSession
+    ib_trk := false
+if ib_firstFill and not na(ib_rng)
+    ib_trk    := true
+    ib_tdir   := ib_dir
+    ibL_sl100 := ib_dir == 1 ? ib_rL : ib_rH
+    ibL_sl75  := ib_rL + (ib_dir == 1 ? 0.25 : 0.75) * ib_rng
+    ibL_tp0   := ib_dir == 1 ? ib_rH : ib_rL
+    ibL_tp10  := ib_dir == 1 ? ib_rH + 0.10*ib_rng : ib_rL - 0.10*ib_rng
+    ibL_tp30  := ib_dir == 1 ? ib_rH + 0.30*ib_rng : ib_rL - 0.30*ib_rng
+    ibL_tp50  := ib_dir == 1 ? ib_rH + 0.50*ib_rng : ib_rL - 0.50*ib_rng
+    ibR_sl100 := false
+    ibR_sl75  := false
+    ibR_tp0   := false
+    ibR_tp10  := false
+    ibR_tp30  := false
+    ibR_tp50  := false
+if ib_trk
+    if ib_tdir == 1
+        ibR_tp0   := ibR_tp0   or high >= ibL_tp0
+        ibR_tp10  := ibR_tp10  or high >= ibL_tp10
+        ibR_tp30  := ibR_tp30  or high >= ibL_tp30
+        ibR_tp50  := ibR_tp50  or high >= ibL_tp50
+        ibR_sl75  := ibR_sl75  or low  <= ibL_sl75
+        ibR_sl100 := ibR_sl100 or low  <= ibL_sl100
+    else
+        ibR_tp0   := ibR_tp0   or low  <= ibL_tp0
+        ibR_tp10  := ibR_tp10  or low  <= ibL_tp10
+        ibR_tp30  := ibR_tp30  or low  <= ibL_tp30
+        ibR_tp50  := ibR_tp50  or low  <= ibL_tp50
+        ibR_sl75  := ibR_sl75  or high >= ibL_sl75
+        ibR_sl100 := ibR_sl100 or high >= ibL_sl100
+    if flatten
+        f_pushTrade(1, ib_rng / ib_rL * 100, ibR_sl100, ibR_sl75, ibR_tp0, ibR_tp10, ibR_tp30, ibR_tp50)
+        ib_trk := false
+
+// ---- IB study B: armed -> 25% / 50% pullback -> which levels print from there, filed at the EOD flatten ----
+var bool  ibP_act  = false
+var int   ibP_dir  = 0
+var float ibP_rngP = na
+var float ibP_p25  = na
+var float ibP_p50  = na
+var bool  ibP_r25  = false
+var bool  ibP_r50  = false
+var ibP_lv  = array.new_float(6, na)      // 0 TP0, 1 TP10, 2 TP30, 3 TP50, 4 SL75, 5 SL100
+var ibP_h25 = array.new_bool(6, false)
+var ibP_h50 = array.new_bool(6, false)
+if newSession
+    ibP_act := false
+if ib_broke and not ib_broke[1] and ib_dir != 0 and not na(ib_rng) and ib_rL > 0
+    ibP_act  := true
+    ibP_dir  := ib_dir
+    ibP_rngP := ib_rng / ib_rL * 100
+    ibP_p25  := ib_rL + (ib_dir == 1 ? 0.75 : 0.25) * ib_rng
+    ibP_p50  := ib_rL + 0.50 * ib_rng
+    ibP_r25  := false
+    ibP_r50  := false
+    array.set(ibP_lv, 0, ib_dir == 1 ? ib_rH : ib_rL)
+    array.set(ibP_lv, 1, ib_dir == 1 ? ib_rH + 0.10*ib_rng : ib_rL - 0.10*ib_rng)
+    array.set(ibP_lv, 2, ib_dir == 1 ? ib_rH + 0.30*ib_rng : ib_rL - 0.30*ib_rng)
+    array.set(ibP_lv, 3, ib_dir == 1 ? ib_rH + 0.50*ib_rng : ib_rL - 0.50*ib_rng)
+    array.set(ibP_lv, 4, ib_rL + (ib_dir == 1 ? 0.25 : 0.75) * ib_rng)
+    array.set(ibP_lv, 5, ib_dir == 1 ? ib_rL : ib_rH)
+    for k = 0 to 5
+        array.set(ibP_h25, k, false)
+        array.set(ibP_h50, k, false)
+if ibP_act
+    up    = ibP_dir == 1
+    new25 = false
+    new50 = false
+    if not ibP_r25 and (up ? low <= ibP_p25 : high >= ibP_p25)
+        ibP_r25 := true
+        new25    := true
+    if not ibP_r50 and (up ? low <= ibP_p50 : high >= ibP_p50)
+        ibP_r50 := true
+        new50    := true
+    for k = 0 to 5
+        lv   = array.get(ibP_lv, k)
+        isTp = k <= 3
+        wick = isTp ? (up ? high >= lv : low <= lv) : (up ? low <= lv : high >= lv)
+        cls  = isTp ? (up ? close >= lv : close <= lv) : (up ? close <= lv : close >= lv)
+        if ibP_r25 and (new25 ? cls : wick)
+            array.set(ibP_h25, k, true)
+        if ibP_r50 and (new50 ? cls : wick)
+            array.set(ibP_h50, k, true)
+    if flatten
+        f_pbPush(1, ibP_rngP, ibP_r25, ibP_r50, ibP_h25, ibP_h50)
+        ibP_act := false
+
+// ---------------------------------------------------------------- EOD flatten + daily loss limit
+// The 15:30 flatten closes the ORB/IB entries BY ID. Halyard has its own 13:30/14:30 ET boundary and closes its
+// own entries there, so neither engine can ever flatten the other's trade.
+if ordersOn and flatten
+    strategy.close("ORL",  comment = "EOD flat")
+    strategy.close("ORL2", comment = "EOD flat")
+    strategy.close("ORS",  comment = "EOD flat")
+    strategy.close("ORS2", comment = "EOD flat")
+    strategy.close("IBL",  comment = "EOD flat")
+    strategy.close("IBL2", comment = "EOD flat")
+    strategy.close("IBS",  comment = "EOD flat")
+    strategy.close("IBS2", comment = "EOD flat")
+// The daily max loss is the ONE rule that reaches across setups: it is an account circuit breaker, so it closes
+// everything that is open, Halyard included, and cancels every resting order.
+if dayHalt
+    if ordersOn
+        strategy.close_all(comment = "Daily max loss")
+        strategy.cancel_all()
+    halTrDir := 0
+
+// ---------------------------------------------------------------- Automation: PickMyTrade webhook (net position)
+// PickMyTrade's documented alert schema carries the buy/sell/close instruction in a field called "data".
+// Earlier versions of this file sent it as "action" only. Both are emitted here, with the same value: "data"
+// is the documented name, and "action" is kept so a setup that was already working on it keeps working. An
+// unrecognised extra key is ignored by the endpoint; a MISSING one is not.
+//
+// sl and tp are ABSOLUTE PRICE LEVELS, not distances - 0 means "no level, use the account default".
+//
+// EVERY NUMBER GOES THROUGH f_num, and that is the fix for a payload that gets REJECTED. str.tostring(na)
+// renders the three characters NaN, which is not valid JSON: one na stop or target and the whole message is
+// thrown out at the far end, so the entry that was already accepted sits at the broker with no bracket on it.
+// f_num turns an unknown level into 0 instead, which the schema accepts.
+f_num(float v) => na(v) ? "0" : str.tostring(math.round_to_mintick(v))
+
+f_pmt(string act, float q, float slp, float tpp) =>
+    '{"token":"' + pmtToken + '","account_id":"' + pmtAcct + '","symbol":"' + pmtSym +
+      '","data":"' + act + '","action":"' + act + '","quantity":' + str.tostring(q) +
+      ',"order_type":"' + pmtType +
+      '","sl":' + f_num(slp) +
+      ',"tp":' + f_num(tpp) + '}'
+
+// WHICH setup's bracket to quote. This has to survive a lag: the alerts fire on a change in the NETTED
+// strategy.position_size, and that variable only reflects a fill on the bar AFTER the engine books it, so by
+// the time an alert goes out the setup that caused it may already have been closed and reset.
+// The old chain was `halLive ? halStp : liveORB ? or_curStop : ib_curStop` - note the final branch is not
+// guarded on the IB actually being in a trade, so any moment neither Halyard nor the ORB was live it resolved
+// to ib_curStop, which is na on every day the IB never filled. That na is what became NaN in the JSON.
+// Now: prefer whichever setup is genuinely live, and otherwise fall back to the bracket latched at the last
+// fill, so the webhook always has a real pair of prices to quote.
+liveORB  = (or_f1 or or_f2) and not or_closed
+liveIB   = (ib_f1 or ib_f2) and not ib_closed
+var float lastStop = na
+var float lastTgt  = na
+if halEntered
+    lastStop := halStp
+    lastTgt  := halTgt
+if or_firstFill
+    lastStop := or_curStop
+    lastTgt  := or_curTP
+if ib_firstFill
+    lastStop := ib_curStop
+    lastTgt  := ib_curTP
+autoStop = halLive ? halStp : liveORB ? or_curStop : liveIB ? ib_curStop : lastStop
+autoTP   = halLive ? halTgt : liveORB ? or_curTP  : liveIB ? ib_curTP  : lastTgt
+autoQty  = math.abs(strategy.position_size)   // actual net contracts
+buyNow   = strategy.position_size > 0 and (strategy.position_size[1] <= 0 or strategy.position_size > strategy.position_size[1])
+sellNow  = strategy.position_size < 0 and (strategy.position_size[1] >= 0 or strategy.position_size < strategy.position_size[1])
+closeNow = strategy.position_size == 0 and strategy.position_size[1] != 0
+// The exact string that went out, kept for the on-chart debug readout below.
+var string pmtLast = ""
+if autoOn and ordersOn and buyNow
+    pmtLast := f_pmt("buy",  autoQty, autoStop, autoTP)
+    alert(pmtLast, alert.freq_once_per_bar)
+if autoOn and ordersOn and sellNow
+    pmtLast := f_pmt("sell", autoQty, autoStop, autoTP)
+    alert(pmtLast, alert.freq_once_per_bar)
+if autoOn and ordersOn and closeNow
+    pmtLast := f_pmt("close", 0, 0.0, 0.0)
+    alert(pmtLast, alert.freq_once_per_bar)
+
+// ---- on-chart readout of the LAST payload, so you can read what was actually transmitted ----
+// TradingView does not show you an alert()'s message after the fact, which is why a rejected payload is so
+// hard to diagnose. This prints the most recent one on the chart. Check it shows a real number for both
+// "sl" and "tp" - never NaN, and never 0 on a trade that is supposed to carry a bracket.
+var label pmtLbl = na
+if pmtDebug and barstate.islast and autoOn
+    if not na(pmtLbl)
+        label.delete(pmtLbl)
+    pmtLbl := label.new(bar_index, high, str.length(pmtLast) > 0 ? "last webhook payload:\n" + pmtLast : "no webhook payload sent yet", xloc = xloc.bar_index, style = label.style_label_down, color = color.new(color.navy, 10), textcolor = color.white, size = size.small)
+
+// ---------------------------------------------------------------- Break alerts (fire once when each range breaks)
+if brkAlerts and runHAL and (halBrkUp or halBrkDn)
+    halSLa = halBrkUp ? f_halLongStop(hal15C) : f_halShortStop(hal15C)
+    halTPa = halBrkUp ? f_halLongTP(hal15C, halSLa, halRR) : f_halShortTP(hal15C, halSLa, halRR)
+    alert("HALYARD 15m BREAK  " + (halBrkUp ? "LONG" : "SHORT") +
+         "  | broke " + str.tostring(math.round_to_mintick(halBrkUp ? halRH : halRL)) +
+         "  | entry " + str.tostring(math.round_to_mintick(hal15C)) +
+         "  | stop " + str.tostring(math.round_to_mintick(halSLa)) +
+         "  | target " + str.tostring(math.round_to_mintick(halTPa)), alert.freq_once_per_bar)
+if brkAlerts and runORB and or_dir != 0 and or_broke and not or_broke[1]
+    orTPa = f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
+    alert("ORB BREAK  " + (or_dir == 1 ? "LONG" : "SHORT") +
+         "  | broke " + str.tostring(math.round_to_mintick(or_dir == 1 ? or_rH : or_rL)) +
+         "  | pullback entry " + str.tostring(math.round_to_mintick(or_e1)) +
+         "  | stop " + str.tostring(math.round_to_mintick(or_zstop)) +
+         "  | target " + str.tostring(math.round_to_mintick(orTPa)), alert.freq_once_per_bar)
+if brkAlerts and runIB and ib_dir != 0 and ib_broke and not ib_broke[1]
+    ibTPa = f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
+    alert("IB BREAK  " + (ib_dir == 1 ? "LONG" : "SHORT") +
+         "  | broke " + str.tostring(math.round_to_mintick(ib_dir == 1 ? ib_rH : ib_rL)) +
+         "  | pullback entry " + str.tostring(math.round_to_mintick(ib_e1)) +
+         "  | stop " + str.tostring(math.round_to_mintick(ib_zstop)) +
+         "  | target " + str.tostring(math.round_to_mintick(ibTPa)), alert.freq_once_per_bar)
+
+// ================================================================ Risk/Reward + fib tool (ALL THREE SETUPS)
+// ONE routine draws every setup's box, so Halyard, ORB and IB are read the same way: a GREEN box from the entry
+// to the target, a RED box from the entry to the stop, a border in the setup's colour (orange ORB, teal IB,
+// fuchsia Halyard) and one label with that unit's contracts, $ risk, $ reward, R multiple and the 1-contract
+// numbers.
+// ANCHORING: y is price and x is BAR INDEX, both fixed at creation. The box is one bar wide to begin with and
+// its right edge is extended bar by bar while the setup is live, so it always covers real bars - it never
+// projects into empty space past the last bar and never stretches across a session gap.
+// HISTORY: every valid setup keeps its boxes and fib lines, so you can scroll back and read the risk/reward of
+// any past setup at the price levels it actually had. Only the text labels are capped by default.
+var array<box>   dBox = array.new<box>()
+var array<line>  dLin = array.new<line>()
+var array<label> dLab = array.new<label>()
+
+// An ORB/IB setup draws up to FOUR boxes (first entry + average-down unit, two each) and up to TWO labels, so
+// the per-setup limits are multiplied out here. Halyard draws two boxes and one label, well inside the same cap.
+f_trimDraws() =>
+    if keepBox > 0
+        while array.size(dBox) > keepBox * 4
+            box.delete(array.shift(dBox))
+        while array.size(dLin) > keepBox * 3
+            line.delete(array.shift(dLin))
+    if keepLab > 0
+        while array.size(dLab) > keepLab * 2
+            label.delete(array.shift(dLab))
+
+// Markup for ONE entry unit.
+// d      = 1 long, -1 short.
+// q      = contracts on THIS entry (each entry has its own count and its own risk budget).
+// pv     = $ per point per contract used for the money figures. ORB/IB pass the "$ per point" input; Halyard
+//          passes the symbol's own point value, which is what its position sizer divides by - so every box
+//          reports the money that setup actually risks.
+// ent2/q2= the OTHER unit, passed only on the first entry so its label can also show the setup total; pass
+//          na/0 on an average-down unit and on Halyard, which has no second unit.
+// dashed = draw this unit's boxes with a dashed border and a lighter fill, so an add is told apart at a glance.
+f_drawRR(int d, float ent, float zstop, float ptp, float q, color sigCol, string tag, float ent2, float q2, bool dashed, float pv) =>
+    riskUsd = math.abs(ent - zstop) * pv * q
+    rewUsd  = math.abs(ptp - ent) * pv * q
+    risk1   = math.abs(ent - zstop) * pv
+    rew1    = math.abs(ptp - ent) * pv
+    rrr = riskUsd > 0 ? rewUsd / riskUsd : na
+    gCol = color.new(color.green, dashed ? 89 : 82)
+    rCol = color.new(color.red,   dashed ? 89 : 82)
+    bw = box.new(bar_index, d == 1 ? ptp : ent, bar_index + 1, d == 1 ? ent : ptp, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = gCol)
+    br = box.new(bar_index, d == 1 ? ent : zstop, bar_index + 1, d == 1 ? zstop : ent, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = rCol)
+    if dashed
+        box.set_border_style(bw, line.style_dashed)
+        box.set_border_style(br, line.style_dashed)
+    txt = tag + "  " + str.tostring(q, "#.#") + " contract" + (q == 1 ? "" : "s") + " @ " + str.tostring(math.round_to_mintick(ent)) +
+         "\nRisk $" + str.tostring(riskUsd, "#") + " | Reward $" + str.tostring(rewUsd, "#") + " (" + str.tostring(rrr, "#.##") + "R)" +
+         "\n1 contract: Risk $" + str.tostring(risk1, "#") + " | Reward $" + str.tostring(rew1, "#")
+    if not na(ent2) and q2 > 0
+        totR = riskUsd + math.abs(ent2 - zstop) * pv * q2
+        totW = rewUsd  + math.abs(ptp - ent2)  * pv * q2
+        txt := txt + "\n+ avg-down " + str.tostring(q2, "#.#") + " @ " + str.tostring(math.round_to_mintick(ent2)) +
+             "  ->  setup total Risk $" + str.tostring(totR, "#") + " | Reward $" + str.tostring(totW, "#") +
+             " (" + str.tostring(totR > 0 ? totW / totR : na, "#.##") + "R)"
+    lb = label.new(bar_index + 1, ent, txt, xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.gray, dashed ? 35 : 15), textcolor = color.white, size = size.small)
+    array.push(dBox, bw)
+    array.push(dBox, br)
+    array.push(dLab, lb)
+    [bw, br, lb]
+
+f_drawFibs(float rL, float rg, color sigCol, array<line> dest) =>
+    array.clear(dest)
+    for i = 1 to 3
+        y = rL + i * 0.25 * rg
+        ln = line.new(bar_index, y, bar_index + 1, y, xloc = xloc.bar_index, color = color.new(sigCol, 35), style = line.style_dotted, width = 1)
+        array.push(dest, ln)
+        array.push(dLin, ln)
+
+// stretch one live unit's drawings to the current bar; prices stay exactly where they were set
+f_growUnit(box bw, box br, label lb) =>
+    if not na(bw)
+        box.set_right(bw, bar_index)
+        box.set_right(br, bar_index)
+        if not na(lb)
+            label.set_x(lb, bar_index)
+
+f_growFibs(array<line> fib) =>
+    if array.size(fib) > 0
+        for i = 0 to array.size(fib) - 1
+            line.set_x2(array.get(fib, i), bar_index)
+
+// ---------------------------------------------------------------- ORB drawings
+// Drawn when the ENTRY ORDER IS ACTUALLY PLACED (or_placed / ib_placed), so a break that any filter rejects -
+// wrong weekday, range too small, past the cutoff, IB already formed, double-break day, daily loss halt, sizing
+// under one contract, an entry the stop setting has squeezed out, or a limit waiting behind an open
+// Halyard/ORB trade - draws nothing at all.
+var box   orbBw  = na
+var box   orbBr  = na
+var label orbLb  = na
+var box   orbBw2 = na            // the average-down unit's own pair of boxes
+var box   orbBr2 = na
+var label orbLb2 = na
+var bool  orbGrow = false
+var array<line> orbFib = array.new<line>()
+if runORB and or_placed and not or_placed[1] and not na(or_e1) and not na(or_zstop)
+    orTP = f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
+    orbBw  := na
+    orbBr  := na
+    orbLb  := na
+    orbBw2 := na
+    orbBr2 := na
+    orbLb2 := na
+    if showFibs
+        f_drawFibs(or_rL, or_rng, color.new(color.orange, 0), orbFib)
+    if showRR
+        orbAdd = or_useAdd and orbSz2 >= 1
+        [bw, br, lb] = f_drawRR(or_dir, or_e1, or_zstop, orTP, orbSz1, color.new(color.orange, 0), "ORB entry 1", orbAdd ? or_e2 : na, orbAdd ? orbSz2 : 0, false, ptVal)
+        orbBw := bw
+        orbBr := br
+        orbLb := lb
+        if orbAdd and showRR2
+            [bwA, brA, lbA] = f_drawRR(or_dir, or_e2, or_zstop, orTP, orbSz2, color.new(color.orange, 0), "ORB avg-down", float(na), 0.0, true, ptVal)
+            orbBw2 := bwA
+            orbBr2 := brA
+            orbLb2 := lbA
+    orbGrow := true
+    f_trimDraws()
+if orbGrow
+    f_growUnit(orbBw,  orbBr,  orbLb)
+    f_growUnit(orbBw2, orbBr2, orbLb2)
+    f_growFibs(orbFib)
+    if or_closed or flatten or (not (or_f1 or or_f2) and not orbWin)
+        orbGrow := false
+
+// ---------------------------------------------------------------- IB drawings
+var box   ibBw  = na
+var box   ibBr  = na
+var label ibLb  = na
+var box   ibBw2 = na             // the average-down unit's own pair of boxes
+var box   ibBr2 = na
+var label ibLb2 = na
+var bool  ibGrow = false
+var array<line> ibFib = array.new<line>()
+if runIB and ib_placed and not ib_placed[1] and not na(ib_e1) and not na(ib_zstop)
+    ibTP = f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
+    ibBw  := na
+    ibBr  := na
+    ibLb  := na
+    ibBw2 := na
+    ibBr2 := na
+    ibLb2 := na
+    if showFibs
+        f_drawFibs(ib_rL, ib_rng, color.new(color.teal, 0), ibFib)
+    if showRR
+        ibAdd = ib_useAdd and ibSz2 >= 1
+        [bw2, br2, lb2] = f_drawRR(ib_dir, ib_e1, ib_zstop, ibTP, ibSz1, color.new(color.teal, 0), "IB entry 1", ibAdd ? ib_e2 : na, ibAdd ? ibSz2 : 0, false, ptVal)
+        ibBw := bw2
+        ibBr := br2
+        ibLb := lb2
+        if ibAdd and showRR2
+            [bwB, brB, lbB] = f_drawRR(ib_dir, ib_e2, ib_zstop, ibTP, ibSz2, color.new(color.teal, 0), "IB avg-down", float(na), 0.0, true, ptVal)
+            ibBw2 := bwB
+            ibBr2 := brB
+            ibLb2 := lbB
+    ibGrow := true
+    f_trimDraws()
+if ibGrow
+    f_growUnit(ibBw,  ibBr,  ibLb)
+    f_growUnit(ibBw2, ibBr2, ibLb2)
+    f_growFibs(ibFib)
+    if ib_closed or flatten or (not (ib_f1 or ib_f2) and not ibWin)
+        ibGrow := false
+
+// ---------------------------------------------------------------- HALYARD drawings
+// Same box, same label, same growth rule as the two above - only the border colour differs. Halyard is a single
+// unit, so there is no dashed average-down pair and no setup-total line. The money figures use the symbol's own
+// point value, which is exactly what the Halyard position sizer divides by.
+var box   halBw   = na
+var box   halBr   = na
+var label halLb   = na
+var bool  halGrow = false
+if runHAL and halEntered and showRR and showRRHal
+    halBw := na
+    halBr := na
+    halLb := na
+    [bwH, brH, lbH] = f_drawRR(halEntDir, halEnt, halStp, halTgt, halQty, halSigCol, halEntDir == 1 ? "HALYARD long" : "HALYARD short", float(na), 0.0, false, syminfo.pointvalue)
+    halBw := bwH
+    halBr := brH
+    halLb := lbH
+    halGrow := true
+    f_trimDraws()
+if halGrow
+    f_growUnit(halBw, halBr, halLb)
+    if halTrDir == 0
+        halGrow := false
+
+// ---------------------------------------------------------------- Strategy rules panel (top-right)
+var table info = na
+if showInfo and barstate.islast
+    info := table.new(position.top_right, 1, 18, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
+    table.cell(info, 0, 0,  (ordersOn ? "" : "[INDICATOR - no orders]  ") + "HALYARD + BREAK-THEN-PULLBACK (ORB + IB)",
+         text_color = ordersOn ? color.aqua : color.orange, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 1,  "HALYARD: 15m candles built from chart bars - any chart TF",  text_color = color.fuchsia, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 2,  "  range = the 00:00 EST / 01:00 EDT 15m candle",             text_color = color.silver,  text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 3,  "  first 15m CLOSE beyond it trades | stop = far edge | R:R " + str.tostring(halRR, "#.##"), text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 4,  "  one break per day | flat 13:30 / 14:30 ET",                text_color = color.silver,  text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 5,  "Ranges: ORB 09:30-09:45 | IB 09:30-10:30 (ET)",              text_color = color.white,   text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 6,  "Direction: low-first = LONG, high-first = SHORT",            text_color = color.white,   text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 7,  "  + close no deeper than " + str.tostring(orbDepth, "#") + "% (ORB) / " + str.tostring(ibDepth, "#") + "% (IB) into the range",
+         text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 8,  "Enter AFTER the range breaks; limit at fib pullback:",       text_color = color.white,   text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 9,  "  shallow -> 25% line | deeper -> 50% line",                 text_color = color.silver,  text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 10, "Stop: ORB " + orbSl + "  |  IB " + ibSl,                     text_color = color.white,   text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 11, "Target: ORB " + orbTpL + " L / " + orbTpS + " S  |  IB " + ibTpL + " L / " + ibTpS + " S", text_color = color.white, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 12, "Avg-down: 2nd unit @ 50% - own size & risk (needs stop room)", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 13, "SEAT: Halyard > ORB > IB - one trade at a time",             text_color = color.aqua,    text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 14, orbCarry ? "ORB carry ON: unfilled ORB rests past 10:30" : "ORB carry off (unfilled ORB dies at 10:30)", text_color = orbCarry ? color.orange : color.gray, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 15, "Skip double-break days | ORB/IB flatten 15:30 ET",           text_color = color.silver,  text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 16, "Toggle Run HAL / ORB / IB + weekdays to isolate results",    text_color = color.aqua,    text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 17, modeTxt + (maxDayLoss > 0 ? "  | day stop $" + str.tostring(maxDayLoss, "#") + (dayHalt ? " - HIT" : "") : "") + (rmFixed ? "" : " (per entry, fixed capital)"), text_color = dayHalt ? color.red : color.yellow, text_size = size.small, text_halign = text.align_left)
+
+// ---------------------------------------------------------------- Probability table (ORB / IB setups only)
+// Columns: N = sample size, Reach = how often that starting point is even reached, then the odds of price
+// trading to each level from that starting point, before the 15:30 flatten.
+//   "From FILL" rows   : start = the entry fill, split by range size. Reach is n/a (the trade filled by definition).
+//   "From 25% PB" rows : start = the moment price retraces to the 25% fib. Reach = share of armed setups that
+//                        pull back that far. This is the number to read when your limit at the 25% line fills.
+//   "From 50% PB" rows : same from the 50% fib - a deeper pullback, different odds, a smaller sample.
+// The level columns are FIXED research levels, not your settings: TP0/10/30/50 are the range edge and its
+// extensions, "75% line" and "100% line" are the two retracement depths. They do not move when you change the
+// target or stop dropdowns - that is the point, the table stays a constant yardstick you can re-read after
+// every settings change. Read the column that matches the setting you are testing.
+// Halyard is not in this table: it has no pullback entry and no range-extension targets, so none of these rows
+// would mean anything for it.
+tPos  = tblPos == "Top right" ? position.top_right : tblPos == "Bottom left" ? position.bottom_left : tblPos == "Top left" ? position.top_left : position.bottom_right
+tRows = 8 + (pbSplit ? 12 : 4)
+
+var table probTbl = na
+
+f_tblRow(int row, string lbl, int nn, string reach, int t0, int t1, int t2, int t3, int q75, int q100, color txt, color bg) =>
+    table.cell(probTbl, 0, row, lbl,                text_color = txt,          bgcolor = bg, text_size = size.normal, text_halign = text.align_left)
+    table.cell(probTbl, 1, row, str.tostring(nn),   text_color = color.white,  bgcolor = bg, text_size = size.normal)
+    table.cell(probTbl, 2, row, reach,              text_color = color.silver, bgcolor = bg, text_size = size.normal)
+    table.cell(probTbl, 3, row, f_pctStr(t0,  nn),  text_color = color.lime,   bgcolor = bg, text_size = size.normal)
+    table.cell(probTbl, 4, row, f_pctStr(t1,  nn),  text_color = color.lime,   bgcolor = bg, text_size = size.normal)
+    table.cell(probTbl, 5, row, f_pctStr(t2,  nn),  text_color = color.lime,   bgcolor = bg, text_size = size.normal)
+    table.cell(probTbl, 6, row, f_pctStr(t3,  nn),  text_color = color.lime,   bgcolor = bg, text_size = size.normal)
+    table.cell(probTbl, 7, row, f_pctStr(q75, nn),  text_color = color.red,    bgcolor = bg, text_size = size.normal)
+    table.cell(probTbl, 8, row, f_pctStr(q100, nn), text_color = color.red,    bgcolor = bg, text_size = size.normal)
+
+// where we are right now, used to tint the row that applies (nothing is drawn on the chart)
+cNow = color.new(color.blue, 40)      // the row that is live on this bar
+cWas = color.new(color.blue, 78)      // a depth price has already passed through
+cOff = color.black
+
+if showTable and barstate.islast
+    if na(probTbl)
+        probTbl := table.new(tPos, 9, tRows, bgcolor = color.black, border_color = color.new(color.white, 70), border_width = 1, frame_color = color.white, frame_width = 1)
+    // live state per strategy: 0 = not in play, 1 = broke, 2 = at the 25% pullback, 3 = at the 50% pullback
+    stA  = array.from(orP_act ? (orP_r50 ? 3 : orP_r25 ? 2 : 1) : 0, ibP_act ? (ibP_r50 ? 3 : ibP_r25 ? 2 : 1) : 0)
+    rgA  = array.from(orP_act ? orP_rngP : na, ibP_act ? ibP_rngP : na)
+    filA = array.from(((or_f1 or or_f2) and not or_closed) ? 1 : 0, ((ib_f1 or ib_f2) and not ib_closed) ? 1 : 0)
+    hdr  = array.from("From FILL - by range size", "N", "Reach", "TP0", "TP10", "TP30", "TP50", "75% line", "100% line")
+    for c = 0 to 8
+        table.cell(probTbl, c, 0, array.get(hdr, c), text_color = color.black, bgcolor = color.white, text_size = size.normal, text_halign = c == 0 ? text.align_left : text.align_center)
+    // ---- section 1: from the fill, segmented by range size ----
+    for s = 0 to 1
+        rr = f_ranges(s)
+        b1 = autoMode ? f_b1(rr) : (s == 0 ? orbB1 : ibB1)
+        b2 = autoMode ? f_b2(rr) : (s == 0 ? orbB2 : ibB2)
+        nm = s == 0 ? "ORB" : "IB"
+        s1 = na(b1) ? "?" : str.tostring(b1, "#.##") + "%"
+        s2 = na(b2) ? "?" : str.tostring(b2, "#.##") + "%"
+        for bkt = 0 to 2
+            [nn, a0, a1, a2, a3, a4, a5] = f_seg(s, bkt, b1, b2)
+            here = hiLive and array.get(stA, s) > 0 and not na(array.get(rgA, s)) and f_bkt(array.get(rgA, s), b1, b2) == bkt
+            inTr = here and array.get(filA, s) == 1
+            lbl  = (inTr ? "> " : "") + (bkt == 0 ? nm + " S <" + s1 : bkt == 1 ? nm + " M " + s1 + "-" + s2 : nm + " L >=" + s2)
+            f_tblRow(s * 3 + bkt + 1, lbl, nn, "-", a2, a3, a4, a5, a1, a0, color.white, inTr ? cNow : here ? cWas : cOff)
+    // ---- section 2: from the 25% / 50% pullback ----
+    hdr2 = array.from("From PULLBACK", "N", "Reach", "TP0", "TP10", "TP30", "TP50", "75% line", "100% line")
+    for c = 0 to 8
+        table.cell(probTbl, c, 7, array.get(hdr2, c), text_color = color.black, bgcolor = color.new(color.aqua, 20), text_size = size.normal, text_halign = c == 0 ? text.align_left : text.align_center)
+    for s = 0 to 1
+        rr2 = f_ranges(s)
+        c1  = autoMode ? f_b1(rr2) : (s == 0 ? orbB1 : ibB1)
+        c2  = autoMode ? f_b2(rr2) : (s == 0 ? orbB2 : ibB2)
+        nm2 = s == 0 ? "ORB" : "IB"
+        st  = array.get(stA, s)
+        for d = 0 to 1
+            // the deepest pullback price has reached is "now"; a shallower one it already passed is tinted faintly
+            depthOn = hiLive and (d == 0 ? st >= 2 : st >= 3)
+            isNow   = hiLive and (d == 0 ? st == 2 : st == 3)
+            if pbSplit
+                for bkt = 0 to 2
+                    [nAll, nn, h0, h1, h2, h3, h4, h5] = f_pbSeg(s, d, bkt, c1, c2)
+                    same = depthOn and not na(array.get(rgA, s)) and f_bkt(array.get(rgA, s), c1, c2) == bkt
+                    szn  = bkt == 0 ? "S" : bkt == 1 ? "M" : "L"
+                    lbl  = ((same and isNow) ? "> " : "") + nm2 + " " + szn + " from " + (d == 0 ? "25%" : "50%") + " PB"
+                    f_tblRow(8 + s * 6 + bkt * 2 + d, lbl, nn, f_pctStr(nn, nAll), h0, h1, h2, h3, h4, h5, d == 0 ? color.aqua : color.yellow, (same and isNow) ? cNow : same ? cWas : cOff)
+            else
+                [nAll, nn, h0, h1, h2, h3, h4, h5] = f_pbSeg(s, d, -1, c1, c2)
+                lbl = (isNow ? "> " : "") + nm2 + " from " + (d == 0 ? "25%" : "50%") + " pullback"
+                f_tblRow(8 + s * 2 + d, lbl, nn, f_pctStr(nn, nAll), h0, h1, h2, h3, h4, h5, d == 0 ? color.aqua : color.yellow, isNow ? cNow : depthOn ? cWas : cOff)
+
+// ---------------------------------------------------------------- Visuals
+// ORB / IB levels
+plot(runORB and not na(or_rH) ? or_rH : na, "ORB High", color = color.new(color.orange, 0),  style = plot.style_linebr)
+plot(runORB and not na(or_rL) ? or_rL : na, "ORB Low",  color = color.new(color.orange, 45), style = plot.style_linebr)
+plot(runORB and or_dir != 0 and not na(or_e1) ? or_e1 : na, "ORB Entry", color = color.new(color.yellow, 0), style = plot.style_linebr)
+plot(runORB and or_dir != 0 and not na(or_zstop) ? or_zstop : na, "ORB Stop", color = color.new(color.red, 25), style = plot.style_linebr)
+plot(runIB and not na(ib_rH) ? ib_rH : na, "IB High", color = color.new(color.teal, 0),  style = plot.style_linebr)
+plot(runIB and not na(ib_rL) ? ib_rL : na, "IB Low",  color = color.new(color.teal, 45), style = plot.style_linebr)
+plot(runIB and ib_dir != 0 and not na(ib_e1) ? ib_e1 : na, "IB Entry", color = color.new(color.aqua, 0), style = plot.style_linebr)
+plot(runIB and ib_dir != 0 and not na(ib_zstop) ? ib_zstop : na, "IB Stop", color = color.new(color.red, 25), style = plot.style_linebr)
+// Halyard's 15-minute range, drawn from the engine's own candles
+plot(runHAL and not na(halRH) ? halRH : na, "Halyard range high", color = color.new(color.fuchsia, 0),  style = plot.style_linebr)
+plot(runHAL and not na(halRL) ? halRL : na, "Halyard range low",  color = color.new(color.fuchsia, 45), style = plot.style_linebr)
+// The breakout TRIANGLE marks the chart bar that closes the 15m candle which BREAKS the range.
+plotshape(halShowMarker and halBrkUp, title = "Halyard: 15m close above range", style = shape.triangleup, location = location.abovebar, color = halUpCol, size = size.tiny)
+plotshape(halShowMarker and halBrkDn, title = "Halyard: 15m close below range", style = shape.triangledown, location = location.belowbar, color = halDnCol, size = size.tiny)
+
+// HALYARD DAY HIGHLIGHT. ORANGE = the Halyard day is Off. A faint GREEN / RED wash = the day is one-way, so the
+// setting is readable off the chart instead of only out of the input dialog. Nothing is tinted on a two-way day.
+halIsWeekday = halDow >= dayofweek.monday and halDow <= dayofweek.friday
+bgcolor(not runHAL or not halIsWeekday ? na : not halDayOK ? color.new(color.orange, 95) : halMode == "Long" ? color.new(color.green, 96) : halMode == "Short" ? color.new(color.red, 96) : na, title = "Halyard day filter")

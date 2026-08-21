@@ -88,3 +88,29 @@ Everything else is untouched: the same ranges and clocks, direction rule, close-
 min-range / weekday / double-break / daily-loss filters, seat precedence (Halyard > ORB > IB),
 cutoffs, flattens, the Halyard engine, the probability study and the webhook. Run it on a
 **1-minute** chart.
+
+### `pinescript/halyard_orb_ib_fib_strategy.pine`
+The original fib-pullback build — ORB/IB enter at the 25%/75% line with an average-down unit
+at the 50% line — with **selectable targets and stops** and the webhook payload fixed.
+Defaults reproduce the previous hardcoded behaviour exactly.
+
+- **Target**, per setup *and* per direction: `Range edge`, `Ext 10% / 30% / 50%`, or `HOD/LOD`
+  (taken on the fill bar and frozen there).
+- **Stop**, per setup: `50%`, `75%` or `100%` of the range, as a retracement from the edge that
+  broke.
+
+Because the entries here are fixed levels of the *same* range the stop is measured against,
+tightening the stop can collide with them. Each unit is checked against the stop independently
+and dropped if it is not clear by at least `orbibMinStopFrac` (10%) of the range:
+
+| Stop | Shallow setup | Deep setup |
+|---|---|---|
+| 100% | trades, with add | trades |
+| 75% | trades, with add | trades |
+| 50% | trades, **add dropped** | **skipped** — entry sits on the stop |
+
+**Webhook fix:** `str.tostring(na)` renders `NaN`, which strict JSON rejects, so a payload with
+an unknown stop or target was thrown out at the far end — the entry stood with no bracket. All
+numbers now go through `f_num` (na → `0`), the stop/target chain gained a live-IB branch and a
+last-fill fallback, and the buy/sell/close instruction is sent as `data` as well as `action`.
+An optional on-chart label prints the last transmitted payload.
