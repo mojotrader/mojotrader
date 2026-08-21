@@ -1,0 +1,203 @@
+//@version=6
+// NQ EMA-Retrace + RSI-Extreme  (run on a 1-MINUTE NQ chart).
+//
+//   PREMISE: trade with the higher-timeframe 200 EMA, but only on a pullback INTO it that
+//            arrives while the (slower) RSI is stretched to an extreme.
+//
+//   LONG  : the HTF 200 EMA is below price -> at least N 1m candles CLOSE above the EMA ->
+//           price retraces back DOWN to the EMA -> RSI is (or recently was) OVERSOLD -> buy.
+//   SHORT : mirror -> N closes BELOW the EMA -> retrace back UP to the EMA -> RSI OVERBOUGHT -> sell.
+//
+//   EXITS : fixed-point target and fixed-point stop from the fill, plus an optional
+//           "max bars in trade" time-stop.
+//
+//   The EMA and the RSI are each pulled from their own timeframe and are NON-REPAINTING:
+//   only the LAST CLOSED higher-timeframe bar is used, so a backtest cannot see the value of an
+//   HTF bar that was still forming. That makes both series a little "stale" on the 1m chart
+//   (by up to one HTF bar), which is the honest cost of not peeking.
+//
+//   ENGINE SETTINGS are baked into the strategy() call below, not exposed as inputs:
+//     Slippage 1 tick | Commission $3 per contract PER SIDE | 1 contract fixed | $150,000 start.
+//     Both-hit tie-break = STOP FIRST: when the target and the stop both sit inside the same
+//       1m bar, TradingView's broker emulator resolves the ambiguity worst-case and fills the
+//       stop. That is the default behaviour here (no Bar Magnifier / intrabar data required).
+//     Flat at session end = FALSE: positions are never force-closed at an RTH/session boundary;
+//       only the target, the stop or the max-bars time-stop can close a trade.
+strategy("NQ EMA Retrace + RSI Extreme", overlay = true, pyramiding = 0,
+     initial_capital = 150000,
+     default_qty_type = strategy.fixed, default_qty_value = 1,
+     process_orders_on_close = true, calc_on_every_tick = false,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 3,
+     slippage = 1)
+
+// ---------------------------------------------------------------- Inputs
+grpT         = "Trend (EMA)"
+emaTfMin     = input.int(2,   "EMA timeframe (minutes)", 1, 1440, group = grpT,
+     tooltip = "The timeframe the 200 EMA is measured on. 2 = a 2-minute EMA drawn on your 1m chart.")
+emaLen       = input.int(200, "EMA length", 1, group = grpT)
+closesBeyond = input.int(5,   "Closes beyond EMA", 1, 100, group = grpT,
+     tooltip = "How many consecutive CHART candles must close on the trend side of the EMA before a retrace counts as a setup.")
+
+grpS      = "Setup"
+setupLook = input.int(1, "Setup lookback (bars)", 1, 100, group = grpS,
+     tooltip = "How long a retrace stays armed. 1 = the entry must trigger on the retrace bar itself; 5 = it may trigger up to 4 bars later.")
+retraceBy = input.string("Close", "Retrace means", options = ["Close", "Wick"], group = grpS,
+     tooltip = "Close = a candle must CLOSE back at/through the EMA. Wick = touching the EMA with the low (longs) / high (shorts) is enough.")
+
+grpR      = "Momentum (RSI)"
+rsiTfMin  = input.int(21, "RSI timeframe (minutes)", 1, 1440, group = grpR)
+rsiLen    = input.int(19, "RSI length", 1, group = grpR)
+osLevel   = input.float(34, "RSI oversold level", 0, 50, step = 1, group = grpR,
+     tooltip = "The overbought level is the mirror of this: 100 - oversold. 34 -> overbought 66; 20 -> overbought 80.")
+rsiWithin = input.int(20, "RSI extreme within (bars)", 0, 500, group = grpR,
+     tooltip = "The RSI must be at its extreme now, or have been within this many chart bars. 0 = it must be extreme on the entry bar itself.")
+
+grpE    = "Exits"
+tpPts   = input.float(73, "Target (points)", 0.25, step = 0.25, group = grpE)
+slPts   = input.float(51, "Stop (points)",   0.25, step = 0.25, group = grpE)
+maxBars = input.int(191, "Max bars in trade (0 = off)", 0, group = grpE,
+     tooltip = "Time-stop: close at market once the trade has been open this many chart bars. 0 disables it.")
+
+dirSel  = input.string("both", "Trade direction", options = ["both", "long", "short"], group = "Strategy")
+
+obLevel    = 100.0 - osLevel
+allowLong  = dirSel == "both" or dirSel == "long"
+allowShort = dirSel == "both" or dirSel == "short"
+
+// ---------------------------------------------------------------- Higher-timeframe series (non-repainting)
+// [1] + lookahead_on is the standard no-peek idiom: it returns the value of the last HTF bar that
+// had already CLOSED when the current chart bar opened.
+// timeframe.from_seconds() (rather than str.tostring) keeps the result a SIMPLE string, which is
+// the qualifier request.security() requires for its timeframe argument.
+emaTf  = timeframe.from_seconds(emaTfMin * 60)
+rsiTf  = timeframe.from_seconds(rsiTfMin * 60)
+emaVal = request.security(syminfo.tickerid, emaTf, ta.ema(close, emaLen)[1], lookahead = barmerge.lookahead_on)
+rsiVal = request.security(syminfo.tickerid, rsiTf, ta.rsi(close, rsiLen)[1], lookahead = barmerge.lookahead_on)
+
+emaOk = not na(emaVal)
+
+// ---------------------------------------------------------------- Trend: consecutive closes beyond the EMA
+var int runAbove = 0
+var int runBelow = 0
+
+// Read the counters BEFORE updating them: prev* describe the run that existed going INTO this
+// bar - the run that had to be built up before the retrace touched the EMA.
+prevAbove = nz(runAbove[1])
+prevBelow = nz(runBelow[1])
+
+if emaOk
+    runAbove := close > emaVal ? runAbove + 1 : 0
+    runBelow := close < emaVal ? runBelow + 1 : 0
+
+// ---------------------------------------------------------------- Retrace back into the EMA
+byClose    = retraceBy == "Close"
+touchLong  = emaOk and (byClose ? close <= emaVal : low  <= emaVal)
+touchShort = emaOk and (byClose ? close >= emaVal : high >= emaVal)
+
+longRetrace  = emaOk and prevAbove >= closesBeyond and touchLong
+shortRetrace = emaOk and prevBelow >= closesBeyond and touchShort
+
+// A retrace CONSUMES its run: price has to push away and close `closesBeyond` candles beyond the
+// EMA all over again before the next setup can arm. Without this, a pullback that hovers on the
+// EMA would re-arm on every bar (and in "Wick" mode the run would never reset by itself).
+if longRetrace
+    runAbove := 0
+if shortRetrace
+    runBelow := 0
+
+// ---------------------------------------------------------------- Armed-setup window
+var int longArm  = na
+var int shortArm = na
+if longRetrace
+    longArm := bar_index
+if shortRetrace
+    shortArm := bar_index
+
+longActive  = not na(longArm)  and bar_index - longArm  < setupLook
+shortActive = not na(shortArm) and bar_index - shortArm < setupLook
+
+// ---------------------------------------------------------------- RSI extreme, now or recently
+osHit    = not na(rsiVal) and rsiVal <= osLevel
+obHit    = not na(rsiVal) and rsiVal >= obLevel
+bsOS     = ta.barssince(osHit)
+bsOB     = ta.barssince(obHit)
+osRecent = not na(bsOS) and bsOS <= rsiWithin
+obRecent = not na(bsOB) and bsOB <= rsiWithin
+
+// ---------------------------------------------------------------- Entries
+// process_orders_on_close = true, so a signal computed on this bar's close fills at this bar's
+// close. Engine slippage worsens that fill by 1 tick, which is what the trade is priced off.
+slipPx   = syminfo.mintick
+flat     = strategy.position_size == 0
+longSig  = allowLong  and flat and longActive  and osRecent
+shortSig = allowShort and flat and shortActive and obRecent and not longSig
+
+var float refPx    = na
+var int   entryBar = na
+
+if longSig
+    refPx    := close + slipPx
+    entryBar := bar_index
+    longArm  := na
+    shortArm := na
+    strategy.entry("L", strategy.long)
+    // Placed on the entry bar so the very next bar is already protected.
+    strategy.exit("L x", from_entry = "L", limit = refPx + tpPts, stop = refPx - slPts)
+
+if shortSig
+    refPx    := close - slipPx
+    entryBar := bar_index
+    longArm  := na
+    shortArm := na
+    strategy.entry("S", strategy.short)
+    strategy.exit("S x", from_entry = "S", limit = refPx - tpPts, stop = refPx + slPts)
+
+// ---------------------------------------------------------------- Exits
+// From the bar after the fill the average price is known, so adopt it as the reference and
+// re-issue the same exit IDs (which updates the resting orders rather than adding new ones).
+if strategy.position_size != 0 and not na(strategy.position_avg_price) and strategy.position_avg_price > 0
+    refPx := strategy.position_avg_price
+
+if strategy.position_size > 0
+    strategy.exit("L x", from_entry = "L", limit = refPx + tpPts, stop = refPx - slPts)
+if strategy.position_size < 0
+    strategy.exit("S x", from_entry = "S", limit = refPx - tpPts, stop = refPx + slPts)
+
+// Time-stop, checked after the bracket so the target/stop always get the bar first.
+if maxBars > 0 and strategy.position_size != 0 and not na(entryBar) and bar_index - entryBar >= maxBars
+    strategy.close_all("max bars")
+
+// Clear the reference once genuinely flat (not on the signal bar, where the fill has not
+// been booked into strategy.position_size yet).
+if strategy.position_size == 0 and not longSig and not shortSig
+    refPx    := na
+    entryBar := na
+
+// ---------------------------------------------------------------- Plots
+plot(emaVal, "HTF EMA", color = color.new(color.orange, 0), linewidth = 2)
+
+inTrade = strategy.position_size != 0
+isLong  = strategy.position_size > 0
+plot(inTrade ? refPx : na, "Entry", color = color.new(color.gray, 0), style = plot.style_linebr)
+plot(inTrade ? (isLong ? refPx + tpPts : refPx - tpPts) : na, "Target",
+     color = color.new(color.teal, 0), style = plot.style_linebr)
+plot(inTrade ? (isLong ? refPx - slPts : refPx + slPts) : na, "Stop",
+     color = color.new(color.red, 0), style = plot.style_linebr)
+
+plotshape(longRetrace  and not longSig,  "Long retrace (RSI not extreme)",  shape.circle, location.belowbar,
+     color.new(color.gray, 40), size = size.tiny)
+plotshape(shortRetrace and not shortSig, "Short retrace (RSI not extreme)", shape.circle, location.abovebar,
+     color.new(color.gray, 40), size = size.tiny)
+plotshape(longSig,  "Long entry",  shape.triangleup,   location.belowbar, color.new(color.teal, 0), size = size.small)
+plotshape(shortSig, "Short entry", shape.triangledown, location.abovebar, color.new(color.red, 0),  size = size.small)
+
+// alertcondition() is indicator-only, so entries are announced with alert(): create ONE alert on
+// this strategy with the condition set to "alert() function calls only".
+if longSig
+    alert("NQ EMA RETRACE  LONG  | entry " + str.tostring(math.round_to_mintick(refPx)) +
+         "  | stop " + str.tostring(math.round_to_mintick(refPx - slPts)) +
+         "  | target " + str.tostring(math.round_to_mintick(refPx + tpPts)), alert.freq_once_per_bar)
+if shortSig
+    alert("NQ EMA RETRACE  SHORT | entry " + str.tostring(math.round_to_mintick(refPx)) +
+         "  | stop " + str.tostring(math.round_to_mintick(refPx + slPts)) +
+         "  | target " + str.tostring(math.round_to_mintick(refPx - tpPts)), alert.freq_once_per_bar)
