@@ -30,3 +30,130 @@ slower structure. Configurable under the *Higher-timeframe structure* group:
 
 The HTF engine is **non-repainting**: a higher-timeframe bar is only processed
 once it has fully closed.
+
+## Backtesting
+
+A dependency-free Python harness for measuring several strategies against the
+same data under the same cost assumptions. Standard library only — no pandas,
+no install step, `python3` 3.11+ is all it needs.
+
+```
+backtest/
+  lse.py          LSE vault API client (all schema guesses isolated here)
+  bars.py         Bar type, CSV cache, New York session helpers
+  engine.py       broker emulator — fills, brackets, costs
+  indicators.py   ATR (Wilder), session-anchored VWAP + bands
+  metrics.py      performance statistics and the comparison table
+  strategy.py     Strategy base class and the bar loop
+  strategies/     ports of the Pine strategies
+fetch_data.py     pull candles into data/
+make_sample_data.py  synthetic bars for testing the pipeline without an API key
+run_backtest.py   run strategies and compare them
+```
+
+### Quick start
+
+```bash
+export LSE_API_KEY='lse_live_...'
+
+python3 fetch_data.py --probe                 # confirm the API shape first
+python3 fetch_data.py --symbol MNQ1! --resolution 5m --start 2024-01-01 --end 2024-12-31
+python3 run_backtest.py --symbol MNQ1! --resolution 5m --detail
+```
+
+No key handy? Exercise the whole pipeline on synthetic bars:
+
+```bash
+python3 make_sample_data.py --symbol SAMPLE --days 120
+python3 run_backtest.py --symbol SAMPLE --resolution 5m --detail
+```
+
+Sample data is a seeded random walk. It proves the plumbing works; it says
+nothing about whether a strategy has an edge.
+
+### Read this before trusting the API client
+
+`backtest/lse.py` was written from the dashboard screenshot, not from the
+published API reference. The transport is certain — host, `x-api-key` header,
+HTTPS. **The endpoint paths and response shapes are inferred and may be wrong.**
+
+Everything uncertain sits in two places: the `ENDPOINTS` dict, and the `_rows`
+/ `_to_bar` parsers. Run `python3 fetch_data.py --probe` to print what the API
+actually returns, then correct `ENDPOINTS` from real output. The parsers
+already accept list-of-dicts, list-of-lists, columnar, and the usual envelope
+keys, with epoch-second, epoch-millisecond, or ISO-8601 timestamps, so a shape
+mismatch is more likely to be absorbed than to crash.
+
+### What the engine models
+
+Fidelity to TradingView's fill model is the point — a result here should be
+comparable to the same strategy's Pine report.
+
+- **Next-bar fills.** An order placed while bar N is evaluated fills from bar
+  N+1, never inside bar N. Exit brackets included: a stop/target attached on
+  the entry bar's close is live from the *following* bar. Strategies whose Pine
+  source sets `process_orders_on_close = true` fill at the signal bar's close
+  instead.
+- **Intrabar ambiguity resolves to the stop.** When one bar's range covers both
+  stop and target, the true path is unknowable, so the engine takes the loss.
+  Assuming the target came first is the most common way a backtest inflates.
+- **Gaps fill realistically.** A stop jumped over at the open fills at the
+  open, which is worse than the level. A limit gapped through fills at the
+  open, which is better.
+- **Costs are on by default** — commission per contract per side, plus one tick
+  of slippage against market and stop fills. Limit exits are not slipped.
+
+Drawdown is measured on closed trades, so the equity curve is a step function
+and intrabar heat was always worse than reported.
+
+### Strategies
+
+| Key | Pine source | Rule |
+|---|---|---|
+| `orb_fade` | `orb_fade_strategy.pine` | Fade failed breakouts of the 09:30–09:45 range; target the far side |
+| `pdh_pdl` | `pdh_pdl_breakout_strategy.pine` | Stop orders beyond the prior RTH session's high/low |
+| `vwap_reversion` | `vwap_mean_reversion_strategy.pine` | Fade a band touch back toward the session VWAP |
+
+Each Python strategy mirrors a Pine file. **When you change one side, change
+the other** — a silent divergence is worse than having no port, because the
+backtest keeps producing plausible numbers.
+
+`vwap_reversion` carries one addition the Pine lacks: `min_reward_pts`. Early
+in a session the deviation bands sit almost on the VWAP, so a band touch can
+target a fraction of a point away, or land on the wrong side of the entry
+entirely — paying a full round turn for no reward. The default of `0.0`
+reproduces the Pine exactly, degenerate trades and all. Raise it to filter them.
+
+### Sweeping parameters
+
+The runner compares strategies; parameter sweeps are a few lines against the
+same API:
+
+```python
+from backtest.bars import load_bars
+from backtest.strategy import run
+from backtest.strategies import ORBFade
+from backtest.metrics import compute
+
+bars = load_bars("MNQ1!", "5m")
+for rr in (0.5, 1.0, 2.0):
+    trades, _ = run(ORBFade(rr=rr), bars)
+    stats = compute(trades, point_value=2.0)
+    print(rr, stats.trades, round(stats.net_pnl), round(stats.profit_factor, 2))
+```
+
+Sweeping is also the fastest way to overfit. Split the data and confirm a
+parameter out of sample before believing it.
+
+### Tests
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+28 tests pin the fill model against hand-built bars where the correct answer is
+known by inspection — next-bar timing, slippage direction, stop-first
+resolution, gap fills, bracket arming, Wilder ATR, drawdown, DST boundaries,
+and a no-lookahead check that truncating future bars leaves earlier trades
+unchanged. A lookahead bug produces a beautiful equity curve, not an exception,
+which is why these are worth having.
