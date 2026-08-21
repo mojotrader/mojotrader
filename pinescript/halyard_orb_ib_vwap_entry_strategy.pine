@@ -239,6 +239,8 @@ pmtToken  = input.string("", "PickMyTrade token", group = grpA)
 pmtAcct   = input.string("", "Tradovate account id", group = grpA)
 pmtSym    = input.string("MNQ1!", "Broker symbol", group = grpA)
 pmtType   = input.string("market", "Order type", options = ["market", "limit"], group = grpA)
+pmtDebug  = input.bool(true, "Show the last webhook payload on the chart", group = grpA,
+     tooltip = "Prints the exact JSON the script last transmitted, as a label on the most recent bar. TradingView gives you no way to see an alert() message after it has fired, so this is how you check that sl and tp really are leaving with a price on them. Turn it off once you are satisfied.")
 
 // ---------------------------------------------------------------- Break alerts (manual trading)
 grpBA     = "Break alerts (manual)"
@@ -1488,25 +1490,74 @@ if dayHalt
     halTrDir := 0
 
 // ---------------------------------------------------------------- Automation: PickMyTrade webhook (net position)
+// PickMyTrade's documented alert schema carries the buy/sell/close instruction in a field called "data".
+// Earlier versions of this file sent it as "action" only. Both are emitted here, with the same value: "data"
+// is the documented name, and "action" is kept so a setup that was already working on it keeps working. An
+// unrecognised extra key is ignored by the endpoint; a MISSING one is not.
+//
+// sl and tp are ABSOLUTE PRICE LEVELS, not distances - 0 means "no level, use the account default".
+//
+// EVERY NUMBER GOES THROUGH f_num, and that is the bug fix that matters here. str.tostring(na) renders the
+// four characters NaN, which is not valid JSON: one na stop or target and the whole payload is rejected at the
+// far end, so the entry that was already accepted sits at the broker with no bracket on it. f_num turns an
+// unknown level into 0 instead, which the schema accepts.
+f_num(float v) => na(v) ? "0" : str.tostring(math.round_to_mintick(v))
+
 f_pmt(string act, float q, float slp, float tpp) =>
     '{"token":"' + pmtToken + '","account_id":"' + pmtAcct + '","symbol":"' + pmtSym +
-      '","action":"' + act + '","quantity":' + str.tostring(q) +
+      '","data":"' + act + '","action":"' + act + '","quantity":' + str.tostring(q) +
       ',"order_type":"' + pmtType +
-      '","sl":' + str.tostring(math.round_to_mintick(slp)) +
-      ',"tp":' + str.tostring(math.round_to_mintick(tpp)) + '}'
+      '","sl":' + f_num(slp) +
+      ',"tp":' + f_num(tpp) + '}'
+
+// WHICH setup's bracket to quote. This has to survive a lag: the alerts fire on a change in the NETTED
+// strategy.position_size, and that variable only reflects a fill on the bar AFTER the engine books it, so by
+// the time an alert goes out the setup that caused it may already have been closed and reset.
+// The old chain was `halLive ? halStp : liveORB ? or_curStop : ib_curStop` - note the final branch is not
+// guarded on the IB actually being in a trade, so any moment neither Halyard nor the ORB was live it resolved
+// to ib_curStop, which is na on every day the IB never filled. That na is what became NaN in the JSON.
+// Now: prefer whichever setup is genuinely live, and otherwise fall back to the bracket latched at the last
+// fill, so the webhook always has a real pair of prices to quote.
 liveORB  = or_f1 and not or_closed
-autoStop = halLive ? halStp : liveORB ? or_curStop : ib_curStop
-autoTP   = halLive ? halTgt : liveORB ? or_curTP  : ib_curTP
+liveIB   = ib_f1 and not ib_closed
+var float lastStop = na
+var float lastTgt  = na
+if halEntered
+    lastStop := halStp
+    lastTgt  := halTgt
+if or_firstFill
+    lastStop := or_curStop
+    lastTgt  := or_curTP
+if ib_firstFill
+    lastStop := ib_curStop
+    lastTgt  := ib_curTP
+autoStop = halLive ? halStp : liveORB ? or_curStop : liveIB ? ib_curStop : lastStop
+autoTP   = halLive ? halTgt : liveORB ? or_curTP  : liveIB ? ib_curTP  : lastTgt
 autoQty  = math.abs(strategy.position_size)   // actual net contracts
 buyNow   = strategy.position_size > 0 and (strategy.position_size[1] <= 0 or strategy.position_size > strategy.position_size[1])
 sellNow  = strategy.position_size < 0 and (strategy.position_size[1] >= 0 or strategy.position_size < strategy.position_size[1])
 closeNow = strategy.position_size == 0 and strategy.position_size[1] != 0
+// The exact string that went out, kept for the on-chart debug readout below.
+var string pmtLast = ""
 if autoOn and ordersOn and buyNow
-    alert(f_pmt("buy",  autoQty, autoStop, autoTP), alert.freq_once_per_bar)
+    pmtLast := f_pmt("buy",  autoQty, autoStop, autoTP)
+    alert(pmtLast, alert.freq_once_per_bar)
 if autoOn and ordersOn and sellNow
-    alert(f_pmt("sell", autoQty, autoStop, autoTP), alert.freq_once_per_bar)
+    pmtLast := f_pmt("sell", autoQty, autoStop, autoTP)
+    alert(pmtLast, alert.freq_once_per_bar)
 if autoOn and ordersOn and closeNow
-    alert(f_pmt("close", 0, 0.0, 0.0), alert.freq_once_per_bar)
+    pmtLast := f_pmt("close", 0, 0.0, 0.0)
+    alert(pmtLast, alert.freq_once_per_bar)
+
+// ---- on-chart readout of the LAST payload, so you can read what was actually transmitted ----
+// TradingView does not show you an alert()'s message after the fact, which is why a wrong or malformed payload
+// is so hard to spot. This prints the most recent one on the chart. Check it shows a real number for both
+// "sl" and "tp" - never NaN, and never 0 on a trade that is supposed to carry a bracket.
+var label pmtLbl = na
+if pmtDebug and barstate.islast and autoOn
+    if not na(pmtLbl)
+        label.delete(pmtLbl)
+    pmtLbl := label.new(bar_index, high, str.length(pmtLast) > 0 ? "last webhook payload:\n" + pmtLast : "no webhook payload sent yet", xloc = xloc.bar_index, style = label.style_label_down, color = color.new(color.navy, 10), textcolor = color.white, size = size.small)
 
 // ---------------------------------------------------------------- Break alerts (fire once when each range breaks)
 // For ORB and IB the entry quoted is the VWAP AS IT STANDS ON THE BREAK BAR. It is not a fixed level - it will
