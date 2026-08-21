@@ -1,0 +1,68 @@
+//@version=6
+// Anchored VWAP from the 09:30 NY open, CALCULATED ON THE 15-MINUTE TIMEFRAME and drawn as
+// slope-coloured DOTS so it can be read on a 1-minute (or any lower-timeframe) chart.
+//
+//   * Anchor      : re-anchors at the start of every RTH session (09:30 NY) and accumulates
+//                   only until 16:00, so each day plots as its own clean anchored VWAP.
+//   * Calculation : the running sum(price*vol)/sum(vol) is built from 15m bars, NOT from the
+//                   chart's bars, so the value is identical to what you would see with this
+//                   VWAP on a 15m chart.
+//   * Visual      : one dot per CLOSED 15m bar, placed on the chart bar where that 15m bar
+//                   closed. Green = VWAP rose vs. the previous 15m dot, red = it fell,
+//                   white = flat (and for the session's first dot, which has nothing to
+//                   slope from).
+//
+// Non-repainting: the 15m data is pulled with the canonical `expr[1] + lookahead_on` idiom,
+// so a 15m bar is only ever used after it has fully closed.
+indicator("Anchored VWAP 09:30 — 15m slope dots", "AVWAP 09:30 15m dots", overlay = true)
+
+// ---------------------------------------------------------------- Inputs
+grpA = "Anchor"
+grpD = "Dots"
+
+calcTf  = input.timeframe("15", "Calculation timeframe", group = grpA, tooltip = "The VWAP is accumulated from bars of THIS timeframe whatever timeframe the chart is on, and one dot is printed per closed bar of it. Keep the chart at or below this timeframe (e.g. 1m).")
+tz      = input.string("America/New_York", "Timezone", group = grpA)
+sess    = input.session("0930-1600", "Session (VWAP anchors at its START)", group = grpA)
+srcOpt  = input.string("hlc3", "Source", options = ["hlc3", "hl2", "ohlc4", "close"], group = grpA)
+
+upCol   = input.color(#00C853, "Sloping up",   group = grpD)
+dnCol   = input.color(#FF1744, "Sloping down", group = grpD)
+flatCol = input.color(#FFFFFF, "No slope",     group = grpD)
+dotSize = input.int(3, "Dot size", 1, 8, group = grpD)
+flatTk  = input.float(0.0, "Flat threshold (ticks)", 0, step = 0.25, group = grpD, tooltip = "A dot is white when the VWAP moved no more than this many ticks since the previous dot. 0 = only an exactly unchanged VWAP counts as flat; raise it to treat a near-flat VWAP as flat.")
+
+// ---------------------------------------------------------------- 15m session-anchored VWAP
+// Runs entirely inside the request.security() context, so `timeframe.period`, volume and the
+// price source are all the 15m ones.
+htfAvwap() =>
+    p    = srcOpt == "hl2" ? hl2 : srcOpt == "ohlc4" ? ohlc4 : srcOpt == "close" ? close : hlc3
+    inS  = not na(time(timeframe.period, sess, tz))
+    newS = inS and not inS[1]                  // first 15m bar of the session = the 09:30 anchor
+    var float sPV = 0.0                        // sum(price * vol)
+    var float sV  = 0.0                        // sum(vol)
+    if newS
+        sPV := 0.0
+        sV  := 0.0
+    if inS
+        v = nz(volume, 1.0)                    // fall back to 1 if the symbol has no volume
+        sPV += p * v
+        sV  += v
+    vw = inS and sV > 0 ? sPV / sV : na
+    // [1]/[2] = the last FULLY CLOSED 15m bar and the one before it -> no lookahead leak.
+    [vw[1], vw[2], time[1]]
+
+[hv, hvPrev, hT] = request.security(syminfo.tickerid, calcTf, htfAvwap(), lookahead = barmerge.lookahead_on)
+
+// hT changes exactly once per closed 15m bar -> that chart bar is the one to print a dot on.
+newHtfBar = not na(hT) and ta.change(hT) != 0
+
+// ---------------------------------------------------------------- Slope -> colour
+tol    = flatTk * syminfo.mintick
+slope  = hv - hvPrev                           // na on the session's first dot (nothing before it)
+dotCol = na(slope) ? flatCol : slope > tol ? upCol : slope < -tol ? dnCol : flatCol
+dotVal = newHtfBar and not na(hv) ? hv : na
+
+// offset = -1 walks the dot back one chart bar: the 15m value first reaches this script on the
+// bar AFTER the 15m bar closed, so this lands it on the bar that actually closed it (e.g. the
+// 09:44 bar of a 1m chart for the 09:30-09:45 15m bar).
+plot(dotVal, "AVWAP 15m dot", color = dotCol, style = plot.style_circles, linewidth = dotSize, offset = -1)

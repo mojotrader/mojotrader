@@ -30,3 +30,22 @@ slower structure. Configurable under the *Higher-timeframe structure* group:
 
 The HTF engine is **non-repainting**: a higher-timeframe bar is only processed
 once it has fully closed.
+
+### `pinescript/anchored_vwap_0930_15m_dots.pine`
+Anchored VWAP from the **09:30 NY open** through **16:00**, re-anchored every RTH session —
+but **calculated on the 15-minute timeframe** and drawn as **dots**, so it can be read on a
+1-minute chart.
+
+- **Calculation timeframe** (default `15`) — the running `sum(price*vol)/sum(vol)` is built
+  from bars of this timeframe whatever timeframe the chart is on, so the value matches what
+  the same VWAP shows on a 15m chart. Keep the chart at or below it.
+- **One dot per closed 15m bar**, placed on the chart bar that closed it (e.g. the 09:44 bar
+  of a 1m chart for the 09:30–09:45 15m bar).
+- **Dot colour = slope** vs. the previous dot: green up, red down, white flat. The session's
+  first dot is white — there is nothing before it to slope from.
+- `Flat threshold (ticks)` decides how much movement still counts as flat. It defaults to `0`,
+  i.e. only an exactly unchanged VWAP is white; raise it to colour a near-flat VWAP white too.
+
+Like the HTF structure engine, the 15m data is pulled with the canonical
+`expr[1]` + `lookahead_on` idiom, so it is **non-repainting** — a 15m bar is only used once it
+has fully closed.
