@@ -1,0 +1,1765 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0
+// © UNIMNQ — Unicorn Model Strategy v2.7
+
+//@version=6
+strategy(
+    title                   = "Unicorn Model [UNIMNQ v2.7]",
+    shorttitle              = "UNIMNQv2.7",
+    overlay                 = true,
+    max_boxes_count         = 500,
+    max_labels_count        = 500,
+    max_lines_count         = 500,
+    max_bars_back           = 5000,
+    initial_capital         = 1000000,
+    default_qty_type        = strategy.fixed,
+    default_qty_value       = 1,
+    pyramiding              = 0,
+    commission_type         = strategy.commission.cash_per_contract,
+    commission_value        = 1.0,
+    calc_on_every_tick      = false,
+    process_orders_on_close = false)
+
+// ════════════════════════════════════════════════════════════════
+// SECTION 1 — INPUTS
+// ════════════════════════════════════════════════════════════════
+
+G_DISP  = "▶ Display"
+G_OB    = "▶ OB Detection"
+G_UNI   = "▶ Unicorn Filter"
+G_QUAL  = "▶ Source-OB Quality Filter"
+G_LIQ   = "▶ E-Unicorn Raid Detection"
+G_ENTRY = "▶ Entry"
+G_SL    = "▶ Stop Loss"
+G_TP    = "▶ Take Profit & Break Even"
+G_INV   = "▶ Inverse Mode"
+G_SIZE  = "▶ Position Sizing"
+G_MSS   = "▶ MSS / CHoCH Filter"
+G_PMT   = "▶ PMT Webhook"
+
+show_obs    = input.bool(true,  "Show Live Order Blocks",  group=G_DISP)
+show_bbs    = input.bool(true,  "Show Active BB Setup",    group=G_DISP)
+show_fvg_bx = input.bool(true,  "Show FVG Box",            group=G_DISP)
+show_it_sw  = input.bool(true,  "Show IT Swing Points",    group=G_DISP)
+show_lt_sw  = input.bool(true,  "Show LT Swing Points",    group=G_DISP)
+show_ss_sw  = input.bool(false, "Show SS Swing Points",    group=G_DISP)
+show_tbl    = input.bool(true,  "Status Table",            group=G_DISP)
+tbl_pos     = input.string("Bottom Right", "Table Position",
+              options=["Top Left","Top Right","Bottom Left","Bottom Right"], group=G_DISP)
+col_bull    = input.color(color.new(color.teal, 75), "Bullish",     group=G_DISP)
+col_bear    = input.color(color.new(color.red,  75), "Bearish",     group=G_DISP)
+col_inv     = input.color(color.new(color.gray, 82), "Invalidated", group=G_DISP)
+
+detect_mode = input.string("Refined OBs", "Detection Mode",
+              options=["Show OBs", "Refined OBs"],
+              tooltip="Show OBs: OB confirmed on first direction reversal.\nRefined OBs: OB confirmed only after second reversal — more selective.",
+              group=G_OB)
+max_live_ob = input.int(5, "Max Live OBs", minval=1, maxval=20, group=G_OB)
+mit_mode    = input.string("Full Extreme", "Mitigation Level",
+              options=["Full Extreme", "50% Midpoint (CE)"], group=G_OB)
+z_len       = input.int(50, "OB Strength Z-Window", minval=1, group=G_OB,
+              tooltip="Bars used to normalise cumulative displacement into a z-score (AlgoAlpha method); read at OB birth as the OB's strength. Logged in each trade's entry comment (z=strength, a=age, t=touches, b=break-candle displacement) for bucketed analysis.")
+
+uni_gate    = input.string("Unicorns & E-Unicorns", "Entry Gate",
+              options=["All BBs", "Unicorns & E-Unicorns", "E-Unicorns Only"], group=G_UNI)
+use_bb_disp   = input.bool(false, "BB Leg Displacement",
+                tooltip="Net move of the full mitigating leg (OB far extreme → BB confirmation close) must be ≥ ATR × multiplier.",
+                group=G_UNI)
+bb_disp_mult  = input.float(1.5, "  ATR Multiplier", minval=0.1, step=0.1, group=G_UNI)
+use_fvg_disp  = input.bool(false, "FVG Size Displacement",
+                tooltip="If a FVG is present it must be ≥ ATR × multiplier tall. Passes automatically when no FVG found.",
+                group=G_UNI)
+fvg_disp_mult = input.float(0.5, "  ATR Multiplier", minval=0.1, step=0.1, group=G_UNI)
+
+// Source-OB quality bands — gate the setup on the inverted OB's stats.
+// Both default OFF, so the baseline is unchanged until toggled. Bands are
+// inclusive [min, max]; a setup is rejected if the measured value falls
+// outside the band. na values (un-measurable z / ATR) PASS (not filtered).
+// Findings (MNQ 5m E-Uni, 99 trades): break-disp sweet spot ~0.5–1.0 ATR,
+// violent breaks >1.5 ATR poor; strength z sweet spot ~2–3, extreme z>3 poor.
+use_brk_band = input.bool(false, "Break-Displacement Band",
+               tooltip="Restrict the candle that inverts the OB to a |close-open|/ATR band. Violent breaks (high disp) tend to leave no clean breaker retest.",
+               group=G_QUAL)
+brk_min      = input.float(0.0, "  Break-Disp Min (ATR)", minval=0.0, step=0.1, group=G_QUAL)
+brk_max      = input.float(1.5, "  Break-Disp Max (ATR)", minval=0.1, step=0.1, group=G_QUAL)
+use_z_band   = input.bool(false, "OB Strength (z) Band",
+               tooltip="Restrict the source OB's birth z-score to a band. Relationship is humped — both very weak and extreme-strength OBs underperform.",
+               group=G_QUAL)
+z_min        = input.float(-3.0, "  Strength z Min", step=0.1, group=G_QUAL)
+z_max        = input.float(3.0,  "  Strength z Max", step=0.1, group=G_QUAL)
+
+raid_type   = input.string("Both", "Raid Type",
+              options=["Off", "OHLC", "Swing Points", "Both"],
+              tooltip="Which liquidity pool types qualify an E-Unicorn raid.",
+              group=G_LIQ)
+liq_min_1m  = input.string("15m", "Min OHLC TF — 1m entries",
+              options=["15m", "30m", "1H", "3H", "4H", "7H"],
+              tooltip="Minimum HTF OHLC level collected when chart is on 1m.",
+              group=G_LIQ)
+liq_min_3m  = input.string("30m", "Min OHLC TF — 3m entries",
+              options=["30m", "1H", "3H", "4H", "7H"],
+              tooltip="Minimum HTF OHLC level collected when chart is on 3m.",
+              group=G_LIQ)
+liq_min_5m  = input.string("1H",  "Min OHLC TF — 5m entries",
+              options=["1H", "3H", "4H", "7H"],
+              tooltip="Minimum HTF OHLC level collected when chart is on 5m.",
+              group=G_LIQ)
+liq_min_sw  = input.string("IT", "Min Swing Tier",
+              options=["IT", "LT", "SS", "MS", "GS"],
+              tooltip="Only swing levels at or above this tier are checked for raids.",
+              group=G_LIQ)
+liq_n       = input.int(50, "HTF Candles Tracked", minval=10, maxval=100,
+              tooltip="Number of prior HTF candles whose highs/lows are tracked as OHLC pools.",
+              group=G_LIQ)
+
+use_1m      = input.bool(true,  "1m  (HTF: 15m)",     group=G_ENTRY)
+use_3m      = input.bool(false, "3m  (HTF: 30m)",     group=G_ENTRY)
+use_5m      = input.bool(false, "5m  (HTF: 1H + 4H)", group=G_ENTRY)
+entry_mode  = input.string("Retest BB Boundary", "Entry Mode",
+              options=["Immediate", "Retest BB Boundary", "Retest FVG Boundary"], group=G_ENTRY)
+gtd_min     = input.int(60, "Limit Order Expiry (min)", minval=1, group=G_ENTRY)
+trade_dir   = input.string("Both", "Trade Direction",
+              options=["Both", "Long Only", "Short Only"], group=G_ENTRY)
+
+sl_mode     = input.string("SL1 — BB Boundary", "SL Mode",
+              options=["SL1 — BB Boundary",
+                       "SL2 — FVG C2 Extreme",
+                       "SL3 — FVG C1 Extreme",
+                       "SL4 — BB Midpoint (CE)",
+                       "SL5 — BB Boundary + 50% Range",
+                       "SL6 — BB Boundary + 100% Range"], group=G_SL)
+max_sl_dist = input.float(50.0, "Max SL Distance (pts)", minval=1.0, step=5.0, group=G_SL)
+
+rr_target    = input.int(3, "R:R Target", options=[2,3,4,5,6,7,8,9,10], group=G_TP)
+be_enabled   = input.bool(true, "Trailing R-Step SL", group=G_TP)
+be_step_mode = input.string("Step at 2R", "Step Trigger",
+               options=["Step at 1R", "Step at 2R"], group=G_TP)
+eod_close_en = input.bool(true, "Auto-Close at 4:30 PM ET", group=G_TP)
+
+inv_enabled    = input.bool(false, "Enable Inverse Mode",
+                 tooltip="Trades the OPPOSITE direction of every signal. Signal-direction visuals (boxes/labels) are unchanged; the SL/TP lines and orders reflect the actual inverse trade. Uses Inverse R:R Target and Inverse Max SL Distance below in place of the standard R:R / Max SL Distance.",
+                 group=G_INV)
+inv_mirror     = input.bool(true, "Mirror Exits (exact arithmetic inverse)",
+                 tooltip="ON: inverse SL = forward TP level, inverse TP = forward SL level. Exit prices (and thus hold times / position-slot occupancy) match the forward strategy exactly, so the result is a true P&L negation (PF ≈ 1/forward_PF). For a clean mirror, disable Trailing R-Step SL. OFF: uses the reshaped Inverse R:R Target structure instead.",
+                 group=G_INV)
+inv_rr_target  = input.float(0.75, "Inverse R:R Target (Mirror OFF only)", minval=0.1, maxval=3.0, step=0.05,
+                 tooltip="TP distance as a multiple of the (OB-scaled) risk distance. 0.75 = take profit at 75% of the SL distance. Analysis of MES 1m loss-trade excursions identified ~0.75 as the optimal inverse multiplier.",
+                 group=G_INV)
+inv_max_sl_dist= input.float(50.0, "Inverse Max SL Distance (pts)", minval=1.0, step=5.0,
+                 tooltip="Risk-distance cap applied in Inverse Mode (replaces Max SL Distance).",
+                 group=G_INV)
+
+qty_mode    = input.string("Contracts", "Size Mode",
+              options=["Contracts", "Dollar Risk"], group=G_SIZE)
+dollar_risk = input.float(100.0, "1R Dollar Risk ($)", minval=1.0, step=25.0, group=G_SIZE)
+use_max_qty = input.bool(false, "Cap Max Contracts",
+              tooltip="Hard ceiling on position size. Dollar-Risk sizing balloons contracts on tight stops (observed up to 50) — a gap then produces an outsized loss. Caps size (the trade still fires, at reduced risk). Default OFF to reproduce prior baselines.",
+              group=G_SIZE)
+max_qty_cap = input.int(10, "Max Contracts", minval=1, group=G_SIZE)
+
+mss_mode    = input.string("Off", "Structure Filter",
+              options=["Off", "CHoCH", "MSS"], group=G_MSS)
+mss_tf_inp  = input.timeframe("5", "Structure Timeframe",
+              options=["1","3","5","15","30","60"], group=G_MSS)
+mss_disp_en = input.bool(true, "Require Displacement (MSS)", group=G_MSS)
+mss_disp_m  = input.float(1.5, "Displacement ATR Mult", minval=0.1, step=0.1, group=G_MSS)
+show_mss    = input.bool(true, "Show MSS Lines", group=G_MSS)
+mss_bull_col = input.color(color.new(#64b5f6, 0), "Bullish", group=G_MSS, inline="mss_c")
+mss_bear_col = input.color(color.new(#f48fb1, 0), "Bearish", group=G_MSS, inline="mss_c")
+
+pmt_en   = input.bool(false, "Enable PMT Alerts",  group=G_PMT)
+pmt_sym  = input.string("MNQ1!",                   "PMT Symbol",        group=G_PMT)
+pmt_tok  = input.string("xBWdvuyqOoByB96OH--YaA",  "PMT Token",         group=G_PMT)
+pmt_acc  = input.string("LFE05068830820017",        "PMT Account ID",    group=G_PMT)
+pmt_strt = input.string("UNIMNQ",                  "PMT Strategy Name", group=G_PMT)
+wh_qty   = input.int(1, "Webhook Qty", minval=1,                        group=G_PMT)
+
+// ════════════════════════════════════════════════════════════════
+// SECTION 2 — ACTIVE TIMEFRAME & CONSTANTS
+// ════════════════════════════════════════════════════════════════
+
+bool is_1m  = use_1m and timeframe.period == "1"
+bool is_3m  = use_3m and timeframe.period == "3"
+bool is_5m  = use_5m and timeframe.period == "5"
+bool active = is_1m or is_3m or is_5m
+bool is_ref = detect_mode == "Refined OBs"
+string tf_lbl = is_1m ? "1m" : is_3m ? "3m" : is_5m ? "5m" : "—"
+
+int   FVG_POOL_MAX = 500
+int   EXT          = 5
+
+color OB_BULL_FILL  = color.new(color.green, 93)
+color OB_BEAR_FILL  = color.new(color.red,   93)
+color BB_BULL_FILL  = color.new(color.teal,  85)
+color BB_BEAR_FILL  = color.new(color.red,   85)
+color FVG_BULL_FILL = color.new(color.teal,  70)
+color FVG_BEAR_FILL = color.new(color.red,   70)
+
+// ════════════════════════════════════════════════════════════════
+// SECTION 2b — OHLC HTF SECURITY CALLS
+// All 6 called unconditionally; active set filtered per chart TF:
+//   1m  → 15m, 30m, 1H, 3H, 4H, 7H
+//   3m  → 30m, 1H, 3H, 4H, 7H
+//   5m  → 1H, 3H, 4H, 7H
+// ════════════════════════════════════════════════════════════════
+
+[htf15_h,  htf15_l,  htf15_t]  = request.security(syminfo.tickerid, "15",  [high, low, time], lookahead=barmerge.lookahead_off)
+[htf30_h,  htf30_l,  htf30_t]  = request.security(syminfo.tickerid, "30",  [high, low, time], lookahead=barmerge.lookahead_off)
+[htf60_h,  htf60_l,  htf60_t]  = request.security(syminfo.tickerid, "60",  [high, low, time], lookahead=barmerge.lookahead_off)
+[htf180_h, htf180_l, htf180_t] = request.security(syminfo.tickerid, "180", [high, low, time], lookahead=barmerge.lookahead_off)
+[htf240_h, htf240_l, htf240_t] = request.security(syminfo.tickerid, "240", [high, low, time], lookahead=barmerge.lookahead_off)
+[htf420_h, htf420_l, htf420_t] = request.security(syminfo.tickerid, "420", [high, low, time], lookahead=barmerge.lookahead_off)
+
+bool use_15m_ohlc = timeframe.period == "1"
+bool use_30m_ohlc = timeframe.period == "1" or timeframe.period == "3"
+
+// ════════════════════════════════════════════════════════════════
+// SECTION 3 — TYPES
+// ════════════════════════════════════════════════════════════════
+
+type OB
+    box   b
+    label l
+    float top
+    float bot
+    bool  is_bull
+    int   birth
+    float strength = na     // displacement z-score at birth (v2.4)
+    int   touches  = 0      // discrete boundary tests while live (v2.4)
+    bool  touching = false  // debounce flag for touch counting (v2.4)
+
+type FVG
+    float top
+    float bot
+    bool  is_bull
+    int   birth
+    float c2_ext
+    float c1_ext
+
+// Tracks one liquidity pool level (OHLC candle extreme or swing point).
+// form_bar : bar_index when the level was registered.
+// break_bar: bar_index when first pierced (-1 = not yet broken).
+// is_high  : true = resistance level (sweep on upward move), false = support level.
+type LiqLevel
+    float price
+    int   form_bar
+    bool  broken
+    int   break_bar
+    bool  is_high
+
+// ════════════════════════════════════════════════════════════════
+// SECTION 4 — STATE VARIABLES
+// ════════════════════════════════════════════════════════════════
+
+var int ms_bias = 0
+
+var int   state        = 0
+var bool  su_bull      = false
+var float bb_top_v     = na
+var float bb_bot_v     = na
+var int   bb_lft_idx   = na
+var float fvg_top_v    = na
+var float fvg_bot_v    = na
+var float fvg_c2_ext   = na
+var float fvg_c1_ext   = na
+var float entry_v      = na
+var float sl_init_v    = na
+var float sl_act       = na
+var float tp_v         = na
+var int   be_step      = 0
+var bool  trade_opened = false
+var int   order_time   = na
+var bool  is_uni       = false
+var bool  is_e_uni     = false
+
+var box   bb_bx   = na
+var box   fvg_bx  = na
+var line  en_ln   = na
+var line  sl_ln   = na
+var line  tp_ln   = na
+var label uni_lbl = na
+var label be_lbl  = na
+
+// ════════════════════════════════════════════════════════════════
+// OB STRENGTH — AlgoAlpha cumulative-displacement z-score (every bar)
+// Accumulates directional body distance over a same-direction run and
+// resets on the opposite candle; the z-score measures the current run's
+// strength vs the recent regime. Read at OB birth (zUp for bullish OBs,
+// zDn for bearish). Defined here so f_new_ob can reference zUp/zDn.
+// ════════════════════════════════════════════════════════════════
+
+var float _updist   = 0.0
+var float _downdist = 0.0
+_updist   := close > open ? nz(_updist[1])   + (close - open) : 0.0
+_downdist := close < open ? nz(_downdist[1]) + (open - close) : 0.0
+
+_upMean = ta.sma(_updist,   z_len)
+_upStd  = ta.stdev(_updist, z_len)
+_dnMean = ta.sma(_downdist,   z_len)
+_dnStd  = ta.stdev(_downdist, z_len)
+
+zUp = (_updist   - _upMean) / (_upStd == 0.0 ? na : _upStd)
+zDn = (_downdist - _dnMean) / (_dnStd == 0.0 ? na : _dnStd)
+
+// ════════════════════════════════════════════════════════════════
+// SECTION 5 — HELPER FUNCTIONS
+// Note: Pine Script v6 does not allow := assignment to global var
+// variables inside user-defined functions. Only method calls on
+// objects (box.delete, array.push etc.) are permitted in UDFs.
+// All := resets are therefore done inline in the main script body.
+// ════════════════════════════════════════════════════════════════
+
+fmt(float v) => str.tostring(v, format.mintick)
+
+in_gap_window(int t) =>
+    int  h    = hour(t, "America/New_York")
+    int  dw   = dayofweek(t, "America/New_York")
+    bool ndog = h == 17
+    bool nwog = (dw == dayofweek.friday and h >= 17) or dw == dayofweek.saturday or (dw == dayofweek.sunday and h < 18)
+    ndog or nwog
+
+is_sess_gap(int t1, int t2, int t3) =>
+    bool span = dayofweek(t1, "America/New_York") == dayofweek.friday and dayofweek(t3, "America/New_York") == dayofweek.sunday
+    in_gap_window(t1) or in_gap_window(t2) or in_gap_window(t3) or span
+
+struct_pass(bool bull) =>
+    mss_mode == "Off" or (bull ? ms_bias >= 0 : ms_bias <= 0)
+
+dir_pass(bool bull) =>
+    bool lo = bull     and trade_dir == "Long Only"
+    bool so = not bull and trade_dir == "Short Only"
+    trade_dir == "Both" or lo or so
+
+calc_qty(float risk_pts) =>
+    float raw = na
+    if qty_mode == "Dollar Risk"
+        float tick_val = syminfo.pointvalue * syminfo.mintick
+        float risk_usd = (risk_pts / syminfo.mintick) * tick_val
+        raw := math.max(1, math.round(dollar_risk / math.max(risk_usd, 0.01)))
+    else
+        raw := math.max(1, wh_qty)
+    int(use_max_qty ? math.min(raw, max_qty_cap) : raw)
+
+pmt_entry_msg(string dir, int qty, float ep, float sl_p, float tp_p, string ord_type) =>
+    string a = '{"symbol":"' + pmt_sym + '","strategy_name":"' + pmt_strt + '","date":"{{timenow}}"'
+    string b = ',"data":"' + dir + '","quantity":' + str.tostring(qty) + ',"risk_percentage":0,"price":' + fmt(ep)
+    string c = ',"gtd_in_second":0,"tp":' + fmt(tp_p) + ',"percentage_tp":0,"dollar_tp":0,"sl":' + fmt(sl_p) + ',"dollar_sl":0,"percentage_sl":0'
+    string d = ',"trail":0,"trail_stop":0,"trail_trigger":0,"trail_freq":0,"update_tp":false,"update_sl":false,"breakeven":0,"breakeven_offset":0'
+    string e = ',"token":"' + pmt_tok + '","pyramid":false,"reverse_order_close":false,"same_direction_ignore":false,"order_type":"' + ord_type + '"'
+    string f = ',"multiple_accounts":[{"token":"' + pmt_tok + '","account_id":"' + pmt_acc + '","risk_percentage":0,"quantity_multiplier":1}]}'
+    a + b + c + d + e + f
+
+pmt_be_msg(string dir, float new_sl) =>
+    string a = '{"symbol":"' + pmt_sym + '","strategy_name":"' + pmt_strt + '","date":"{{timenow}}"'
+    string b = ',"data":"' + dir + '","quantity":0,"risk_percentage":0,"price":' + fmt(close)
+    string c = ',"tp":0,"percentage_tp":0,"dollar_tp":0,"sl":' + fmt(new_sl) + ',"dollar_sl":0,"percentage_sl":0'
+    string d = ',"trail":0,"trail_stop":0,"trail_trigger":0,"trail_freq":0,"update_tp":false,"update_sl":true,"breakeven":0,"breakeven_offset":0'
+    string e = ',"token":"' + pmt_tok + '","pyramid":false,"reverse_order_close":false,"same_direction_ignore":false,"order_type":"MKT"'
+    string f = ',"multiple_accounts":[{"token":"' + pmt_tok + '","account_id":"' + pmt_acc + '","risk_percentage":0,"quantity_multiplier":1}]}'
+    a + b + c + d + e + f
+
+// Delete active setup visual objects — method calls only, no := allowed here
+f_del_setup() =>
+    if not na(bb_bx)
+        box.delete(bb_bx)
+    if not na(fvg_bx)
+        box.delete(fvg_bx)
+    if not na(en_ln)
+        line.delete(en_ln)
+    if not na(sl_ln)
+        line.delete(sl_ln)
+    if not na(tp_ln)
+        line.delete(tp_ln)
+    if not na(uni_lbl)
+        label.delete(uni_lbl)
+    if not na(be_lbl)
+        label.delete(be_lbl)
+
+// Update broken status for all LiqLevels in arr on the current bar.
+f_upd_broken(LiqLevel[] arr) =>
+    int sz = array.size(arr)
+    if sz > 0
+        for i = 0 to sz - 1
+            lvl = array.get(arr, i)
+            if not lvl.broken
+                bool pierced = lvl.is_high ? high > lvl.price : low < lvl.price
+                if pierced
+                    lvl.broken    := true
+                    lvl.break_bar := bar_index
+
+// Register a new OHLC level; cap array at liq_n.
+f_reg_ohlc(LiqLevel[] arr, float price, bool is_high_val) =>
+    array.push(arr, LiqLevel.new(price, bar_index, false, -1, is_high_val))
+    if array.size(arr) > liq_n
+        array.shift(arr)
+
+// Register a new swing level; cap array at 200.
+f_reg_swing(LiqLevel[] arr, float price, int form_bar_val, bool is_high_val) =>
+    array.push(arr, LiqLevel.new(price, form_bar_val, false, -1, is_high_val))
+    if array.size(arr) > 200
+        array.shift(arr)
+
+// Return all levels in arr that were raided during the leg [ob_birth, bar_index].
+// Qualifies when: level existed before leg (form_bar < ob_birth) AND
+//                 was first broken during or after leg start (break_bar >= ob_birth).
+f_collect(LiqLevel[] arr, int ob_birth) =>
+    LiqLevel[] result = array.new<LiqLevel>()
+    int sz = array.size(arr)
+    if sz > 0
+        for i = 0 to sz - 1
+            lvl = array.get(arr, i)
+            if lvl.broken and lvl.form_bar < ob_birth and lvl.break_bar >= ob_birth
+                array.push(result, lvl)
+    result
+
+// Append all elements of src into dst.
+f_merge(LiqLevel[] dst, LiqLevel[] src) =>
+    int sz = array.size(src)
+    if sz > 0
+        for i = 0 to sz - 1
+            array.push(dst, array.get(src, i))
+
+// ════════════════════════════════════════════════════════════════
+// SECTION 6 — OB / FVG ARRAYS
+// ════════════════════════════════════════════════════════════════
+
+var OB[]  live_obs = array.new<OB>()
+var FVG[] fvg_pool = array.new<FVG>()
+
+// ════════════════════════════════════════════════════════════════
+// SECTION 6b — LIQLEVEL ARRAYS (E-Unicorn raid detection)
+// Swing pools: IT → GS (Basic excluded as too granular).
+// OHLC pools: 15m, 30m, 1H, 3H, 4H, 7H × highs + lows.
+// ════════════════════════════════════════════════════════════════
+
+var LiqLevel[] liq_it_sh = array.new<LiqLevel>()
+var LiqLevel[] liq_it_sl = array.new<LiqLevel>()
+var LiqLevel[] liq_lt_sh = array.new<LiqLevel>()
+var LiqLevel[] liq_lt_sl = array.new<LiqLevel>()
+var LiqLevel[] liq_ss_sh = array.new<LiqLevel>()
+var LiqLevel[] liq_ss_sl = array.new<LiqLevel>()
+var LiqLevel[] liq_ms_sh = array.new<LiqLevel>()
+var LiqLevel[] liq_ms_sl = array.new<LiqLevel>()
+var LiqLevel[] liq_gs_sh = array.new<LiqLevel>()
+var LiqLevel[] liq_gs_sl = array.new<LiqLevel>()
+
+var LiqLevel[] ohlc_15m_sl = array.new<LiqLevel>()
+var LiqLevel[] ohlc_15m_sh = array.new<LiqLevel>()
+var LiqLevel[] ohlc_30m_sl = array.new<LiqLevel>()
+var LiqLevel[] ohlc_30m_sh = array.new<LiqLevel>()
+var LiqLevel[] ohlc_1h_sl  = array.new<LiqLevel>()
+var LiqLevel[] ohlc_1h_sh  = array.new<LiqLevel>()
+var LiqLevel[] ohlc_3h_sl  = array.new<LiqLevel>()
+var LiqLevel[] ohlc_3h_sh  = array.new<LiqLevel>()
+var LiqLevel[] ohlc_4h_sl  = array.new<LiqLevel>()
+var LiqLevel[] ohlc_4h_sh  = array.new<LiqLevel>()
+var LiqLevel[] ohlc_7h_sl  = array.new<LiqLevel>()
+var LiqLevel[] ohlc_7h_sh  = array.new<LiqLevel>()
+
+var int prev_t15  = 0
+var int prev_t30  = 0
+var int prev_t60  = 0
+var int prev_t180 = 0
+var int prev_t240 = 0
+var int prev_t420 = 0
+
+// ════════════════════════════════════════════════════════════════
+// SECTION 7 — OB RUN TRACKING VARIABLES
+// ════════════════════════════════════════════════════════════════
+
+var float dc_h     = na
+var float dc_l     = na
+var int   dc_s     = na
+var int   dc_e     = na
+var float dc_eh    = na
+var float dc_el    = na
+var float uc_h     = na
+var float uc_l     = na
+var int   uc_s     = na
+var int   uc_e     = na
+var float uc_eh    = na
+var float uc_el    = na
+var float dc_lk_h  = na
+var float dc_lk_l  = na
+var int   dc_lk_s  = na
+var int   dc_lk_e  = na
+var float dc_lk_eh = na
+var float dc_lk_el = na
+var float uc_lk_h  = na
+var float uc_lk_l  = na
+var int   uc_lk_s  = na
+var int   uc_lk_e  = na
+var float uc_lk_eh = na
+var float uc_lk_el = na
+var string last_dir = na
+
+// ════════════════════════════════════════════════════════════════
+// SECTION 8 — OB HELPER FUNCTIONS
+// ════════════════════════════════════════════════════════════════
+
+f_del_ob(OB ob) =>
+    box.delete(ob.b)
+    label.delete(ob.l)
+
+f_new_ob(float t, float b, int lft, bool bull) =>
+    color  fc = show_obs ? (bull ? OB_BULL_FILL : OB_BEAR_FILL) : color.new(color.white, 100)
+    color  tc = show_obs ? (bull ? color.green  : color.red)    : color.new(color.white, 100)
+    string tx = bull ? "+OB" : "-OB"
+    int    r  = bar_index + EXT
+    box   bx  = box.new(lft, t, r, b, bgcolor=fc, border_width=0, xloc=xloc.bar_index)
+    label lb  = label.new(r - 1, math.avg(t, b), tx,
+                          style=label.style_none, textcolor=tc,
+                          textalign=text.align_right, size=size.small, xloc=xloc.bar_index)
+    o = OB.new(bx, lb, t, b, bull, bar_index)
+    o.strength := bull ? zUp : zDn
+    o
+
+// Iterate backwards to avoid index issues after removal
+f_remove_contained(float new_top, float new_bot, bool bull) =>
+    int i = array.size(live_obs) - 1
+    while i >= 0
+        ob = array.get(live_obs, i)
+        if ob.is_bull == bull and ob.top <= new_top and ob.bot >= new_bot
+            f_del_ob(ob)
+            array.remove(live_obs, i)
+        i -= 1
+
+f_add_live(OB ob) =>
+    array.push(live_obs, ob)
+    while array.size(live_obs) > max_live_ob
+        f_del_ob(array.shift(live_obs))
+
+// ════════════════════════════════════════════════════════════════
+// SECTION 9 — SWING DETECTION ARRAYS  (Basic -> IT -> LT -> SS -> MS -> GS)
+// ════════════════════════════════════════════════════════════════
+
+var float[] sh_p = array.new_float(0)
+var int[] sh_b = array.new_int(0)
+var float[] sl_p = array.new_float(0)
+var int[] sl_b = array.new_int(0)
+
+var float[] it_sh_p = array.new_float(0)
+var int[] it_sh_b = array.new_int(0)
+var float[] it_sl_p = array.new_float(0)
+var int[] it_sl_b = array.new_int(0)
+
+var float[] lt_sh_p = array.new_float(0)
+var int[] lt_sh_b = array.new_int(0)
+var float[] lt_sl_p = array.new_float(0)
+var int[] lt_sl_b = array.new_int(0)
+
+var float[] ss_sh_p = array.new_float(0)
+var int[] ss_sh_b = array.new_int(0)
+var float[] ss_sl_p = array.new_float(0)
+var int[] ss_sl_b = array.new_int(0)
+
+var float[] ms_sh_p = array.new_float(0)
+var int[] ms_sh_b = array.new_int(0)
+var float[] ms_sl_p = array.new_float(0)
+var int[] ms_sl_b = array.new_int(0)
+
+var float[] gs_sh_p = array.new_float(0)
+var float[] gs_sl_p = array.new_float(0)
+
+var int[]   sw_lh_b = array.new_int(0)
+var label[] sw_lh_l = array.new<label>(0)
+var int[]   sw_ll_b = array.new_int(0)
+var label[] sw_ll_l = array.new<label>(0)
+
+float sw_atr    = ta.atr(14)
+float sw_offset = sw_atr * 0.5
+
+// ════════════════════════════════════════════════════════════════
+// SECTION 10 — SWING LABEL HELPERS
+// (Array method calls on var arrays are permitted in functions)
+// ════════════════════════════════════════════════════════════════
+
+sw_find(int[] arr, int val) =>
+    int r = -1
+    int sz = array.size(arr)
+    if sz > 0
+        for i = 0 to sz - 1
+            if array.get(arr, i) == val
+                r := i
+    r
+
+sw_del_h(int b) =>
+    int i = sw_find(sw_lh_b, b)
+    if i >= 0
+        label.delete(array.get(sw_lh_l, i))
+        array.remove(sw_lh_b, i)
+        array.remove(sw_lh_l, i)
+
+sw_del_l(int b) =>
+    int i = sw_find(sw_ll_b, b)
+    if i >= 0
+        label.delete(array.get(sw_ll_l, i))
+        array.remove(sw_ll_b, i)
+        array.remove(sw_ll_l, i)
+
+// Note: 'st' has no type annotation — label_style is not a valid parameter type in v6
+sw_draw_h(int b, float p, color col, st) =>
+    sw_del_h(b)
+    if array.size(sw_lh_b) >= 100
+        label.delete(array.shift(sw_lh_l))
+        array.shift(sw_lh_b)
+    lbl = label.new(b, p + sw_offset, style=st, color=col, textcolor=col,
+                    text="", size=size.auto, xloc=xloc.bar_index)
+    array.push(sw_lh_b, b)
+    array.push(sw_lh_l, lbl)
+
+sw_draw_l(int b, float p, color col, st) =>
+    sw_del_l(b)
+    if array.size(sw_ll_b) >= 100
+        label.delete(array.shift(sw_ll_l))
+        array.shift(sw_ll_b)
+    lbl = label.new(b, p - sw_offset, style=st, color=col, textcolor=col,
+                    text="", size=size.auto, xloc=xloc.bar_index)
+    array.push(sw_ll_b, b)
+    array.push(sw_ll_l, lbl)
+
+// ════════════════════════════════════════════════════════════════
+// SECTION 11 — MSS / CHoCH STATE (synthetic HTF — OPP approach)
+// ════════════════════════════════════════════════════════════════
+
+int  mss_tf_ms      = int(timeframe.in_seconds(mss_tf_inp)) * 1000
+int  mss_bkt_now    = math.floor(time    / mss_tf_ms)
+int  mss_bkt_prv    = math.floor(time[1] / mss_tf_ms)
+bool is_new_mss_bar = mss_bkt_now != mss_bkt_prv
+
+var float mss_cur_h = na
+var float mss_cur_l = na
+var float mss_cur_o = na
+var int   mss_cur_t = na
+
+var float[] mss_bar_hi = array.new_float(0)
+var float[] mss_bar_lo = array.new_float(0)
+var float[] mss_bar_op = array.new_float(0)
+var float[] mss_bar_cl = array.new_float(0)
+var int[]   mss_bar_tm = array.new_int(0)
+
+var float[] mss_bsh_p = array.new_float(0)
+var int[] mss_bsh_t = array.new_int(0)
+var float[] mss_bsl_p = array.new_float(0)
+var int[] mss_bsl_t = array.new_int(0)
+
+var float mss_sh          = na
+var float mss_sl          = na
+var int   mss_sh_bar_time = na
+var int   mss_sl_bar_time = na
+var bool  mss_swept_sh    = false
+var bool  mss_swept_sl    = false
+
+if barstate.isfirst
+    mss_cur_h := high
+    mss_cur_l := low
+    mss_cur_o := open
+    mss_cur_t := time
+
+// ════════════════════════════════════════════════════════════════
+// SECTION 12 — STATUS TABLES
+// ════════════════════════════════════════════════════════════════
+
+var table tbl_tl = table.new(position.top_left,     2, 9,
+  bgcolor=color.new(color.black, 70), border_color=color.new(color.gray, 60), border_width=1)
+var table tbl_tr = table.new(position.top_right,    2, 9,
+  bgcolor=color.new(color.black, 70), border_color=color.new(color.gray, 60), border_width=1)
+var table tbl_bl = table.new(position.bottom_left,  2, 9,
+  bgcolor=color.new(color.black, 70), border_color=color.new(color.gray, 60), border_width=1)
+var table tbl_br = table.new(position.bottom_right, 2, 9,
+  bgcolor=color.new(color.black, 70), border_color=color.new(color.gray, 60), border_width=1)
+
+// ════════════════════════════════════════════════════════════════
+// SECTION 13 — VISUAL EXTENSION (every bar)
+// ════════════════════════════════════════════════════════════════
+
+if active and array.size(live_obs) > 0
+    for i = 0 to array.size(live_obs) - 1
+        ob = array.get(live_obs, i)
+        box.set_right(ob.b, bar_index + EXT)
+        label.set_x(ob.l, bar_index + EXT - 1)
+        label.set_y(ob.l, math.avg(ob.top, ob.bot))
+
+if active and state >= 1
+    if not na(bb_bx)
+        box.set_right(bb_bx, bar_index + EXT)
+    if not na(fvg_bx)
+        box.set_right(fvg_bx, bar_index + EXT)
+    if not na(en_ln)
+        line.set_x2(en_ln, bar_index + EXT)
+    if not na(sl_ln)
+        line.set_x2(sl_ln, bar_index + EXT)
+    if not na(tp_ln)
+        line.set_x2(tp_ln, bar_index + EXT)
+
+// ════════════════════════════════════════════════════════════════
+// SECTION 14 — MAIN LOGIC (confirmed bar close only)
+// ════════════════════════════════════════════════════════════════
+
+if active and barstate.isconfirmed
+
+    // ── Time ────────────────────────────────────────────────────
+    int  h_et          = hour(time, "America/New_York")
+    int  m_et          = minute(time, "America/New_York")
+    bool eod_bar       = eod_close_en and h_et == 16 and m_et >= 30
+    bool no_trade_time = (h_et == 16 and m_et >= 30) or h_et == 17 or (h_et == 18 and m_et == 0)
+    bool no_entry      = eod_close_en and no_trade_time
+
+    // ── EOD close ───────────────────────────────────────────────
+    if eod_bar and strategy.position_size != 0
+        strategy.close_all(comment="EOD")
+
+    // Cancel armed limit at EOD and fully reset
+    if no_entry and state == 1 and strategy.position_size == 0
+        strategy.cancel_all()
+        f_del_setup()
+        bb_bx        := na
+        fvg_bx       := na
+        en_ln        := na
+        sl_ln        := na
+        tp_ln        := na
+        uni_lbl      := na
+        be_lbl       := na
+        state        := 0
+        bb_top_v     := na
+        bb_bot_v     := na
+        bb_lft_idx   := na
+        fvg_top_v    := na
+        fvg_bot_v    := na
+        fvg_c2_ext   := na
+        fvg_c1_ext   := na
+        entry_v      := na
+        sl_init_v    := na
+        sl_act       := na
+        tp_v         := na
+        be_step      := 0
+        trade_opened := false
+        order_time   := na
+        is_uni       := false
+        is_e_uni     := false
+
+    // ── Reset after position closes ─────────────────────────────
+    if trade_opened and strategy.position_size == 0
+        f_del_setup()
+        bb_bx        := na
+        fvg_bx       := na
+        en_ln        := na
+        sl_ln        := na
+        tp_ln        := na
+        uni_lbl      := na
+        be_lbl       := na
+        state        := 0
+        bb_top_v     := na
+        bb_bot_v     := na
+        bb_lft_idx   := na
+        fvg_top_v    := na
+        fvg_bot_v    := na
+        fvg_c2_ext   := na
+        fvg_c1_ext   := na
+        entry_v      := na
+        sl_init_v    := na
+        sl_act       := na
+        tp_v         := na
+        be_step      := 0
+        trade_opened := false
+        order_time   := na
+        is_uni       := false
+        is_e_uni     := false
+
+    // ── GTD expiry ───────────────────────────────────────────────
+    if state == 1 and strategy.position_size == 0 and entry_mode != "Immediate" and not na(order_time)
+        if time - order_time > gtd_min * 60 * 1000
+            strategy.cancel_all()
+            f_del_setup()
+            bb_bx        := na
+            fvg_bx       := na
+            en_ln        := na
+            sl_ln        := na
+            tp_ln        := na
+            uni_lbl      := na
+            be_lbl       := na
+            state        := 0
+            bb_top_v     := na
+            bb_bot_v     := na
+            bb_lft_idx   := na
+            fvg_top_v    := na
+            fvg_bot_v    := na
+            fvg_c2_ext   := na
+            fvg_c1_ext   := na
+            entry_v      := na
+            sl_init_v    := na
+            sl_act       := na
+            tp_v         := na
+            be_step      := 0
+            trade_opened := false
+            order_time   := na
+            is_uni       := false
+            is_e_uni     := false
+
+    // ── Invalidation (ARMED, pre-entry) ──────────────────────────
+    if state == 1 and strategy.position_size == 0 and not na(bb_top_v)
+        bool invalid = su_bull ? close < bb_bot_v : close > bb_top_v
+        if invalid
+            strategy.cancel_all()
+            f_del_setup()
+            bb_bx        := na
+            fvg_bx       := na
+            en_ln        := na
+            sl_ln        := na
+            tp_ln        := na
+            uni_lbl      := na
+            be_lbl       := na
+            state        := 0
+            bb_top_v     := na
+            bb_bot_v     := na
+            bb_lft_idx   := na
+            fvg_top_v    := na
+            fvg_bot_v    := na
+            fvg_c2_ext   := na
+            fvg_c1_ext   := na
+            entry_v      := na
+            sl_init_v    := na
+            sl_act       := na
+            tp_v         := na
+            be_step      := 0
+            trade_opened := false
+            order_time   := na
+            is_uni       := false
+            is_e_uni     := false
+
+    // ── OHLC registration ────────────────────────────────────────
+    // Register new HTF candle highs/lows when the HTF bar rolls over.
+    // prev_t guard prevents double-registration on bar_index 0.
+
+    if htf15_t != prev_t15
+        if use_15m_ohlc and prev_t15 != 0
+            f_reg_ohlc(ohlc_15m_sl, htf15_l, false)
+            f_reg_ohlc(ohlc_15m_sh, htf15_h, true)
+        prev_t15 := htf15_t
+
+    if htf30_t != prev_t30
+        if use_30m_ohlc and prev_t30 != 0
+            f_reg_ohlc(ohlc_30m_sl, htf30_l, false)
+            f_reg_ohlc(ohlc_30m_sh, htf30_h, true)
+        prev_t30 := htf30_t
+
+    if htf60_t != prev_t60
+        if prev_t60 != 0
+            f_reg_ohlc(ohlc_1h_sl, htf60_l, false)
+            f_reg_ohlc(ohlc_1h_sh, htf60_h, true)
+        prev_t60 := htf60_t
+
+    if htf180_t != prev_t180
+        if prev_t180 != 0
+            f_reg_ohlc(ohlc_3h_sl, htf180_l, false)
+            f_reg_ohlc(ohlc_3h_sh, htf180_h, true)
+        prev_t180 := htf180_t
+
+    if htf240_t != prev_t240
+        if prev_t240 != 0
+            f_reg_ohlc(ohlc_4h_sl, htf240_l, false)
+            f_reg_ohlc(ohlc_4h_sh, htf240_h, true)
+        prev_t240 := htf240_t
+
+    if htf420_t != prev_t420
+        if prev_t420 != 0
+            f_reg_ohlc(ohlc_7h_sl, htf420_l, false)
+            f_reg_ohlc(ohlc_7h_sh, htf420_h, true)
+        prev_t420 := htf420_t
+
+    // ── Broken-status update ─────────────────────────────────────
+    // Must run every bar before BB detection so break_bar is current.
+
+    f_upd_broken(liq_it_sh)
+    f_upd_broken(liq_it_sl)
+    f_upd_broken(liq_lt_sh)
+    f_upd_broken(liq_lt_sl)
+    f_upd_broken(liq_ss_sh)
+    f_upd_broken(liq_ss_sl)
+    f_upd_broken(liq_ms_sh)
+    f_upd_broken(liq_ms_sl)
+    f_upd_broken(liq_gs_sh)
+    f_upd_broken(liq_gs_sl)
+    f_upd_broken(ohlc_15m_sl)
+    f_upd_broken(ohlc_15m_sh)
+    f_upd_broken(ohlc_30m_sl)
+    f_upd_broken(ohlc_30m_sh)
+    f_upd_broken(ohlc_1h_sl)
+    f_upd_broken(ohlc_1h_sh)
+    f_upd_broken(ohlc_3h_sl)
+    f_upd_broken(ohlc_3h_sh)
+    f_upd_broken(ohlc_4h_sl)
+    f_upd_broken(ohlc_4h_sh)
+    f_upd_broken(ohlc_7h_sl)
+    f_upd_broken(ohlc_7h_sh)
+
+    // ── FVG pool update ──────────────────────────────────────────
+    float h2    = high[2]
+    float l2    = low[2]
+    bool no_gap = is_sess_gap(time[2], time[1], time[0])
+
+    if not no_gap
+        if low > h2
+            array.push(fvg_pool, FVG.new(low, h2, true,  bar_index, low[1],  low[2]))
+            if array.size(fvg_pool) > FVG_POOL_MAX
+                array.shift(fvg_pool)
+        if high < l2
+            array.push(fvg_pool, FVG.new(l2, high, false, bar_index, high[1], high[2]))
+            if array.size(fvg_pool) > FVG_POOL_MAX
+                array.shift(fvg_pool)
+
+    // ── OB confirmation ──────────────────────────────────────────
+    bool is_up   = close > open
+    bool is_down = close < open
+
+    if not na(dc_e) and close > dc_h
+        f_remove_contained(dc_h, dc_l, true)
+        f_add_live(f_new_ob(dc_h, dc_l, dc_s, true))
+        dc_h  := na
+        dc_l  := na
+        dc_s  := na
+        dc_e  := na
+        dc_eh := na
+        dc_el := na
+
+    if not na(uc_e) and close < uc_l
+        f_remove_contained(uc_h, uc_l, false)
+        f_add_live(f_new_ob(uc_h, uc_l, uc_s, false))
+        uc_h  := na
+        uc_l  := na
+        uc_s  := na
+        uc_e  := na
+        uc_eh := na
+        uc_el := na
+
+    if is_ref
+        if not na(dc_lk_e) and close > dc_lk_h
+            f_remove_contained(dc_lk_h, dc_lk_l, true)
+            f_add_live(f_new_ob(dc_lk_h, dc_lk_l, dc_lk_s, true))
+            dc_lk_h  := na
+            dc_lk_l  := na
+            dc_lk_s  := na
+            dc_lk_e  := na
+            dc_lk_eh := na
+            dc_lk_el := na
+
+        if not na(uc_lk_e) and close < uc_lk_l
+            f_remove_contained(uc_lk_h, uc_lk_l, false)
+            f_add_live(f_new_ob(uc_lk_h, uc_lk_l, uc_lk_s, false))
+            uc_lk_h  := na
+            uc_lk_l  := na
+            uc_lk_s  := na
+            uc_lk_e  := na
+            uc_lk_eh := na
+            uc_lk_el := na
+
+    // ── Run invalidation ─────────────────────────────────────────
+    if not na(uc_e) and last_dir != "uc" and close > uc_h
+        uc_h  := na
+        uc_l  := na
+        uc_s  := na
+        uc_e  := na
+        uc_eh := na
+        uc_el := na
+    if not na(dc_e) and last_dir != "dc" and close < dc_l
+        dc_h  := na
+        dc_l  := na
+        dc_s  := na
+        dc_e  := na
+        dc_eh := na
+        dc_el := na
+    if is_ref
+        if not na(uc_lk_e) and close > uc_lk_h
+            uc_lk_h  := na
+            uc_lk_l  := na
+            uc_lk_s  := na
+            uc_lk_e  := na
+            uc_lk_eh := na
+            uc_lk_el := na
+        if not na(dc_lk_e) and close < dc_lk_l
+            dc_lk_h  := na
+            dc_lk_l  := na
+            dc_lk_s  := na
+            dc_lk_e  := na
+            dc_lk_eh := na
+            dc_lk_el := na
+
+    // ── Run updates ──────────────────────────────────────────────
+    if is_down
+        if is_ref and last_dir == "uc" and not na(uc_e)
+            if na(uc_lk_e)
+                uc_lk_h  := uc_h
+                uc_lk_l  := uc_l
+                uc_lk_s  := uc_s
+                uc_lk_e  := uc_e
+                uc_lk_eh := uc_eh
+                uc_lk_el := uc_el
+            uc_h  := na
+            uc_l  := na
+            uc_s  := na
+            uc_e  := na
+            uc_eh := na
+            uc_el := na
+        if last_dir == "dc" and not na(dc_s)
+            dc_h := math.max(dc_h, high)
+            dc_l := math.min(dc_l, low)
+        else
+            dc_s := bar_index
+            dc_h := high
+            dc_l := low
+        dc_e     := bar_index
+        dc_eh := high
+        dc_el := low
+        last_dir := "dc"
+
+    else if is_up
+        if is_ref and last_dir == "dc" and not na(dc_e)
+            if na(dc_lk_e)
+                dc_lk_h  := dc_h
+                dc_lk_l  := dc_l
+                dc_lk_s  := dc_s
+                dc_lk_e  := dc_e
+                dc_lk_eh := dc_eh
+                dc_lk_el := dc_el
+            dc_h  := na
+            dc_l  := na
+            dc_s  := na
+            dc_e  := na
+            dc_eh := na
+            dc_el := na
+        if last_dir == "uc" and not na(uc_s)
+            uc_h := math.max(uc_h, high)
+            uc_l := math.min(uc_l, low)
+        else
+            uc_s := bar_index
+            uc_h := high
+            uc_l := low
+        uc_e     := bar_index
+        uc_eh := high
+        uc_el := low
+        last_dir := "uc"
+
+    else
+        // close == open : doji — breaks the active run without committing to a
+        // direction, so the next same-direction candle starts a FRESH run rather
+        // than extending across the doji (which previously merged two runs into
+        // one oversized OB). In Refined mode the active run is locked first,
+        // exactly as an opposite candle would lock it.
+        if is_ref
+            if last_dir == "dc" and not na(dc_e)
+                if na(dc_lk_e)
+                    dc_lk_h  := dc_h
+                    dc_lk_l  := dc_l
+                    dc_lk_s  := dc_s
+                    dc_lk_e  := dc_e
+                    dc_lk_eh := dc_eh
+                    dc_lk_el := dc_el
+                dc_h  := na
+                dc_l  := na
+                dc_s  := na
+                dc_e  := na
+                dc_eh := na
+                dc_el := na
+            else if last_dir == "uc" and not na(uc_e)
+                if na(uc_lk_e)
+                    uc_lk_h  := uc_h
+                    uc_lk_l  := uc_l
+                    uc_lk_s  := uc_s
+                    uc_lk_e  := uc_e
+                    uc_lk_eh := uc_eh
+                    uc_lk_el := uc_el
+                uc_h  := na
+                uc_l  := na
+                uc_s  := na
+                uc_e  := na
+                uc_eh := na
+                uc_el := na
+        last_dir := "none"
+
+    // ── Swing detection  Basic -> IT -> LT -> SS -> MS -> GS ─────
+    bool basic_sh = high[1] > high[2] and high[1] > high[0]
+    bool basic_sl = low[1]  < low[2]  and low[1]  < low[0]
+
+    bool new_it_sh = false
+    bool new_it_sl = false
+    bool new_lt_sh = false
+    bool new_lt_sl = false
+    bool new_ss_sh = false
+    bool new_ss_sl = false
+    bool new_ms_sh = false
+    bool new_ms_sl = false
+
+    if basic_sh and (array.size(sh_b) == 0 or array.last(sh_b) != bar_index[1])
+        array.push(sh_p, high[1])
+        array.push(sh_b, bar_index[1])
+        if array.size(sh_p) > 200
+            array.shift(sh_p)
+            array.shift(sh_b)
+
+    if basic_sl and (array.size(sl_b) == 0 or array.last(sl_b) != bar_index[1])
+        array.push(sl_p, low[1])
+        array.push(sl_b, bar_index[1])
+        if array.size(sl_p) > 200
+            array.shift(sl_p)
+            array.shift(sl_b)
+
+    if basic_sh and array.size(sh_p) >= 3
+        int n   = array.size(sh_p)
+        float l = array.get(sh_p, n-3)
+        float m = array.get(sh_p, n-2)
+        float r = array.get(sh_p, n-1)
+        int   bi = array.get(sh_b, n-2)
+        if m > l and m > r and (array.size(it_sh_b) == 0 or array.last(it_sh_b) != bi)
+            array.push(it_sh_p, m)
+            array.push(it_sh_b, bi)
+            if array.size(it_sh_p) > 200
+                array.shift(it_sh_p)
+                array.shift(it_sh_b)
+            if show_it_sw
+                sw_draw_h(bi, m, color.green, label.style_square)
+            f_reg_swing(liq_it_sh, m, bi, true)
+            new_it_sh := true
+
+    if basic_sl and array.size(sl_p) >= 3
+        int n   = array.size(sl_p)
+        float l = array.get(sl_p, n-3)
+        float m = array.get(sl_p, n-2)
+        float r = array.get(sl_p, n-1)
+        int   bi = array.get(sl_b, n-2)
+        if m < l and m < r and (array.size(it_sl_b) == 0 or array.last(it_sl_b) != bi)
+            array.push(it_sl_p, m)
+            array.push(it_sl_b, bi)
+            if array.size(it_sl_p) > 200
+                array.shift(it_sl_p)
+                array.shift(it_sl_b)
+            if show_it_sw
+                sw_draw_l(bi, m, color.orange, label.style_square)
+            f_reg_swing(liq_it_sl, m, bi, false)
+            new_it_sl := true
+
+    if new_it_sh and array.size(it_sh_p) >= 3
+        int n   = array.size(it_sh_p)
+        float l = array.get(it_sh_p, n-3)
+        float m = array.get(it_sh_p, n-2)
+        float r = array.get(it_sh_p, n-1)
+        int   bi = array.get(it_sh_b, n-2)
+        if m > l and m > r and (array.size(lt_sh_b) == 0 or array.last(lt_sh_b) != bi)
+            array.push(lt_sh_p, m)
+            array.push(lt_sh_b, bi)
+            if array.size(lt_sh_p) > 200
+                array.shift(lt_sh_p)
+                array.shift(lt_sh_b)
+            if show_lt_sw
+                sw_draw_h(bi, m, color.yellow, label.style_diamond)
+            f_reg_swing(liq_lt_sh, m, bi, true)
+            new_lt_sh := true
+
+    if new_it_sl and array.size(it_sl_p) >= 3
+        int n   = array.size(it_sl_p)
+        float l = array.get(it_sl_p, n-3)
+        float m = array.get(it_sl_p, n-2)
+        float r = array.get(it_sl_p, n-1)
+        int   bi = array.get(it_sl_b, n-2)
+        if m < l and m < r and (array.size(lt_sl_b) == 0 or array.last(lt_sl_b) != bi)
+            array.push(lt_sl_p, m)
+            array.push(lt_sl_b, bi)
+            if array.size(lt_sl_p) > 200
+                array.shift(lt_sl_p)
+                array.shift(lt_sl_b)
+            if show_lt_sw
+                sw_draw_l(bi, m, color.red, label.style_diamond)
+            f_reg_swing(liq_lt_sl, m, bi, false)
+            new_lt_sl := true
+
+    if new_lt_sh and array.size(lt_sh_p) >= 3
+        int n   = array.size(lt_sh_p)
+        float l = array.get(lt_sh_p, n-3)
+        float m = array.get(lt_sh_p, n-2)
+        float r = array.get(lt_sh_p, n-1)
+        int   bi = array.get(lt_sh_b, n-2)
+        if m > l and m > r and (array.size(ss_sh_b) == 0 or array.last(ss_sh_b) != bi)
+            array.push(ss_sh_p, m)
+            array.push(ss_sh_b, bi)
+            if array.size(ss_sh_p) > 200
+                array.shift(ss_sh_p)
+                array.shift(ss_sh_b)
+            if show_ss_sw
+                sw_draw_h(bi, m, #77d9fe, label.style_circle)
+            f_reg_swing(liq_ss_sh, m, bi, true)
+            new_ss_sh := true
+
+    if new_lt_sl and array.size(lt_sl_p) >= 3
+        int n   = array.size(lt_sl_p)
+        float l = array.get(lt_sl_p, n-3)
+        float m = array.get(lt_sl_p, n-2)
+        float r = array.get(lt_sl_p, n-1)
+        int   bi = array.get(lt_sl_b, n-2)
+        if m < l and m < r and (array.size(ss_sl_b) == 0 or array.last(ss_sl_b) != bi)
+            array.push(ss_sl_p, m)
+            array.push(ss_sl_b, bi)
+            if array.size(ss_sl_p) > 200
+                array.shift(ss_sl_p)
+                array.shift(ss_sl_b)
+            if show_ss_sw
+                sw_draw_l(bi, m, #d795ed, label.style_circle)
+            f_reg_swing(liq_ss_sl, m, bi, false)
+            new_ss_sl := true
+
+    if new_ss_sh and array.size(ss_sh_p) >= 3
+        int n   = array.size(ss_sh_p)
+        float l = array.get(ss_sh_p, n-3)
+        float m = array.get(ss_sh_p, n-2)
+        float r = array.get(ss_sh_p, n-1)
+        int   bi = array.get(ss_sh_b, n-2)
+        if m > l and m > r and (array.size(ms_sh_b) == 0 or array.last(ms_sh_b) != bi)
+            array.push(ms_sh_p, m)
+            array.push(ms_sh_b, bi)
+            if array.size(ms_sh_p) > 200
+                array.shift(ms_sh_p)
+                array.shift(ms_sh_b)
+            f_reg_swing(liq_ms_sh, m, bi, true)
+            new_ms_sh := true
+
+    if new_ss_sl and array.size(ss_sl_p) >= 3
+        int n   = array.size(ss_sl_p)
+        float l = array.get(ss_sl_p, n-3)
+        float m = array.get(ss_sl_p, n-2)
+        float r = array.get(ss_sl_p, n-1)
+        int   bi = array.get(ss_sl_b, n-2)
+        if m < l and m < r and (array.size(ms_sl_b) == 0 or array.last(ms_sl_b) != bi)
+            array.push(ms_sl_p, m)
+            array.push(ms_sl_b, bi)
+            if array.size(ms_sl_p) > 200
+                array.shift(ms_sl_p)
+                array.shift(ms_sl_b)
+            f_reg_swing(liq_ms_sl, m, bi, false)
+            new_ms_sl := true
+
+    if new_ms_sh and array.size(ms_sh_p) >= 3
+        int n    = array.size(ms_sh_p)
+        float l  = array.get(ms_sh_p, n-3)
+        float m  = array.get(ms_sh_p, n-2)
+        float r  = array.get(ms_sh_p, n-1)
+        int   bi = array.get(ms_sh_b, n-2)
+        if m > l and m > r and (array.size(gs_sh_p) == 0 or array.last(gs_sh_p) != m)
+            array.push(gs_sh_p, m)
+            if array.size(gs_sh_p) > 200
+                array.shift(gs_sh_p)
+            f_reg_swing(liq_gs_sh, m, bi, true)
+
+    if new_ms_sl and array.size(ms_sl_p) >= 3
+        int n    = array.size(ms_sl_p)
+        float l  = array.get(ms_sl_p, n-3)
+        float m  = array.get(ms_sl_p, n-2)
+        float r  = array.get(ms_sl_p, n-1)
+        int   bi = array.get(ms_sl_b, n-2)
+        if m < l and m < r and (array.size(gs_sl_p) == 0 or array.last(gs_sl_p) != m)
+            array.push(gs_sl_p, m)
+            if array.size(gs_sl_p) > 200
+                array.shift(gs_sl_p)
+            f_reg_swing(liq_gs_sl, m, bi, false)
+
+    // ── MSS / CHoCH synthetic HTF ─────────────────────────────────
+    if not na(high)
+        mss_cur_h := na(mss_cur_h) ? high : math.max(mss_cur_h, high)
+        mss_cur_l := na(mss_cur_l) ? low  : math.min(mss_cur_l, low)
+
+    if is_new_mss_bar
+        if not na(mss_cur_h)
+            array.push(mss_bar_hi, mss_cur_h)
+            array.push(mss_bar_lo, mss_cur_l)
+            array.push(mss_bar_op, mss_cur_o)
+            array.push(mss_bar_cl, close[1])
+            array.push(mss_bar_tm, mss_cur_t)
+            if array.size(mss_bar_hi) > 100
+                array.shift(mss_bar_hi)
+                array.shift(mss_bar_lo)
+                array.shift(mss_bar_op)
+                array.shift(mss_bar_cl)
+                array.shift(mss_bar_tm)
+
+        mss_cur_h := high
+        mss_cur_l := low
+        mss_cur_o := open
+        mss_cur_t := time
+
+        int nb = array.size(mss_bar_hi)
+        if nb >= 1
+            float htf_c  = array.last(mss_bar_cl)
+            float htf_o  = array.last(mss_bar_op)
+            float htf_h  = array.last(mss_bar_hi)
+            float htf_l  = array.last(mss_bar_lo)
+            int   htf_tm = array.last(mss_bar_tm)
+
+            float htf_atr = na
+            if nb >= 2
+                float sum_tr = 0.0
+                int   atr_n  = math.min(14, nb)
+                for k = 0 to atr_n - 1
+                    int   ki = nb - 1 - k
+                    float th = array.get(mss_bar_hi, ki)
+                    float tl = array.get(mss_bar_lo, ki)
+                    float pc = ki > 0 ? array.get(mss_bar_cl, ki-1) : array.get(mss_bar_op, ki)
+                    sum_tr  += math.max(th - tl, math.max(math.abs(th - pc), math.abs(tl - pc)))
+                htf_atr := sum_tr / atr_n
+
+            bool disp_ok = not mss_disp_en or (not na(htf_atr) and math.abs(htf_c - htf_o) > htf_atr * mss_disp_m)
+
+            if nb >= 3
+                float h_prv = array.get(mss_bar_hi, nb-2)
+                float l_prv = array.get(mss_bar_lo, nb-2)
+
+                if mss_mode == "CHoCH"
+                    if htf_h > h_prv and not na(mss_sl) and htf_c > mss_sl and ms_bias != 1
+                        ms_bias := 1
+                        if show_mss
+                            line.new(mss_sl_bar_time, mss_sl, htf_tm, mss_sl,
+                                     color=mss_bull_col, style=line.style_dashed, width=1, xloc=xloc.bar_time)
+                        mss_sl       := na
+                        mss_swept_sh := false
+                        mss_swept_sl := false
+                    else if htf_l < l_prv and not na(mss_sh) and htf_c < mss_sh and ms_bias != -1
+                        ms_bias := -1
+                        if show_mss
+                            line.new(mss_sh_bar_time, mss_sh, htf_tm, mss_sh,
+                                     color=mss_bear_col, style=line.style_dashed, width=1, xloc=xloc.bar_time)
+                        mss_sh       := na
+                        mss_swept_sh := false
+                        mss_swept_sl := false
+
+                else if mss_mode == "MSS"
+                    if not na(mss_sh) and htf_h > mss_sh
+                        mss_swept_sh := true
+                    if not na(mss_sl) and htf_l < mss_sl
+                        mss_swept_sl := true
+
+                    if mss_swept_sl and not na(mss_sh) and htf_c > mss_sh and disp_ok and ms_bias != 1
+                        ms_bias := 1
+                        if show_mss
+                            line.new(mss_sh_bar_time, mss_sh, htf_tm, mss_sh,
+                                     color=mss_bull_col, style=line.style_dashed, width=1, xloc=xloc.bar_time)
+                        mss_sh       := na
+                        mss_swept_sh := false
+                        mss_swept_sl := false
+                    else if mss_swept_sh and not na(mss_sl) and htf_c < mss_sl and disp_ok and ms_bias != -1
+                        ms_bias := -1
+                        if show_mss
+                            line.new(mss_sl_bar_time, mss_sl, htf_tm, mss_sl,
+                                     color=mss_bear_col, style=line.style_dashed, width=1, xloc=xloc.bar_time)
+                        mss_sl       := na
+                        mss_swept_sh := false
+                        mss_swept_sl := false
+
+            if mss_mode != "Off"
+                bool mss_basic_sh = nb >= 2 ? htf_h > array.get(mss_bar_hi, nb-2) : false
+                bool mss_basic_sl = nb >= 2 ? htf_l < array.get(mss_bar_lo, nb-2) : false
+
+                int mss_nb_sh = array.size(mss_bsh_p)
+                int mss_nb_sl = array.size(mss_bsl_p)
+
+                if mss_basic_sh and (mss_nb_sh == 0 or array.last(mss_bsh_t) != htf_tm)
+                    array.push(mss_bsh_p, htf_h)
+                    array.push(mss_bsh_t, htf_tm)
+                    if array.size(mss_bsh_p) > 100
+                        array.shift(mss_bsh_p)
+                        array.shift(mss_bsh_t)
+
+                if mss_basic_sl and (mss_nb_sl == 0 or array.last(mss_bsl_t) != htf_tm)
+                    array.push(mss_bsl_p, htf_l)
+                    array.push(mss_bsl_t, htf_tm)
+                    if array.size(mss_bsl_p) > 100
+                        array.shift(mss_bsl_p)
+                        array.shift(mss_bsl_t)
+
+                int n_sh = array.size(mss_bsh_p)
+                int n_sl = array.size(mss_bsl_p)
+
+                if n_sh >= 3
+                    float sh_l = array.get(mss_bsh_p, n_sh - 3)
+                    float sh_m = array.get(mss_bsh_p, n_sh - 2)
+                    float sh_r = array.get(mss_bsh_p, n_sh - 1)
+                    int   sh_t = array.get(mss_bsh_t, n_sh - 2)
+                    if sh_m > sh_l and sh_m > sh_r
+                        if na(mss_sh) or sh_m > mss_sh
+                            mss_sh          := sh_m
+                            mss_sh_bar_time := sh_t
+
+                if n_sl >= 3
+                    float sl_l = array.get(mss_bsl_p, n_sl - 3)
+                    float sl_m = array.get(mss_bsl_p, n_sl - 2)
+                    float sl_r = array.get(mss_bsl_p, n_sl - 1)
+                    int   sl_t = array.get(mss_bsl_t, n_sl - 2)
+                    if sl_m < sl_l and sl_m < sl_r
+                        if na(mss_sl) or sl_m < mss_sl
+                            mss_sl          := sl_m
+                            mss_sl_bar_time := sl_t
+
+    // ── OB touch counting (discrete boundary tests while live) ────
+    // Increments once each time price re-enters the OB zone from
+    // outside; debounce flag prevents counting consecutive in-zone bars.
+    int tc_i = 0
+    while tc_i < array.size(live_obs)
+        ob_t = array.get(live_obs, tc_i)
+        bool overlap = high >= ob_t.bot and low <= ob_t.top
+        if overlap and not ob_t.touching
+            ob_t.touches := ob_t.touches + 1
+        ob_t.touching := overlap
+        tc_i += 1
+
+    // ── OB mitigation → BB creation ──────────────────────────────
+    bool bb_fired = false
+    int  ob_idx   = 0
+
+    while ob_idx < array.size(live_obs) and not bb_fired
+        ob = array.get(live_obs, ob_idx)
+
+        float mid = math.avg(ob.top, ob.bot)
+        bool full_hit = ob.is_bull ? close < ob.bot : close > ob.top
+        bool hit      = mit_mode == "Full Extreme" ? full_hit : (ob.is_bull ? close < mid : close > mid)
+
+        if hit
+            int ob_lft = box.get_left(ob.b)
+            array.remove(live_obs, ob_idx)
+            f_del_ob(ob)
+
+            if full_hit
+                bool bb_bull = not ob.is_bull
+                bool dir_ok  = dir_pass(bb_bull)
+                bool str_ok  = struct_pass(bb_bull)
+
+                if dir_ok and str_ok and not no_entry
+
+                    float ob_top_c = ob.top
+                    float ob_bot_c = ob.bot
+                    int   ob_brt   = ob.birth
+                    float ob_str_c = ob.strength   // source OB z-strength at birth
+                    int   ob_tch_c = ob.touches    // source OB touch count at inversion
+                    float brk_disp = sw_atr != 0 ? math.abs(close - open) / sw_atr : na
+
+                    // Source-OB quality bands (inclusive; na passes; off = pass)
+                    bool brk_ok    = not use_brk_band or na(brk_disp) or (brk_disp >= brk_min and brk_disp <= brk_max)
+                    bool zband_ok  = not use_z_band   or na(ob_str_c) or (ob_str_c >= z_min and ob_str_c <= z_max)
+                    bool quality_ok = brk_ok and zband_ok
+
+                    // ── BB leg displacement filter ───────────────────────────
+                    float leg_move  = bb_bull ? close - ob.bot : ob.top - close
+                    bool  bb_leg_ok = not use_bb_disp or leg_move >= bb_disp_mult * sw_atr
+
+                    // ── E-Unicorn: swept-during-leg raid detection ───────────
+                    // Collects levels that existed before the OB was born and were
+                    // first pierced during the mitigating leg (ob_brt → current bar).
+                    bool use_ohlc_r  = raid_type == "OHLC"  or raid_type == "Both"
+                    bool use_swing_r = raid_type == "Swing Points" or raid_type == "Both"
+                    string _ohlc_sel = is_1m ? liq_min_1m : is_3m ? liq_min_3m : liq_min_5m
+                    int ohlc_min = _ohlc_sel == "15m" ? 0 : _ohlc_sel == "30m" ? 1 : _ohlc_sel == "1H" ? 2 : _ohlc_sel == "3H" ? 3 : _ohlc_sel == "4H" ? 4 : 5
+                    int sw_min   = liq_min_sw == "IT" ? 0 : liq_min_sw == "LT" ? 1 : liq_min_sw == "SS" ? 2 : liq_min_sw == "MS" ? 3 : 4
+
+                    LiqLevel[] raided = array.new<LiqLevel>()
+                    if raid_type != "Off"
+                        if bb_bull
+                            if use_swing_r
+                                if sw_min <= 0
+                                    f_merge(raided, f_collect(liq_it_sl, ob_brt))
+                                if sw_min <= 1
+                                    f_merge(raided, f_collect(liq_lt_sl, ob_brt))
+                                if sw_min <= 2
+                                    f_merge(raided, f_collect(liq_ss_sl, ob_brt))
+                                if sw_min <= 3
+                                    f_merge(raided, f_collect(liq_ms_sl, ob_brt))
+                                f_merge(raided, f_collect(liq_gs_sl, ob_brt))
+                            if use_ohlc_r
+                                if is_1m and ohlc_min <= 0
+                                    f_merge(raided, f_collect(ohlc_15m_sl, ob_brt))
+                                if (is_1m or is_3m) and ohlc_min <= 1
+                                    f_merge(raided, f_collect(ohlc_30m_sl, ob_brt))
+                                if ohlc_min <= 2
+                                    f_merge(raided, f_collect(ohlc_1h_sl, ob_brt))
+                                if ohlc_min <= 3
+                                    f_merge(raided, f_collect(ohlc_3h_sl, ob_brt))
+                                if ohlc_min <= 4
+                                    f_merge(raided, f_collect(ohlc_4h_sl, ob_brt))
+                                f_merge(raided, f_collect(ohlc_7h_sl, ob_brt))
+                        else
+                            if use_swing_r
+                                if sw_min <= 0
+                                    f_merge(raided, f_collect(liq_it_sh, ob_brt))
+                                if sw_min <= 1
+                                    f_merge(raided, f_collect(liq_lt_sh, ob_brt))
+                                if sw_min <= 2
+                                    f_merge(raided, f_collect(liq_ss_sh, ob_brt))
+                                if sw_min <= 3
+                                    f_merge(raided, f_collect(liq_ms_sh, ob_brt))
+                                f_merge(raided, f_collect(liq_gs_sh, ob_brt))
+                            if use_ohlc_r
+                                if is_1m and ohlc_min <= 0
+                                    f_merge(raided, f_collect(ohlc_15m_sh, ob_brt))
+                                if (is_1m or is_3m) and ohlc_min <= 1
+                                    f_merge(raided, f_collect(ohlc_30m_sh, ob_brt))
+                                if ohlc_min <= 2
+                                    f_merge(raided, f_collect(ohlc_1h_sh, ob_brt))
+                                if ohlc_min <= 3
+                                    f_merge(raided, f_collect(ohlc_3h_sh, ob_brt))
+                                if ohlc_min <= 4
+                                    f_merge(raided, f_collect(ohlc_4h_sh, ob_brt))
+                                f_merge(raided, f_collect(ohlc_7h_sh, ob_brt))
+                    bool raid_check = array.size(raided) > 0
+
+                    // ── Unicorn: most recent FVG overlapping OB zone born during leg
+                    bool  fvg_found    = false
+                    float best_fvg_top = na
+                    float best_fvg_bot = na
+                    float best_c2      = na
+                    float best_c1      = na
+                    int   best_birth   = -1
+
+                    int fvg_sz = array.size(fvg_pool)
+                    if fvg_sz > 0
+                        for fi = 0 to fvg_sz - 1
+                            fvg = array.get(fvg_pool, fi)
+                            if fvg.is_bull == bb_bull and fvg.birth >= ob_brt
+                                if fvg.top > ob_bot_c and fvg.bot < ob_top_c
+                                    if fvg.birth > best_birth
+                                        best_birth   := fvg.birth
+                                        best_fvg_top := fvg.top
+                                        best_fvg_bot := fvg.bot
+                                        best_c2      := fvg.c2_ext
+                                        best_c1      := fvg.c1_ext
+                                        fvg_found    := true
+
+                    // ── FVG size displacement filter ─────────────────────────
+                    float fvg_h     = fvg_found ? best_fvg_top - best_fvg_bot : 0.0
+                    bool  fvg_sz_ok = not use_fvg_disp or not fvg_found or (fvg_h >= fvg_disp_mult * sw_atr)
+
+                    bool uni_ok   = fvg_found
+                    bool e_uni_ok = fvg_found and raid_check
+                    bool gate_ok  = quality_ok and bb_leg_ok and fvg_sz_ok and (uni_gate == "All BBs" or (uni_gate == "Unicorns & E-Unicorns" and uni_ok) or (uni_gate == "E-Unicorns Only" and e_uni_ok))
+
+                    if gate_ok and (state == 0 or (state == 1 and strategy.position_size == 0))
+
+                        // Cancel / clear any previous armed setup
+                        if state == 1
+                            strategy.cancel_all()
+                            f_del_setup()
+                            bb_bx   := na
+                            fvg_bx  := na
+                            en_ln   := na
+                            sl_ln   := na
+                            tp_ln   := na
+                            uni_lbl := na
+                            be_lbl := na
+
+                        // Entry level
+                        float en_v = na
+                        if entry_mode == "Immediate"
+                            en_v := close
+                        else if entry_mode == "Retest BB Boundary"
+                            en_v := bb_bull ? ob_top_c : ob_bot_c
+                        else
+                            en_v := fvg_found ? (bb_bull ? best_fvg_top : best_fvg_bot) : (bb_bull ? ob_top_c : ob_bot_c)
+
+                        // SL level
+                        float bb_range = ob_top_c - ob_bot_c
+                        float sl_opp   = bb_bull ? ob_bot_c : ob_top_c
+                        float sl_raw   = na
+                        if sl_mode == "SL1 — BB Boundary"
+                            sl_raw := sl_opp
+                        else if sl_mode == "SL2 — FVG C2 Extreme"
+                            sl_raw := fvg_found ? best_c2 : sl_opp
+                        else if sl_mode == "SL3 — FVG C1 Extreme"
+                            sl_raw := fvg_found ? best_c1 : sl_opp
+                        else if sl_mode == "SL4 — BB Midpoint (CE)"
+                            sl_raw := bb_bull ? ob_bot_c + bb_range * 0.5 : ob_top_c - bb_range * 0.5
+                        else if sl_mode == "SL5 — BB Boundary + 50% Range"
+                            sl_raw := bb_bull ? ob_bot_c - bb_range * 0.5 : ob_top_c + bb_range * 0.5
+                        else
+                            sl_raw := bb_bull ? ob_bot_c - bb_range : ob_top_c + bb_range
+
+                        float risk_pts = math.abs(en_v - sl_raw)
+
+                        // ── Inverse Mode direction & level remap ────────────────
+                        // Trade direction flips. Two inverse exit structures:
+                        //  • Mirror Exits: inverse SL = forward TP, inverse TP = forward SL
+                        //    → exit prices/hold-times match forward exactly → true P&L negation.
+                        //  • Reshaped (Mirror OFF): SL = OB-scaled risk, TP = inv_rr_target × risk.
+                        // Forward mode keeps sl_raw / standard TP unchanged.
+                        bool  trade_bull = inv_enabled ? not bb_bull : bb_bull
+                        float sl_cap     = inv_enabled ? inv_max_sl_dist : max_sl_dist
+
+                        // Forward (signal-direction) TP level — basis for mirror & forward modes
+                        float fwd_tp = bb_bull ? en_v + risk_pts * rr_target : en_v - risk_pts * rr_target
+
+                        float sl_final = na
+                        float tp_final = na
+                        if inv_enabled and inv_mirror
+                            sl_final := fwd_tp
+                            tp_final := sl_raw
+                        else if inv_enabled
+                            sl_final := trade_bull ? en_v - risk_pts : en_v + risk_pts
+                            tp_final := trade_bull ? en_v + risk_pts * inv_rr_target : en_v - risk_pts * inv_rr_target
+                        else
+                            sl_final := sl_raw
+                            tp_final := fwd_tp
+
+                        if risk_pts > 0 and risk_pts <= sl_cap
+
+                            int    qty      = calc_qty(risk_pts)
+                            string dir_str  = trade_bull ? "buy" : "sell"
+                            string ord_type = entry_mode == "Immediate" ? "MKT" : "LMT"
+                            string pmt_msg  = pmt_en ? pmt_entry_msg(dir_str, qty, en_v, sl_final, tp_final, ord_type) : ""
+
+                            // ── Source-OB stat tag (carried to the trade's entry comment) ──
+                            // z = pre-break strength, a = age (bars survived),
+                            // t = touches, b = break-candle displacement (ATR units).
+                            // Exported in the List of Trades for bucketed analysis.
+                            int    src_age  = bar_index - ob_brt
+                            string _sz      = na(ob_str_c) ? "?" : str.tostring(ob_str_c, "#.0")
+                            string _sb      = na(brk_disp) ? "?" : str.tostring(brk_disp, "#.0")
+                            string ob_stat  = "z" + _sz + " a" + str.tostring(src_age) + " t" + str.tostring(ob_tch_c) + " b" + _sb
+
+                            if entry_mode == "Immediate"
+                                if trade_bull
+                                    strategy.entry("Long",  strategy.long,  qty=qty, comment=ob_stat, alert_message=pmt_msg)
+                                else
+                                    strategy.entry("Short", strategy.short, qty=qty, comment=ob_stat, alert_message=pmt_msg)
+                            else
+                                if trade_bull
+                                    strategy.entry("Long",  strategy.long,  qty=qty, limit=en_v, comment=ob_stat, alert_message=pmt_msg)
+                                else
+                                    strategy.entry("Short", strategy.short, qty=qty, limit=en_v, comment=ob_stat, alert_message=pmt_msg)
+
+                            // Update state
+                            su_bull      := trade_bull
+                            bb_top_v     := ob_top_c
+                            bb_bot_v   := ob_bot_c
+                            bb_lft_idx := ob_lft
+                            fvg_top_v    := best_fvg_top
+                            fvg_bot_v  := best_fvg_bot
+                            fvg_c2_ext   := best_c2
+                            fvg_c1_ext := best_c1
+                            entry_v      := en_v
+                            sl_init_v := sl_final
+                            sl_act := sl_final
+                            tp_v := tp_final
+                            be_step      := 0
+                            trade_opened := false
+                            order_time   := time
+                            is_uni       := uni_ok
+                            is_e_uni := e_uni_ok
+                            state        := 1
+
+                            // BB box
+                            if show_bbs
+                                bb_bx := box.new(ob_lft, ob_top_c, bar_index + EXT, ob_bot_c,
+                                                 bgcolor=bb_bull ? BB_BULL_FILL : BB_BEAR_FILL,
+                                                 border_width=1,
+                                                 border_color=bb_bull ? color.teal : color.red,
+                                                 xloc=xloc.bar_index)
+
+                            // FVG box
+                            if show_fvg_bx and fvg_found
+                                fvg_bx := box.new(best_birth - 2, best_fvg_top,
+                                                  bar_index + EXT, best_fvg_bot,
+                                                  bgcolor=bb_bull ? FVG_BULL_FILL : FVG_BEAR_FILL,
+                                                  border_width=0, xloc=xloc.bar_index)
+
+                            // Label
+                            string lbl_txt = is_e_uni ? (bb_bull ? "+E-Unicorn" : "-E-Unicorn") : is_uni ? (bb_bull ? "+Unicorn" : "-Unicorn") : (bb_bull ? "+BB" : "-BB")
+                            uni_lbl := label.new(bar_index,
+                                                 bb_bull ? ob_bot_c - sw_offset : ob_top_c + sw_offset,
+                                                 lbl_txt,
+                                                 style=bb_bull ? label.style_label_up : label.style_label_down,
+                                                 color=bb_bull ? col_bull : col_bear,
+                                                 textcolor=color.white, size=size.small)
+
+                            // Level lines
+                            en_ln := line.new(bar_index, en_v,     bar_index + EXT, en_v,     color=color.yellow, style=line.style_dashed, width=1)
+                            sl_ln := line.new(bar_index, sl_final, bar_index + EXT, sl_final, color=color.red,    style=line.style_dashed, width=1)
+                            tp_ln := line.new(bar_index, tp_final, bar_index + EXT, tp_final, color=color.green,  style=line.style_dashed, width=1)
+
+                            bb_fired := true
+
+        else
+            ob_idx += 1
+
+    // ── IN TRADE: BE stepping + exit ─────────────────────────────
+    if strategy.position_size != 0
+        trade_opened := true
+        state        := 2
+
+        if be_enabled and not na(entry_v) and not na(sl_init_v)
+            float risk    = math.abs(entry_v - sl_init_v)
+            int   first_n = be_step_mode == "Step at 1R" ? 1 : 2
+
+            if be_step == 0
+                float trig   = su_bull ? entry_v + first_n * risk : entry_v - first_n * risk
+                bool  be_hit = su_bull ? high >= trig : low <= trig
+                if be_hit
+                    sl_act  := entry_v
+                    be_step := first_n
+                    if not na(sl_ln)
+                        line.set_y1(sl_ln, sl_act)
+                        line.set_y2(sl_ln, sl_act)
+                    if not na(be_lbl)
+                        label.delete(be_lbl)
+                    be_lbl := label.new(bar_index, entry_v, "BE",
+                                        style=label.style_cross, color=color.yellow,
+                                        textcolor=color.black, size=size.tiny)
+                    if pmt_en
+                        alert(pmt_be_msg(su_bull ? "buy" : "sell", sl_act), alert.freq_once_per_bar_close)
+            else
+                float next_trig = su_bull ? entry_v + (be_step + 1) * risk : entry_v - (be_step + 1) * risk
+                bool step_hit   = su_bull ? high >= next_trig : low <= next_trig
+                if step_hit
+                    float new_sl = su_bull ? entry_v + be_step * risk : entry_v - be_step * risk
+                    sl_act  := new_sl
+                    be_step += 1
+                    if not na(sl_ln)
+                        line.set_y1(sl_ln, sl_act)
+                        line.set_y2(sl_ln, sl_act)
+                    if pmt_en
+                        alert(pmt_be_msg(su_bull ? "buy" : "sell", sl_act), alert.freq_once_per_bar_close)
+
+        strategy.exit("Exit", from_entry=su_bull ? "Long" : "Short", stop=sl_act, limit=tp_v)
+
+// ════════════════════════════════════════════════════════════════
+// SECTION 15 — STATUS TABLE
+// ════════════════════════════════════════════════════════════════
+
+if show_tbl and active and barstate.islast
+
+    table tbl = tbl_pos == "Top Left" ? tbl_tl : tbl_pos == "Top Right" ? tbl_tr : tbl_pos == "Bottom Left" ? tbl_bl : tbl_br
+
+    string state_lbl = state == 0 ? "Idle" : state == 1 ? "Armed" : "In Trade"
+    color  state_col = state == 0 ? color.silver : state == 1 ? color.orange : color.lime
+    string uni_str   = is_e_uni ? "E-Unicorn" : is_uni ? "Unicorn" : "BB"
+    color  uni_col   = is_e_uni ? color.yellow : is_uni ? color.teal : color.silver
+    string dir_lbl   = not na(bb_top_v) ? (su_bull ? "Long" : "Short") : "—"
+    color  dir_col   = not na(bb_top_v) ? (su_bull ? color.teal : color.red) : color.silver
+    string bias_lbl  = ms_bias == 1 ? "Bullish" : ms_bias == -1 ? "Bearish" : "Neutral"
+    color  bias_col  = ms_bias == 1 ? color.teal : ms_bias == -1 ? color.red : color.silver
+
+    table.cell(tbl, 0, 0, syminfo.ticker + "  Unicorn (" + tf_lbl + ")" + (inv_enabled ? (inv_mirror ? "  ⮌INV-MIR" : "  ⮌INV-0.75") : ""),
+               text_color=inv_enabled ? color.orange : color.white, text_size=size.small, text_halign=text.align_left,
+               bgcolor=color.new(color.black, 50))
+    table.cell(tbl, 1, 0, "", bgcolor=color.new(color.black, 50))
+    table.cell(tbl, 0, 1, "State:",     text_color=color.silver, text_size=size.small, text_halign=text.align_left)
+    table.cell(tbl, 1, 1, state_lbl,   text_color=state_col,    text_size=size.small, text_halign=text.align_left)
+    table.cell(tbl, 0, 2, "Setup:",     text_color=color.silver, text_size=size.small, text_halign=text.align_left)
+    table.cell(tbl, 1, 2, uni_str,     text_color=uni_col,      text_size=size.small, text_halign=text.align_left)
+    table.cell(tbl, 0, 3, "Direction:", text_color=color.silver, text_size=size.small, text_halign=text.align_left)
+    table.cell(tbl, 1, 3, dir_lbl,     text_color=dir_col,      text_size=size.small, text_halign=text.align_left)
+    table.cell(tbl, 0, 4, "Entry:",     text_color=color.silver, text_size=size.small, text_halign=text.align_left)
+    table.cell(tbl, 1, 4, not na(entry_v) ? fmt(entry_v) : "—",
+               text_color=color.white, text_size=size.small, text_halign=text.align_left)
+    table.cell(tbl, 0, 5, "SL:",        text_color=color.silver, text_size=size.small, text_halign=text.align_left)
+    table.cell(tbl, 1, 5, not na(sl_act) ? fmt(sl_act) : "—",
+               text_color=color.red,   text_size=size.small, text_halign=text.align_left)
+    table.cell(tbl, 0, 6, "TP:",        text_color=color.silver, text_size=size.small, text_halign=text.align_left)
+    table.cell(tbl, 1, 6, not na(tp_v)  ? fmt(tp_v)  : "—",
+               text_color=color.green, text_size=size.small, text_halign=text.align_left)
+    string bias_disp     = mss_mode == "Off" ? "—" : bias_lbl
+    color  bias_disp_col = mss_mode == "Off" ? color.silver : bias_col
+    table.cell(tbl, 0, 7, "Bias:",      text_color=color.silver,   text_size=size.small, text_halign=text.align_left)
+    table.cell(tbl, 1, 7, bias_disp,   text_color=bias_disp_col,  text_size=size.small, text_halign=text.align_left)
+    table.cell(tbl, 0, 8, "BE Step:",   text_color=color.silver,   text_size=size.small, text_halign=text.align_left)
+    table.cell(tbl, 1, 8, state == 2 ? str.tostring(be_step) + "R" : "—",
+               text_color=color.white, text_size=size.small, text_halign=text.align_left)
