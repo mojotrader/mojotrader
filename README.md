@@ -114,3 +114,28 @@ an unknown stop or target was thrown out at the far end — the entry stood with
 numbers now go through `f_num` (na → `0`), the stop/target chain gained a live-IB branch and a
 last-fill fallback, and the buy/sell/close instruction is sent as `data` as well as `action`.
 An optional on-chart label prints the last transmitted payload.
+
+### `pinescript/halyard_orb_ib_vwap_ladder_strategy.pine`
+The fib build extended into a **three-rung ladder**. Each setup rests three limits in the same
+direction at once — the **25% line**, the **50% line** and the **09:30 anchored VWAP** — so
+whichever price is reached first is the first entry. There is no primary rung and no fixed
+order. The first fill of any rung sets the stop and target for the whole ladder; every later
+fill averages down into that same trade, under the same two exit prices, and all three exit
+together.
+
+- Each rung has its own contract count, its own risk budget, and is sized on its own stop
+  distance. The reported average entry is **size-weighted**.
+- The two fib rungs are fixed when the range closes. The **VWAP rung is a moving limit**:
+  re-issued every bar at the current VWAP, with fills tested against the price actually resting
+  on the book from the previous bar's close.
+- A rung not clear of the stop by 10% of the range is dropped; only losing all three kills the
+  setup. At a 50% stop that drops the 50% rung.
+
+**Globex trend filter** (off by default): ticked on, a long is only taken when the break bar
+closes above a VWAP anchored to the **18:00 ET Globex open**, a short only when it closes below.
+That VWAP accumulates through the overnight into RTH, so by 09:30 it already carries the night's
+business — unlike the 09:30 VWAP the third rung rides, which starts from nothing each morning.
+The gate is decided once, on the break bar, and latched.
+
+Targets, stops, filters, seat precedence, cutoffs, flattens, the Halyard engine, the probability
+study and the fixed webhook are all as in the previous version.
