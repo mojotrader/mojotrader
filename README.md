@@ -49,3 +49,27 @@ but **calculated on the 15-minute timeframe** and drawn as **dots**, so it can b
 Like the HTF structure engine, the 15m data is pulled with the canonical
 `expr[1]` + `lookahead_on` idiom, so it is **non-repainting** — a 15m bar is only used once it
 has fully closed.
+
+## Strategies
+
+### `pinescript/halyard_orb_ib_vwap_entry_strategy.pine`
+The Halyard + Break-then-Pullback (ORB + IB) file with **one rule swapped**: ORB and IB no
+longer rest their limit on a fib retracement of their own range (the 25%/75% line, with an
+average-down unit at the 50% line). Both now enter at the **session VWAP anchored to the 09:30
+NY open**.
+
+- **One unit per setup.** The VWAP is a single price, so there is no second level to average
+  down into. The avg-down contract/risk inputs stay in the dialog so old settings load, but
+  nothing reads them — their titles say so.
+- **The limit moves.** A fib level is fixed when the range closes; the VWAP re-prices every bar,
+  so the resting order is re-issued each bar at the current VWAP. Fills land where the VWAP
+  actually is when price returns to it, and a risk-$ contract count is recomputed until the fill.
+- **Invalid entries are refused.** A fib retracement always sits between the break and the stop;
+  the VWAP can drift onto or past the far range edge, which would mean entering at or beyond its
+  own stop and would send the risk sizer's contract count to infinity. The setup only arms while
+  the VWAP is at least `orbibMinStopFrac` (10%) of the range away from the stop.
+
+Everything else is untouched: the same ranges and clocks, direction rule, close-depth /
+min-range / weekday / double-break / daily-loss filters, stop at the far range edge, range
+extension targets, seat precedence (Halyard > ORB > IB), cutoffs, flattens, the Halyard engine,
+the probability study and the webhook. Run it on a **1-minute** chart.
