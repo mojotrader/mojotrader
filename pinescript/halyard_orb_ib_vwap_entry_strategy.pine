@@ -222,11 +222,11 @@ orbMinRngPct = input.float(0.40, "Min ORB range (% of price, 0 = off)", minval =
 // mean the same thing on any instrument and at any range size. Halyard is not here - it sizes its target off a
 // Risk:Reward multiple and stops on its own 15m range edge, which is a different scheme; see its own groups.
 gExit    = "Targets & stops - ORB / IB"
-tpTip    = "Range edge = the level that broke, i.e. no extension. Ext 10/30/50% = that far BEYOND the broken edge, as a fraction of the range. HOD/LOD = the session high (long) or low (short) AS IT STANDS ON THE FILL BAR, and it is frozen there - a target that kept tracking the running high could never be reached, since price cannot exceed its own high. Before the fill the box previews it against the high so far, so it moves until the entry fills and then stops."
-orbTpLIn = input.string("Ext 10%", "ORB target - LONG",  options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gExit, tooltip = tpTip)
-orbTpSIn = input.string("Ext 30%", "ORB target - SHORT", options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gExit)
-ibTpLIn  = input.string("Ext 30%", "IB target - LONG",   options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gExit)
-ibTpSIn  = input.string("Ext 30%", "IB target - SHORT",  options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gExit)
+tpTip    = "VWAP 1/2/3 sigma targets that many standard deviations of the 09:30 anchored VWAP above it for a long, below it for a short - the natural target when the ENTRY is that same VWAP. It is measured on the bar the entry fills and frozen there. Range edge = the level that broke, i.e. no extension. Ext 10/30/50% = that far BEYOND the broken edge, as a fraction of the range. HOD/LOD = the session high (long) or low (short) AS IT STANDS ON THE FILL BAR, and it is frozen there - a target that kept tracking the running high could never be reached, since price cannot exceed its own high. Before the fill the box previews it against the high so far, so it moves until the entry fills and then stops."
+orbTpLIn = input.string("Ext 10%", "ORB target - LONG",  options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD", "VWAP 1 sigma", "VWAP 2 sigma", "VWAP 3 sigma"], group = gExit, tooltip = tpTip)
+orbTpSIn = input.string("Ext 30%", "ORB target - SHORT", options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD", "VWAP 1 sigma", "VWAP 2 sigma", "VWAP 3 sigma"], group = gExit)
+ibTpLIn  = input.string("Ext 30%", "IB target - LONG",   options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD", "VWAP 1 sigma", "VWAP 2 sigma", "VWAP 3 sigma"], group = gExit)
+ibTpSIn  = input.string("Ext 30%", "IB target - SHORT",  options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD", "VWAP 1 sigma", "VWAP 2 sigma", "VWAP 3 sigma"], group = gExit)
 slTip    = "How far back INTO the range the stop sits, measured from the edge that broke - the same convention the probability table's '75% line' uses. For a LONG: 100% is the range low, 75% is a quarter of the way up from it, 50% is the midpoint. Mirrored for a short.\n\nNOTE this interacts with the VWAP entry: a tighter stop leaves less room between it and the entry, and the setup is only armed while the VWAP is at least 10% of the range clear of the stop (orbibMinStopFrac). A 50% stop therefore only trades days whose VWAP has stayed close to the breaking edge, and will take noticeably fewer trades than 100%."
 orbSlIn  = input.string("100% of range (far edge)", "ORB stop", options = ["50% of range", "75% of range", "100% of range (far edge)"], group = gExit, tooltip = slTip)
 ibSlIn   = input.string("100% of range (far edge)", "IB stop",  options = ["50% of range", "75% of range", "100% of range (far edge)"], group = gExit)
@@ -381,16 +381,24 @@ flatten = tod >= (flatH*60 + flatM)
 // anchored VWAP and nothing leaks across the overnight. This is the level BOTH pullback setups now rest their
 // limit on, in place of the 25%/50% fib retracements of their own range.
 // It is na outside 09:30-16:00, which is exactly what the setups want: no VWAP, no entry.
-var float vwPV = 0.0    // sum(price * vol)
-var float vwV  = 0.0    // sum(vol)
+var float vwPV  = 0.0   // sum(price * vol)
+var float vwV   = 0.0   // sum(vol)
+var float vwP2V = 0.0   // sum(price^2 * vol) - one power up, for the standard deviation
 if newSession
-    vwPV := 0.0
-    vwV  := 0.0
+    vwPV  := 0.0
+    vwV   := 0.0
+    vwP2V := 0.0
 if inSess
     vwVol = nz(volume, 1.0)                   // fall back to 1 if the symbol has no volume
-    vwPV += vwapSrc * vwVol
-    vwV  += vwVol
+    vwPV  += vwapSrc * vwVol
+    vwV   += vwVol
+    vwP2V += vwapSrc * vwapSrc * vwVol
 avwap = inSess and vwV > 0 ? vwPV / vwV : na
+// The anchored VWAP's OWN standard deviation - the unit the sigma targets are measured in, and the natural
+// one to use here because the ENTRY is that same VWAP. variance = E[p^2] - E[p]^2, floored at zero because
+// floating point can push a barely-moving series a hair negative and sqrt would hand back na.
+avwapVar = inSess and vwV > 0 ? math.max(vwP2V / vwV - avwap * avwap, 0) : na
+avwapDev = na(avwapVar) ? na : math.sqrt(avwapVar)
 
 // ---- daily loss limit: a flat $ stop for the whole session, floating P&L included ----
 var float dayStartEq = na
@@ -427,8 +435,20 @@ f_size(float budget, float ptDist) =>
     fr > 0.5 ? math.ceil(raw) : math.floor(raw)
 
 // TP resolver (ORB/IB)
-f_tp(int d, float rH, float rL, float rg, float dHi, float dLo, string tpL, string tpS) =>
-    d == 1 ? (tpL == "HOD/LOD" ? dHi : tpL == "Ext 10%" ? rH + 0.10*rg : tpL == "Ext 30%" ? rH + 0.30*rg : tpL == "Ext 50%" ? rH + 0.50*rg : rH) : (tpS == "HOD/LOD" ? dLo : tpS == "Ext 10%" ? rL - 0.10*rg : tpS == "Ext 30%" ? rL - 0.30*rg : tpS == "Ext 50%" ? rL - 0.50*rg : rL)
+// vw/dev carry the anchored VWAP and its standard deviation, so a sigma target can be resolved. They are read
+// on the bar the entry fills and the answer is frozen there - a target that kept tracking would wander
+// (sigma) or could never be reached at all (HOD, which price cannot exceed).
+f_tp(int d, float rH, float rL, float rg, float dHi, float dLo, float vw, float dev, string tpL, string tpS) =>
+    sg = nz(dev, 0.0)
+    d == 1 ? (tpL == "HOD/LOD" ? dHi : tpL == "VWAP 1 sigma" ? vw + sg : tpL == "VWAP 2 sigma" ? vw + 2*sg : tpL == "VWAP 3 sigma" ? vw + 3*sg : tpL == "Ext 10%" ? rH + 0.10*rg : tpL == "Ext 30%" ? rH + 0.30*rg : tpL == "Ext 50%" ? rH + 0.50*rg : rH) : (tpS == "HOD/LOD" ? dLo : tpS == "VWAP 1 sigma" ? vw - sg : tpS == "VWAP 2 sigma" ? vw - 2*sg : tpS == "VWAP 3 sigma" ? vw - 3*sg : tpS == "Ext 10%" ? rL - 0.10*rg : tpS == "Ext 30%" ? rL - 0.30*rg : tpS == "Ext 50%" ? rL - 0.50*rg : rL)
+
+// A target has to sit BEYOND the entry or the trade is nonsense, and with a free choice of target that is no
+// longer guaranteed: a sigma band on a morning with almost no dispersion collapses onto the VWAP - which is
+// the entry here - and a HOD/LOD target can already be behind an entry that filled on a spike. Anything not
+// clear of the entry falls back to a 1R target, the stop distance mirrored, which is always a real level.
+f_tpGuard(int d, float tp, float ent, float stp) =>
+    ok = d == 1 ? tp > ent + syminfo.mintick : tp < ent - syminfo.mintick
+    ok ? tp : (d == 1 ? ent + (ent - stp) : ent - (stp - ent))
 
 // STOP resolver (ORB/IB): the stop as a RETRACEMENT of the range, measured from the edge that broke. This is
 // the same convention the probability table's "75% line" uses, so the two agree by construction.
@@ -1092,7 +1112,7 @@ else
 or_firstFill = or_f1 and not or_f1[1]
 if or_firstFill
     or_curStop := or_zstop
-    or_curTP := f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
+    or_curTP := f_tpGuard(or_dir, f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, or_fillPx, avwapDev, orbTpL, orbTpS), or_fillPx, or_zstop)
     or_beDone := false
 if orbBE and not or_beDone and or_f1 and not or_closed
     if or_dir == 1 and high >= or_rH
@@ -1336,7 +1356,7 @@ else
 ib_firstFill = ib_f1 and not ib_f1[1]
 if ib_firstFill
     ib_curStop := ib_zstop
-    ib_curTP := f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
+    ib_curTP := f_tpGuard(ib_dir, f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ib_fillPx, avwapDev, ibTpL, ibTpS), ib_fillPx, ib_zstop)
     ib_beDone := false
 if ibBE and not ib_beDone and ib_f1 and not ib_closed
     if ib_dir == 1 and high >= ib_rH
@@ -1602,14 +1622,14 @@ if brkAlerts and runHAL and (halBrkUp or halBrkDn)
          "  | stop " + str.tostring(math.round_to_mintick(halSLa)) +
          "  | target " + str.tostring(math.round_to_mintick(halTPa)), alert.freq_once_per_bar)
 if brkAlerts and runORB and or_dir != 0 and or_broke and not or_broke[1]
-    orTPa = f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
+    orTPa = f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, or_e1, avwapDev, orbTpL, orbTpS)
     alert("ORB BREAK  " + (or_dir == 1 ? "LONG" : "SHORT") +
          "  | broke " + str.tostring(math.round_to_mintick(or_dir == 1 ? or_rH : or_rL)) +
          "  | VWAP entry now " + str.tostring(math.round_to_mintick(or_e1)) + " (tracks the 09:30 VWAP)" +
          "  | stop " + str.tostring(math.round_to_mintick(or_zstop)) +
          "  | target " + str.tostring(math.round_to_mintick(orTPa)), alert.freq_once_per_bar)
 if brkAlerts and runIB and ib_dir != 0 and ib_broke and not ib_broke[1]
-    ibTPa = f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
+    ibTPa = f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ib_e1, avwapDev, ibTpL, ibTpS)
     alert("IB BREAK  " + (ib_dir == 1 ? "LONG" : "SHORT") +
          "  | broke " + str.tostring(math.round_to_mintick(ib_dir == 1 ? ib_rH : ib_rL)) +
          "  | VWAP entry now " + str.tostring(math.round_to_mintick(ib_e1)) + " (tracks the 09:30 VWAP)" +
@@ -1710,7 +1730,7 @@ var label orbLb  = na
 var bool  orbGrow = false
 var array<line> orbFib = array.new<line>()
 if runORB and or_placed and not or_placed[1] and not na(or_e1) and not na(or_zstop)
-    orTP = f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
+    orTP = f_tpGuard(or_dir, f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, or_e1, avwapDev, orbTpL, orbTpS), or_e1, or_zstop)
     orbBw := na
     orbBr := na
     orbLb := na
@@ -1729,7 +1749,7 @@ if orbGrow
     // Before the fill the box tracks the live VWAP; from the fill on it is pinned to the price that filled.
     orbRrEnt = or_f1 ? or_fillPx : or_e1
     orbRrQty = or_f1 ? or_fillQty : orbSz1
-    orbRrTP  = or_f1 ? or_curTP : f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
+    orbRrTP  = or_f1 ? or_curTP : f_tpGuard(or_dir, f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, or_e1, avwapDev, orbTpL, orbTpS), or_e1, or_zstop)
     if not na(orbRrEnt) and not na(orbRrQty) and not na(or_zstop)
         f_repriceRR(orbBw, orbBr, orbLb, or_dir, orbRrEnt, or_zstop, orbRrTP, orbRrQty, "ORB @ VWAP", ptVal)
     if or_closed or flatten or (not or_f1 and not orbRest)
@@ -1742,7 +1762,7 @@ var label ibLb  = na
 var bool  ibGrow = false
 var array<line> ibFib = array.new<line>()
 if runIB and ib_placed and not ib_placed[1] and not na(ib_e1) and not na(ib_zstop)
-    ibTP = f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
+    ibTP = f_tpGuard(ib_dir, f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ib_e1, avwapDev, ibTpL, ibTpS), ib_e1, ib_zstop)
     ibBw := na
     ibBr := na
     ibLb := na
@@ -1760,7 +1780,7 @@ if ibGrow
     f_growFibs(ibFib)
     ibRrEnt = ib_f1 ? ib_fillPx : ib_e1
     ibRrQty = ib_f1 ? ib_fillQty : ibSz1
-    ibRrTP  = ib_f1 ? ib_curTP : f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
+    ibRrTP  = ib_f1 ? ib_curTP : f_tpGuard(ib_dir, f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ib_e1, avwapDev, ibTpL, ibTpS), ib_e1, ib_zstop)
     if not na(ibRrEnt) and not na(ibRrQty) and not na(ib_zstop)
         f_repriceRR(ibBw, ibBr, ibLb, ib_dir, ibRrEnt, ib_zstop, ibRrTP, ibRrQty, "IB @ VWAP", ptVal)
     if ib_closed or flatten or (not ib_f1 and not ibWin)
@@ -1902,6 +1922,14 @@ if showTable and barstate.islast
 // ---------------------------------------------------------------- Visuals
 // THE ENTRY LEVEL. One line, drawn for the whole session, that both pullback setups rest their limit on.
 plot(showVwap and inSess ? avwap : na, "09:30 anchored VWAP", color = color.new(#ff9800, 0), linewidth = 2, style = plot.style_linebr)
+// The sigma bands of that VWAP - where a sigma target actually sits.
+sigOn = showVwap and inSess and not na(avwapDev)
+plot(sigOn ? avwap + avwapDev     : na, "VWAP +1 sigma", color = color.new(#ff9800, 45), style = plot.style_linebr)
+plot(sigOn ? avwap - avwapDev     : na, "VWAP -1 sigma", color = color.new(#ff9800, 45), style = plot.style_linebr)
+plot(sigOn ? avwap + 2 * avwapDev : na, "VWAP +2 sigma", color = color.new(#ff9800, 62), style = plot.style_linebr)
+plot(sigOn ? avwap - 2 * avwapDev : na, "VWAP -2 sigma", color = color.new(#ff9800, 62), style = plot.style_linebr)
+plot(sigOn ? avwap + 3 * avwapDev : na, "VWAP +3 sigma", color = color.new(#ff9800, 78), style = plot.style_linebr)
+plot(sigOn ? avwap - 3 * avwapDev : na, "VWAP -3 sigma", color = color.new(#ff9800, 78), style = plot.style_linebr)
 // ORB / IB levels
 plot(runORB and not na(or_rH) ? or_rH : na, "ORB High", color = color.new(color.orange, 0),  style = plot.style_linebr)
 plot(runORB and not na(or_rL) ? or_rL : na, "ORB Low",  color = color.new(color.orange, 45), style = plot.style_linebr)
