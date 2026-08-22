@@ -137,5 +137,15 @@ That VWAP accumulates through the overnight into RTH, so by 09:30 it already car
 business — unlike the 09:30 VWAP the third rung rides, which starts from nothing each morning.
 The gate is decided once, on the break bar, and latched.
 
-Targets, stops, filters, seat precedence, cutoffs, flattens, the Halyard engine, the probability
-study and the fixed webhook are all as in the previous version.
+**Every rung is its own trade.** Each carries its own target and its own exit order; the stop is
+shared and ends the day for all of them. When the VWAP rung reaches its target it closes only
+that unit — the average-downs keep running under the same stop.
+
+**The VWAP rung has a separate target**, per setup and direction, with its own options: the
+09:30 VWAP's `1 / 2 / 3 sigma` bands (defaulting to 2 sigma), `HOD/LOD`, the range extensions,
+or the range edge. Sigma is the anchored VWAP's own standard deviation, read on the fill bar and
+frozen there; the bands are plotted so the target is visible. Any target that would land on or
+behind its entry falls back to a 1R target.
+
+Stops, filters, seat precedence, cutoffs, flattens, the Halyard engine, the probability study
+and the webhook are otherwise as in the previous version.

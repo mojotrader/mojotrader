@@ -180,6 +180,13 @@ orbTpLIn = input.string("Ext 10%", "ORB target - LONG",  options = ["Range edge"
 orbTpSIn = input.string("Ext 30%", "ORB target - SHORT", options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gExit)
 ibTpLIn  = input.string("Ext 30%", "IB target - LONG",   options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gExit)
 ibTpSIn  = input.string("Ext 30%", "IB target - SHORT",  options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD"], group = gExit)
+vwTpTip  = "The VWAP rung enters on the 09:30 anchored VWAP, so it can aim at that VWAP's own dispersion: 'VWAP 1/2/3 sigma' targets that many standard deviations above it for a long, below it for a short, measured on the bar the rung fills and frozen there. The range-extension and HOD/LOD options are the same ones the fib rungs use. Set this equal to the ORB/IB target above if you want all three rungs aiming at the same place."
+orbTpVwL = input.string("VWAP 2 sigma", "ORB VWAP-rung target - LONG",  options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD", "VWAP 1 sigma", "VWAP 2 sigma", "VWAP 3 sigma"], group = gExit, tooltip = vwTpTip)
+orbTpVwS = input.string("VWAP 2 sigma", "ORB VWAP-rung target - SHORT", options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD", "VWAP 1 sigma", "VWAP 2 sigma", "VWAP 3 sigma"], group = gExit)
+ibTpVwL  = input.string("VWAP 2 sigma", "IB VWAP-rung target - LONG",   options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD", "VWAP 1 sigma", "VWAP 2 sigma", "VWAP 3 sigma"], group = gExit)
+ibTpVwS  = input.string("VWAP 2 sigma", "IB VWAP-rung target - SHORT",  options = ["Range edge", "Ext 10%", "Ext 30%", "Ext 50%", "HOD/LOD", "VWAP 1 sigma", "VWAP 2 sigma", "VWAP 3 sigma"], group = gExit)
+showSigma = input.bool(true, "Plot the 09:30 VWAP sigma bands", group = gExit,
+     tooltip = "Draws the 1, 2 and 3 sigma bands of the 09:30 anchored VWAP, so a sigma target is visible on the chart rather than only in the input dialog.")
 slTip    = "How far back INTO the range the stop sits, measured from the edge that broke - the same convention the probability table's '75% line' uses. For a LONG: 100% is the range low, 75% is a quarter of the way up from it, 50% is the midpoint. Mirrored for a short.\n\nMIND THE FIB ENTRIES. The entries are fixed levels of this same range, so tightening the stop can collide with them. At 50% the stop sits EXACTLY on the 50% line - which is where the average-down unit lives, and where a deeper first entry lives too - so those units have no stop distance at all and are dropped. A 50% stop therefore trades SHALLOW setups only, and never with an add. 75% and 100% leave every unit clear."
 orbSlIn  = input.string("100% of range (far edge)", "ORB stop", options = ["50% of range", "75% of range", "100% of range (far edge)"], group = gExit, tooltip = slTip)
 ibSlIn   = input.string("100% of range (far edge)", "IB stop",  options = ["50% of range", "75% of range", "100% of range (far edge)"], group = gExit)
@@ -389,16 +396,24 @@ flatten = tod >= (flatH*60 + flatM)
 // ---- VWAP #1: anchored to the 09:30 OPEN. This is the ladder's third rung. ----
 // Re-anchored on the first bar of the RTH session and accumulated only inside it, so each day is its own clean
 // anchored VWAP. na outside 09:30-16:00, which is exactly what the rung wants: no VWAP, no rung.
-var float vwPV = 0.0
-var float vwV  = 0.0
+var float vwPV  = 0.0
+var float vwV   = 0.0
+var float vwP2V = 0.0                         // sum(price^2 * vol) - one power up, for the standard deviation
 if newSession
-    vwPV := 0.0
-    vwV  := 0.0
+    vwPV  := 0.0
+    vwV   := 0.0
+    vwP2V := 0.0
 if inSess
     vwVol = nz(volume, 1.0)                   // fall back to 1 if the symbol has no volume
-    vwPV += vwapSrc * vwVol
-    vwV  += vwVol
+    vwPV  += vwapSrc * vwVol
+    vwV   += vwVol
+    vwP2V += vwapSrc * vwapSrc * vwVol
 avwap = inSess and vwV > 0 ? vwPV / vwV : na
+// The anchored VWAP's OWN standard deviation - the unit the sigma targets are measured in. variance =
+// E[p^2] - E[p]^2, floored at zero because floating point can push a barely-moving series a hair negative
+// and sqrt would hand back na.
+avwapVar = inSess and vwV > 0 ? math.max(vwP2V / vwV - avwap * avwap, 0) : na
+avwapDev = na(avwapVar) ? na : math.sqrt(avwapVar)
 
 // ---- VWAP #2: anchored to the GLOBEX OPEN, 18:00 ET the previous day. This is the TREND filter. ----
 // Same arithmetic, a different anchor and a much longer window: it re-anchors at 18:00 ET and keeps
@@ -456,6 +471,23 @@ f_size(float budget, float ptDist) =>
 // edge, which is what the "Range edge" option selects.
 f_tp(int d, float rH, float rL, float rg, float dHi, float dLo, string tpL, string tpS) =>
     d == 1 ? (tpL == "HOD/LOD" ? dHi : tpL == "Ext 10%" ? rH + 0.10*rg : tpL == "Ext 30%" ? rH + 0.30*rg : tpL == "Ext 50%" ? rH + 0.50*rg : rH) : (tpS == "HOD/LOD" ? dLo : tpS == "Ext 10%" ? rL - 0.10*rg : tpS == "Ext 30%" ? rL - 0.30*rg : tpS == "Ext 50%" ? rL - 0.50*rg : rL)
+
+// TARGET resolver for the VWAP RUNG, which gets its own because it enters on a different kind of level and can
+// therefore aim at one: the sigma bands of the very VWAP it entered on, the day's high/low, or the same range
+// extensions the fib rungs use. vw and dev are read ON THE FILL BAR and the answer is frozen there - a target
+// that kept tracking would wander (sigma) or could never be reached at all (HOD, which price cannot exceed).
+f_tpVw(int d, float rH, float rL, float rg, float dHi, float dLo, float vw, float dev, string mode) =>
+    sg = nz(dev, 0.0)
+    d == 1 ? (mode == "HOD/LOD" ? dHi : mode == "VWAP 1 sigma" ? vw + sg : mode == "VWAP 2 sigma" ? vw + 2*sg : mode == "VWAP 3 sigma" ? vw + 3*sg : mode == "Ext 10%" ? rH + 0.10*rg : mode == "Ext 30%" ? rH + 0.30*rg : mode == "Ext 50%" ? rH + 0.50*rg : rH) : (mode == "HOD/LOD" ? dLo : mode == "VWAP 1 sigma" ? vw - sg : mode == "VWAP 2 sigma" ? vw - 2*sg : mode == "VWAP 3 sigma" ? vw - 3*sg : mode == "Ext 10%" ? rL - 0.10*rg : mode == "Ext 30%" ? rL - 0.30*rg : mode == "Ext 50%" ? rL - 0.50*rg : rL)
+
+// Every rung's target passes through this. A target has to sit BEYOND the entry or the trade is nonsense, and
+// with a free choice of target that is no longer guaranteed: a sigma band on a morning with almost no
+// dispersion collapses onto the VWAP itself, and a HOD/LOD target can already be behind an entry that filled
+// on a spike. Anything not clear of the entry falls back to a 1R target - the stop distance mirrored - which
+// is always a real level.
+f_tpGuard(int d, float tp, float ent, float stp) =>
+    ok = d == 1 ? tp > ent + syminfo.mintick : tp < ent - syminfo.mintick
+    ok ? tp : (d == 1 ? ent + (ent - stp) : ent - (stp - ent))
 
 // STOP resolver (ORB/IB): the stop as a RETRACEMENT of the range, measured from the edge that broke. This is
 // the same convention the probability table's "75% line" uses, so the two agree by construction.
@@ -1025,7 +1057,12 @@ var bool  or_trendOK = true       // the Globex-VWAP gate, decided on the break 
 var bool  or_placed = false
 var float or_avgPx = na
 var float or_curStop = na
-var float or_curTP = na
+var float or_tp25 = na          // EVERY RUNG CARRIES ITS OWN TARGET and its own exit order, so one rung
+var float or_tp50 = na          // taking profit leaves the others running - that is the whole point of the
+var float or_tpVw = na          // ladder now. The STOP is still shared: it ends the day for all of them.
+var bool  or_o25 = false        // rung is out (its target filled, or the shared stop took everything)
+var bool  or_o50 = false
+var bool  or_oVw = false
 var bool  or_beDone = false
 var bool  or_closed = false
 var bool  or_oppBroke = false
@@ -1057,7 +1094,12 @@ if newSession
     or_placed := false
     or_avgPx := na
     or_curStop := na
-    or_curTP := na
+    or_tp25 := na
+    or_tp50 := na
+    or_tpVw := na
+    or_o25 := false
+    or_o50 := false
+    or_oVw := false
     or_beDone := false
     or_closed := false
     or_oppBroke := false
@@ -1144,6 +1186,7 @@ if not or_fVw and not or_closed and or_dir != 0 and not na(or_restVw)
         or_fillVwQty := or_restVwQty
         or_pxSum += or_restVw * or_restVwQty
         or_qtySum += or_restVwQty
+        or_tpVw := f_tpGuard(or_dir, f_tpVw(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, or_restVw, avwapDev, or_dir == 1 ? orbTpVwL : orbTpVwS), or_restVw, or_zstop)
 
 // PLACE the two STATIC rungs, once, the first bar the gate is open.
 orbTradeable = (or_ok25 and or_sz25 >= 1) or (or_ok50 and or_sz50 >= 1) or (or_okVw and or_szVw >= 1)
@@ -1160,10 +1203,12 @@ if or_placed and not or_closed
         or_f25 := true
         or_pxSum += or_L25 * or_sz25
         or_qtySum += or_sz25
+        or_tp25 := f_tpGuard(or_dir, f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS), or_L25, or_zstop)
     if not or_f50 and or_ok50 and or_sz50 >= 1 and (or_dir == 1 ? low <= or_L50 : high >= or_L50)
         or_f50 := true
         or_pxSum += or_L50 * or_sz50
         or_qtySum += or_sz50
+        or_tp50 := f_tpGuard(or_dir, f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS), or_L50, or_zstop)
 // ARM / RE-PRICE the VWAP rung. Runs every bar because the level moves; the price it is given here is what the
 // NEXT bar gets filled against.
 orbArmVw = orbGate and or_okVw and or_szVw >= 1 and not or_fVw
@@ -1181,8 +1226,7 @@ or_firstFill = or_anyFill and not or_anyFill[1]
 if or_qtySum > 0
     or_avgPx := or_pxSum / or_qtySum        // size-weighted, so an uneven ladder reports the real average
 if or_firstFill
-    or_curStop := or_zstop
-    or_curTP := f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
+    or_curStop := or_zstop          // the stop is shared by the whole ladder; the targets are not
     or_beDone := false
 if orbBE and not or_beDone and or_anyFill and not or_closed
     if or_dir == 1 and high >= or_rH
@@ -1192,15 +1236,32 @@ if orbBE and not or_beDone and or_anyFill and not or_closed
         or_curStop := math.min(or_curStop, or_avgPx)
         or_beDone := true
 // ONE bracket per rung, all three on the same two prices, so the whole ladder exits together.
+// ONE BRACKET PER RUNG. Same stop on all three, but each carries its own limit, so the broker closes the
+// rung that reaches its target and leaves the rest of the position working.
 if ordersOn and not na(or_curStop)
-    strategy.exit("OR25x", from_entry = "OR25", stop = or_curStop, limit = or_curTP)
-    strategy.exit("OR50x", from_entry = "OR50", stop = or_curStop, limit = or_curTP)
-    strategy.exit("ORVWx", from_entry = "ORVW", stop = or_curStop, limit = or_curTP)
-if or_anyFill and not or_closed and not na(or_curStop)
-    if or_dir == 1 and (low <= or_curStop or high >= or_curTP)
-        or_closed := true
-    if or_dir == -1 and (high >= or_curStop or low <= or_curTP)
-        or_closed := true
+    if not na(or_tp25)
+        strategy.exit("OR25x", from_entry = "OR25", stop = or_curStop, limit = or_tp25)
+    if not na(or_tp50)
+        strategy.exit("OR50x", from_entry = "OR50", stop = or_curStop, limit = or_tp50)
+    if not na(or_tpVw)
+        strategy.exit("ORVWx", from_entry = "ORVW", stop = or_curStop, limit = or_tpVw)
+// EXITS, tracked per rung. The shared stop is checked FIRST and takes everything with it - that is what ends
+// the ladder's day. A rung reaching its own target closes only that rung; the others keep running under the
+// same stop, which is what "when the VWAP rung takes profit, keep the average-downs" means.
+or_openPre = (or_f25 and not or_o25) or (or_f50 and not or_o50) or (or_fVw and not or_oVw)
+if or_openPre and not or_closed and not na(or_curStop) and ((or_dir == 1 and low <= or_curStop) or (or_dir == -1 and high >= or_curStop))
+    or_o25 := or_o25 or or_f25
+    or_o50 := or_o50 or or_f50
+    or_oVw := or_oVw or or_fVw
+    or_closed := true
+else
+    if or_f25 and not or_o25 and not na(or_tp25) and (or_dir == 1 ? high >= or_tp25 : low <= or_tp25)
+        or_o25 := true
+    if or_f50 and not or_o50 and not na(or_tp50) and (or_dir == 1 ? high >= or_tp50 : low <= or_tp50)
+        or_o50 := true
+    if or_fVw and not or_oVw and not na(or_tpVw) and (or_dir == 1 ? high >= or_tpVw : low <= or_tpVw)
+        or_oVw := true
+or_anyOpen = (or_f25 and not or_o25) or (or_f50 and not or_o50) or (or_fVw and not or_oVw)
 // Cancel every unfilled rung once the ladder is done, flat, off, missed, trend-rejected, on a double-break,
 // out of its resting window, or while a Halyard trade holds the seat.
 if ordersOn and (or_closed or flatten or not runORB or or_missed or not or_trendOK or halLive or (noDbl and or_oppBroke) or ((not orbRest) and not or_anyFill))
@@ -1345,7 +1406,12 @@ var bool  ib_trendOK = true
 var bool  ib_placed = false
 var float ib_avgPx = na
 var float ib_curStop = na
-var float ib_curTP = na
+var float ib_tp25 = na          // EVERY RUNG CARRIES ITS OWN TARGET and its own exit order, so one rung
+var float ib_tp50 = na          // taking profit leaves the others running - that is the whole point of the
+var float ib_tpVw = na          // ladder now. The STOP is still shared: it ends the day for all of them.
+var bool  ib_o25 = false        // rung is out (its target filled, or the shared stop took everything)
+var bool  ib_o50 = false
+var bool  ib_oVw = false
 var bool  ib_beDone = false
 var bool  ib_closed = false
 var bool  ib_oppBroke = false
@@ -1377,7 +1443,12 @@ if newSession
     ib_placed := false
     ib_avgPx := na
     ib_curStop := na
-    ib_curTP := na
+    ib_tp25 := na
+    ib_tp50 := na
+    ib_tpVw := na
+    ib_o25 := false
+    ib_o50 := false
+    ib_oVw := false
     ib_beDone := false
     ib_closed := false
     ib_oppBroke := false
@@ -1424,7 +1495,7 @@ if ib_okVw
     ib_szVw := sizeByRisk ? f_size(ibRiskVw, ib_dVw) : ibQtyVw
 
 // SEAT: an OPEN trade of ANY other setup keeps priority, so the IB ladder waits behind it.
-orbLive   = runORB and or_anyFill and not or_closed
+orbLive   = runORB and or_anyOpen
 ibHeld    = orbLive or halLive
 ib_brk = ibBreak == "Wick (touch)" ? ((ib_dir == 1 and high >= ib_rH) or (ib_dir == -1 and low <= ib_rL)) : ((ib_dir == 1 and close > ib_rH) or (ib_dir == -1 and close < ib_rL))
 if ib_dir != 0 and ib_brk and not ib_broke
@@ -1452,6 +1523,7 @@ if not ib_fVw and not ib_closed and ib_dir != 0 and not na(ib_restVw)
         ib_fillVwQty := ib_restVwQty
         ib_pxSum += ib_restVw * ib_restVwQty
         ib_qtySum += ib_restVwQty
+        ib_tpVw := f_tpGuard(ib_dir, f_tpVw(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ib_restVw, avwapDev, ib_dir == 1 ? ibTpVwL : ibTpVwS), ib_restVw, ib_zstop)
 
 ibTradeable = (ib_ok25 and ib_sz25 >= 1) or (ib_ok50 and ib_sz50 >= 1) or (ib_okVw and ib_szVw >= 1)
 if ibGate and ibTradeable and not ib_placed
@@ -1466,10 +1538,12 @@ if ib_placed and not ib_closed
         ib_f25 := true
         ib_pxSum += ib_L25 * ib_sz25
         ib_qtySum += ib_sz25
+        ib_tp25 := f_tpGuard(ib_dir, f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS), ib_L25, ib_zstop)
     if not ib_f50 and ib_ok50 and ib_sz50 >= 1 and (ib_dir == 1 ? low <= ib_L50 : high >= ib_L50)
         ib_f50 := true
         ib_pxSum += ib_L50 * ib_sz50
         ib_qtySum += ib_sz50
+        ib_tp50 := f_tpGuard(ib_dir, f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS), ib_L50, ib_zstop)
 ibArmVw = ibGate and ib_okVw and ib_szVw >= 1 and not ib_fVw
 if ibArmVw
     if ordersOn
@@ -1485,8 +1559,7 @@ ib_firstFill = ib_anyFill and not ib_anyFill[1]
 if ib_qtySum > 0
     ib_avgPx := ib_pxSum / ib_qtySum
 if ib_firstFill
-    ib_curStop := ib_zstop
-    ib_curTP := f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
+    ib_curStop := ib_zstop          // the stop is shared by the whole ladder; the targets are not
     ib_beDone := false
 if ibBE and not ib_beDone and ib_anyFill and not ib_closed
     if ib_dir == 1 and high >= ib_rH
@@ -1495,15 +1568,32 @@ if ibBE and not ib_beDone and ib_anyFill and not ib_closed
     if ib_dir == -1 and low <= ib_rL
         ib_curStop := math.min(ib_curStop, ib_avgPx)
         ib_beDone := true
+// ONE BRACKET PER RUNG. Same stop on all three, but each carries its own limit, so the broker closes the
+// rung that reaches its target and leaves the rest of the position working.
 if ordersOn and not na(ib_curStop)
-    strategy.exit("IB25x", from_entry = "IB25", stop = ib_curStop, limit = ib_curTP)
-    strategy.exit("IB50x", from_entry = "IB50", stop = ib_curStop, limit = ib_curTP)
-    strategy.exit("IBVWx", from_entry = "IBVW", stop = ib_curStop, limit = ib_curTP)
-if ib_anyFill and not ib_closed and not na(ib_curStop)
-    if ib_dir == 1 and (low <= ib_curStop or high >= ib_curTP)
-        ib_closed := true
-    if ib_dir == -1 and (high >= ib_curStop or low <= ib_curTP)
-        ib_closed := true
+    if not na(ib_tp25)
+        strategy.exit("IB25x", from_entry = "IB25", stop = ib_curStop, limit = ib_tp25)
+    if not na(ib_tp50)
+        strategy.exit("IB50x", from_entry = "IB50", stop = ib_curStop, limit = ib_tp50)
+    if not na(ib_tpVw)
+        strategy.exit("IBVWx", from_entry = "IBVW", stop = ib_curStop, limit = ib_tpVw)
+// EXITS, tracked per rung. The shared stop is checked FIRST and takes everything with it - that is what ends
+// the ladder's day. A rung reaching its own target closes only that rung; the others keep running under the
+// same stop, which is what "when the VWAP rung takes profit, keep the average-downs" means.
+ib_openPre = (ib_f25 and not ib_o25) or (ib_f50 and not ib_o50) or (ib_fVw and not ib_oVw)
+if ib_openPre and not ib_closed and not na(ib_curStop) and ((ib_dir == 1 and low <= ib_curStop) or (ib_dir == -1 and high >= ib_curStop))
+    ib_o25 := ib_o25 or ib_f25
+    ib_o50 := ib_o50 or ib_f50
+    ib_oVw := ib_oVw or ib_fVw
+    ib_closed := true
+else
+    if ib_f25 and not ib_o25 and not na(ib_tp25) and (ib_dir == 1 ? high >= ib_tp25 : low <= ib_tp25)
+        ib_o25 := true
+    if ib_f50 and not ib_o50 and not na(ib_tp50) and (ib_dir == 1 ? high >= ib_tp50 : low <= ib_tp50)
+        ib_o50 := true
+    if ib_fVw and not ib_oVw and not na(ib_tpVw) and (ib_dir == 1 ? high >= ib_tpVw : low <= ib_tpVw)
+        ib_oVw := true
+ib_anyOpen = (ib_f25 and not ib_o25) or (ib_f50 and not ib_o50) or (ib_fVw and not ib_oVw)
 if ordersOn and (ib_closed or flatten or not runIB or ib_missed or not ib_trendOK or ibHeld or (noDbl and ib_oppBroke) or ((not ibWin) and not ib_anyFill))
     strategy.cancel("IB25")
     strategy.cancel("IB50")
@@ -1519,7 +1609,7 @@ if runORB and orbCarry and not or_closed and not or_anyFill and ib_dir != 0 and 
     or_closed := true
 
 // The seat as Halyard reads it on the NEXT chart bar (declared above the Halyard engine).
-orbibLive := orbLive or (runIB and ib_anyFill and not ib_closed)
+orbibLive := orbLive or (runIB and ib_anyOpen)
 
 // ---- IB study A: from the fill to EOD, did price touch each level? ----
 var bool  ib_trk    = false
@@ -1629,14 +1719,12 @@ if ibP_act
 // The 15:30 flatten closes the ORB/IB entries BY ID. Halyard has its own 13:30/14:30 ET boundary and closes its
 // own entries there, so neither engine can ever flatten the other's trade.
 if ordersOn and flatten
-    strategy.close("ORL",  comment = "EOD flat")
-    strategy.close("ORL2", comment = "EOD flat")
-    strategy.close("ORS",  comment = "EOD flat")
-    strategy.close("ORS2", comment = "EOD flat")
-    strategy.close("IBL",  comment = "EOD flat")
-    strategy.close("IBL2", comment = "EOD flat")
-    strategy.close("IBS",  comment = "EOD flat")
-    strategy.close("IBS2", comment = "EOD flat")
+    strategy.close("OR25", comment = "EOD flat")
+    strategy.close("OR50", comment = "EOD flat")
+    strategy.close("ORVW", comment = "EOD flat")
+    strategy.close("IB25", comment = "EOD flat")
+    strategy.close("IB50", comment = "EOD flat")
+    strategy.close("IBVW", comment = "EOD flat")
 // The daily max loss is the ONE rule that reaches across setups: it is an account circuit breaker, so it closes
 // everything that is open, Halyard included, and cancels every resting order.
 if dayHalt
@@ -1662,10 +1750,12 @@ f_num(float v) => na(v) ? "0" : str.tostring(math.round_to_mintick(v))
 // `add` marks an ADD-ON to a position that is already open, and it changes three things in the payload:
 //   quantity  - the CALLER sends the INCREMENT, not the net (see the quantity note below);
 //   pyramid   - true lets PickMyTrade stack the fill onto the open position instead of treating a
-//               second same-direction signal as a fresh position;
-//   update_sl / update_tp - true amends the bracket already working on that symbol rather than
-//               creating a second one, so the whole enlarged position ends up under ONE stop and
-//               ONE target (both units of this strategy share the same two prices).
+//               second same-direction signal as a fresh position.
+// update_sl / update_tp are now FALSE on an add, and that is a deliberate reversal. They were true while every
+// unit shared one bracket. Each rung now carries its OWN target, so amending the working orders would drag the
+// rungs already on the book onto the newest rung's target - destroying the very independence that lets the
+// VWAP rung take profit while the average-downs keep running. Each add brings its own bracket for its own
+// quantity instead.
 // same_direction_ignore is pinned false: a same-direction signal must never be silently dropped, or
 // the add would vanish. reverse_order_close is pinned true so a direction flip flattens first - the
 // seat rules mean that should never happen, but if it ever did, flattening is the safe reading.
@@ -1677,8 +1767,7 @@ f_pmt(string act, float q, float slp, float tpp, bool add) =>
       ',"tp":' + f_num(tpp) +
       ',"pyramid":' + (add ? "true" : "false") +
       ',"same_direction_ignore":false,"reverse_order_close":true' +
-      ',"update_sl":' + (add ? "true" : "false") +
-      ',"update_tp":' + (add ? "true" : "false") + '}'
+      ',"update_sl":false,"update_tp":false}'
 
 // WHICH setup's bracket to quote. This has to survive a lag: the alerts fire on a change in the NETTED
 // strategy.position_size, and that variable only reflects a fill on the bar AFTER the engine books it, so by
@@ -1688,21 +1777,37 @@ f_pmt(string act, float q, float slp, float tpp, bool add) =>
 // to ib_curStop, which is na on every day the IB never filled. That na is what became NaN in the JSON.
 // Now: prefer whichever setup is genuinely live, and otherwise fall back to the bracket latched at the last
 // fill, so the webhook always has a real pair of prices to quote.
-liveORB  = or_anyFill and not or_closed
-liveIB   = ib_anyFill and not ib_closed
+liveORB  = or_anyOpen
+liveIB   = ib_anyOpen
+// Every rung now has a DIFFERENT target, so there is no single pair of prices that describes the position.
+// What the webhook quotes is the bracket of whichever unit most recently entered - which is exactly what the
+// alert is announcing, since alerts fire on a change in the netted position. The latch is what carries it
+// across the one-bar lag between the engine booking a fill and strategy.position_size reflecting it.
 var float lastStop = na
 var float lastTgt  = na
 if halEntered
     lastStop := halStp
     lastTgt  := halTgt
-if or_firstFill
-    lastStop := or_curStop
-    lastTgt  := or_curTP
-if ib_firstFill
-    lastStop := ib_curStop
-    lastTgt  := ib_curTP
-autoStop = halLive ? halStp : liveORB ? or_curStop : liveIB ? ib_curStop : lastStop
-autoTP   = halLive ? halTgt : liveORB ? or_curTP  : liveIB ? ib_curTP  : lastTgt
+if or_f25 and not or_f25[1]
+    lastStop := or_zstop
+    lastTgt  := or_tp25
+if or_f50 and not or_f50[1]
+    lastStop := or_zstop
+    lastTgt  := or_tp50
+if or_fVw and not or_fVw[1]
+    lastStop := or_zstop
+    lastTgt  := or_tpVw
+if ib_f25 and not ib_f25[1]
+    lastStop := ib_zstop
+    lastTgt  := ib_tp25
+if ib_f50 and not ib_f50[1]
+    lastStop := ib_zstop
+    lastTgt  := ib_tp50
+if ib_fVw and not ib_fVw[1]
+    lastStop := ib_zstop
+    lastTgt  := ib_tpVw
+autoStop = lastStop
+autoTP   = lastTgt
 // QUANTITY: THE INCREMENT, NOT THE NET.
 // This used to send math.abs(strategy.position_size) - the whole netted position - on every entry
 // alert. On a first entry those are the same number, so it looked right. On the AVERAGE-DOWN fill it
@@ -1864,8 +1969,9 @@ f_growFibs(array<line> fib) =>
 // ladder totals: what the whole thing risks and makes if every armed rung fills
 f_ladderRisk(float zstop, float pv, bool k25, float l25, float q25, bool k50, float l50, float q50, bool kVw, float lVw, float qVw) =>
     (k25 and q25 >= 1 ? math.abs(l25 - zstop) * pv * q25 : 0.0) + (k50 and q50 >= 1 ? math.abs(l50 - zstop) * pv * q50 : 0.0) + (kVw and qVw >= 1 ? math.abs(lVw - zstop) * pv * qVw : 0.0)
-f_ladderRew(float ptp, float pv, bool k25, float l25, float q25, bool k50, float l50, float q50, bool kVw, float lVw, float qVw) =>
-    (k25 and q25 >= 1 ? math.abs(ptp - l25) * pv * q25 : 0.0) + (k50 and q50 >= 1 ? math.abs(ptp - l50) * pv * q50 : 0.0) + (kVw and qVw >= 1 ? math.abs(ptp - lVw) * pv * qVw : 0.0)
+// The fib rungs share one target, the VWAP rung has its own, so the reward total takes both.
+f_ladderRew(float ptp, float ptpVw, float pv, bool k25, float l25, float q25, bool k50, float l50, float q50, bool kVw, float lVw, float qVw) =>
+    (k25 and q25 >= 1 ? math.abs(ptp - l25) * pv * q25 : 0.0) + (k50 and q50 >= 1 ? math.abs(ptp - l50) * pv * q50 : 0.0) + (kVw and qVw >= 1 ? math.abs(ptpVw - lVw) * pv * qVw : 0.0)
 
 // ---------------------------------------------------------------- ORB drawings
 // Drawn the first bar the ladder is armed, so a break any filter rejects - wrong weekday, range too small,
@@ -1884,8 +1990,9 @@ var bool  orbGrow = false
 var array<line> orbFib = array.new<line>()
 if runORB and or_placed and not or_placed[1] and not na(or_zstop)
     orTP = f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
+    orTPv = f_tpGuard(or_dir, f_tpVw(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, nz(or_LVw, or_L50), avwapDev, or_dir == 1 ? orbTpVwL : orbTpVwS), nz(or_LVw, or_L50), or_zstop)
     totR = f_ladderRisk(or_zstop, ptVal, or_ok25, or_L25, or_sz25, or_ok50, or_L50, or_sz50, or_okVw, or_LVw, or_szVw)
-    totW = f_ladderRew(orTP,      ptVal, or_ok25, or_L25, or_sz25, or_ok50, or_L50, or_sz50, or_okVw, or_LVw, or_szVw)
+    totW = f_ladderRew(orTP, orTPv, ptVal, or_ok25, or_L25, or_sz25, or_ok50, or_L50, or_sz50, or_okVw, or_LVw, or_szVw)
     orbBw25 := na
     orbBr25 := na
     orbLb25 := na
@@ -1909,7 +2016,7 @@ if runORB and or_placed and not or_placed[1] and not na(or_zstop)
             orbBr50 := r2
             orbLb50 := l2
         if or_okVw and or_szVw >= 1 and showRR2
-            [b3, r3, l3] = f_drawRR(or_dir, or_LVw, or_zstop, orTP, or_szVw, color.new(color.orange, 0), "ORB VWAP rung", true, ptVal, float(na), float(na))
+            [b3, r3, l3] = f_drawRR(or_dir, or_LVw, or_zstop, orTPv, or_szVw, color.new(color.orange, 0), "ORB VWAP rung", true, ptVal, float(na), float(na))
             orbBwVw := b3
             orbBrVw := r3
             orbLbVw := l3
@@ -1923,7 +2030,7 @@ if orbGrow
     // the VWAP rung tracks the live level until it fills, then freezes on the price that filled it
     orbVwEnt = or_fVw ? or_fillVwPx : or_LVw
     orbVwQty = or_fVw ? or_fillVwQty : or_szVw
-    orbVwTP  = or_anyFill ? or_curTP : f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
+    orbVwTP  = or_fVw ? or_tpVw : f_tpGuard(or_dir, f_tpVw(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, nz(or_LVw, or_L50), avwapDev, or_dir == 1 ? orbTpVwL : orbTpVwS), nz(or_LVw, or_L50), or_zstop)
     if not na(orbBwVw) and not na(orbVwEnt) and not na(orbVwQty) and not na(or_zstop)
         f_repriceRR(orbBwVw, orbBrVw, orbLbVw, or_dir, orbVwEnt, or_zstop, orbVwTP, orbVwQty, "ORB VWAP rung", ptVal)
     if or_closed or flatten or (not or_anyFill and not orbRest)
@@ -1943,8 +2050,9 @@ var bool  ibGrow = false
 var array<line> ibFib = array.new<line>()
 if runIB and ib_placed and not ib_placed[1] and not na(ib_zstop)
     ibTP = f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
+    ibTPv = f_tpGuard(ib_dir, f_tpVw(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, nz(ib_LVw, ib_L50), avwapDev, ib_dir == 1 ? ibTpVwL : ibTpVwS), nz(ib_LVw, ib_L50), ib_zstop)
     tR = f_ladderRisk(ib_zstop, ptVal, ib_ok25, ib_L25, ib_sz25, ib_ok50, ib_L50, ib_sz50, ib_okVw, ib_LVw, ib_szVw)
-    tW = f_ladderRew(ibTP,      ptVal, ib_ok25, ib_L25, ib_sz25, ib_ok50, ib_L50, ib_sz50, ib_okVw, ib_LVw, ib_szVw)
+    tW = f_ladderRew(ibTP, ibTPv, ptVal, ib_ok25, ib_L25, ib_sz25, ib_ok50, ib_L50, ib_sz50, ib_okVw, ib_LVw, ib_szVw)
     ibBw25 := na
     ibBr25 := na
     ibLb25 := na
@@ -1968,7 +2076,7 @@ if runIB and ib_placed and not ib_placed[1] and not na(ib_zstop)
             ibBr50 := s2
             ibLb50 := m2
         if ib_okVw and ib_szVw >= 1 and showRR2
-            [c3, s3, m3] = f_drawRR(ib_dir, ib_LVw, ib_zstop, ibTP, ib_szVw, color.new(color.teal, 0), "IB VWAP rung", true, ptVal, float(na), float(na))
+            [c3, s3, m3] = f_drawRR(ib_dir, ib_LVw, ib_zstop, ibTPv, ib_szVw, color.new(color.teal, 0), "IB VWAP rung", true, ptVal, float(na), float(na))
             ibBwVw := c3
             ibBrVw := s3
             ibLbVw := m3
@@ -1981,7 +2089,7 @@ if ibGrow
     f_growFibs(ibFib)
     ibVwEnt = ib_fVw ? ib_fillVwPx : ib_LVw
     ibVwQty = ib_fVw ? ib_fillVwQty : ib_szVw
-    ibVwTP  = ib_anyFill ? ib_curTP : f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
+    ibVwTP  = ib_fVw ? ib_tpVw : f_tpGuard(ib_dir, f_tpVw(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, nz(ib_LVw, ib_L50), avwapDev, ib_dir == 1 ? ibTpVwL : ibTpVwS), nz(ib_LVw, ib_L50), ib_zstop)
     if not na(ibBwVw) and not na(ibVwEnt) and not na(ibVwQty) and not na(ib_zstop)
         f_repriceRR(ibBwVw, ibBrVw, ibLbVw, ib_dir, ibVwEnt, ib_zstop, ibVwTP, ibVwQty, "IB VWAP rung", ptVal)
     if ib_closed or flatten or (not ib_anyFill and not ibWin)
@@ -2011,7 +2119,7 @@ if halGrow
 // ---------------------------------------------------------------- Strategy rules panel (top-right)
 var table info = na
 if showInfo and barstate.islast
-    info := table.new(position.top_right, 1, 18, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
+    info := table.new(position.top_right, 1, 20, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
     table.cell(info, 0, 0,  (ordersOn ? "" : "[INDICATOR - no orders]  ") + "HALYARD + BREAK-THEN-PULLBACK (ORB + IB)",
          text_color = ordersOn ? color.aqua : color.orange, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 1,  "HALYARD: 15m candles built from chart bars - any chart TF",  text_color = color.fuchsia, text_size = size.small, text_halign = text.align_left)
@@ -2024,8 +2132,10 @@ if showInfo and barstate.islast
          text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 8,  "LADDER: 3 rungs rest together, first touched fires first",   text_color = color.white,   text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 9,  "  25% line | 50% line | 09:30 VWAP (moving limit)",          text_color = color.silver,  text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 18, "Each rung exits on its OWN target; stop is shared",           text_color = color.aqua,    text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 19, "VWAP-rung target: ORB " + orbTpVwL + " L / " + orbTpVwS + " S  |  IB " + ibTpVwL + " L / " + ibTpVwS + " S", text_color = color.white, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 10, "Stop: ORB " + orbSl + "  |  IB " + ibSl,                     text_color = color.white,   text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 11, "Target: ORB " + orbTpL + " L / " + orbTpS + " S  |  IB " + ibTpL + " L / " + ibTpS + " S", text_color = color.white, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 11, "Fib-rung target: ORB " + orbTpL + " L / " + orbTpS + " S  |  IB " + ibTpL + " L / " + ibTpS + " S", text_color = color.white, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 12, useGxVwap ? "Trend filter ON: only with the Globex (18:00) VWAP" : "Trend filter off (Globex VWAP not gating)", text_color = useGxVwap ? color.orange : color.gray, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 13, "SEAT: Halyard > ORB > IB - one trade at a time",             text_color = color.aqua,    text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 14, orbCarry ? "ORB carry ON: unfilled ORB rests past 10:30" : "ORB carry off (unfilled ORB dies at 10:30)", text_color = orbCarry ? color.orange : color.gray, text_size = size.small, text_halign = text.align_left)
@@ -2073,7 +2183,7 @@ if showTable and barstate.islast
     // live state per strategy: 0 = not in play, 1 = broke, 2 = at the 25% pullback, 3 = at the 50% pullback
     stA  = array.from(orP_act ? (orP_r50 ? 3 : orP_r25 ? 2 : 1) : 0, ibP_act ? (ibP_r50 ? 3 : ibP_r25 ? 2 : 1) : 0)
     rgA  = array.from(orP_act ? orP_rngP : na, ibP_act ? ibP_rngP : na)
-    filA = array.from((or_anyFill and not or_closed) ? 1 : 0, (ib_anyFill and not ib_closed) ? 1 : 0)
+    filA = array.from(or_anyOpen ? 1 : 0, ib_anyOpen ? 1 : 0)
     hdr  = array.from("From FILL - by range size", "N", "Reach", "TP0", "TP10", "TP30", "TP50", "75% line", "100% line")
     for c = 0 to 8
         table.cell(probTbl, c, 0, array.get(hdr, c), text_color = color.black, bgcolor = color.white, text_size = size.normal, text_halign = c == 0 ? text.align_left : text.align_center)
@@ -2121,6 +2231,14 @@ if showTable and barstate.islast
 // The two VWAPs: the one the ladder's third rung rides, and the trend reference.
 plot(inSess ? avwap : na, "09:30 anchored VWAP", color = color.new(#ff9800, 0), linewidth = 2, style = plot.style_linebr)
 plot(showGxVwap ? gxVwap : na, "Globex anchored VWAP (18:00)", color = color.new(#7e57c2, 0), linewidth = 2, style = plot.style_linebr)
+// The sigma bands of the 09:30 VWAP - where a sigma target actually sits.
+sigOn = showSigma and inSess and not na(avwapDev)
+plot(sigOn ? avwap + avwapDev     : na, "VWAP +1 sigma", color = color.new(#ff9800, 45), style = plot.style_linebr)
+plot(sigOn ? avwap - avwapDev     : na, "VWAP -1 sigma", color = color.new(#ff9800, 45), style = plot.style_linebr)
+plot(sigOn ? avwap + 2 * avwapDev : na, "VWAP +2 sigma", color = color.new(#ff9800, 62), style = plot.style_linebr)
+plot(sigOn ? avwap - 2 * avwapDev : na, "VWAP -2 sigma", color = color.new(#ff9800, 62), style = plot.style_linebr)
+plot(sigOn ? avwap + 3 * avwapDev : na, "VWAP +3 sigma", color = color.new(#ff9800, 78), style = plot.style_linebr)
+plot(sigOn ? avwap - 3 * avwapDev : na, "VWAP -3 sigma", color = color.new(#ff9800, 78), style = plot.style_linebr)
 // ORB / IB levels
 plot(runORB and not na(or_rH) ? or_rH : na, "ORB High", color = color.new(color.orange, 0),  style = plot.style_linebr)
 plot(runORB and not na(or_rL) ? or_rL : na, "ORB Low",  color = color.new(color.orange, 45), style = plot.style_linebr)
