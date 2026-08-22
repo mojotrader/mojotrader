@@ -32,9 +32,10 @@
 // >>> THE GLOBEX TREND FILTER <<<
 //   Off by default. Ticked on, a LONG is only taken when the break bar closes ABOVE a VWAP anchored to the
 //   GLOBEX OPEN - 18:00 ET the previous day - and a SHORT only when it closes BELOW it. That VWAP accumulates
-//   straight through the overnight into the RTH session, so by 09:30 it already carries the whole night's
-//   business; that is what makes it a trend reference, unlike the 09:30 VWAP the third rung rides, which
-//   starts from nothing each morning. The gate is decided ONCE, on the bar the range breaks, and latched - a
+//   straight through the overnight and the whole of the following RTH, stopping at the 16:00 ET cash close and
+//   re-anchoring at 18:00 for the next session - so by 09:30 it already carries the whole night's business.
+//   That is what makes it a trend reference, unlike the 09:30 VWAP the third rung rides, which starts from
+//   nothing each morning. The gate is decided ONCE, on the bar the range breaks, and latched - a
 //   filter that kept re-deciding as price crossed back and forth would arm and disarm the same ladder all day.
 //
 // >>> SELECTABLE TARGETS AND STOPS (ORB / IB) <<<
@@ -241,17 +242,18 @@ orbMinRngPct = input.float(0.40, "Min ORB range (% of price, 0 = off)", minval =
 
 // ---------------------------------------------------------------- Trend filter (Globex anchored VWAP)
 // A DIRECTION gate for the ORB and IB setups, off by default so nothing changes until you tick it.
-// The reference is a VWAP anchored to the GLOBEX OPEN - 18:00 ET the previous day - and accumulated straight
-// through the overnight into the RTH session, so by 09:30 it already carries the whole night's business. That
-// is what makes it a trend reference rather than a session average: the 09:30 VWAP the entries ride starts
-// from nothing each morning, this one does not.
+// The reference is a VWAP anchored to the GLOBEX OPEN - 18:00 ET the previous day - accumulated straight
+// through the overnight and the following RTH to the 16:00 ET cash close, then re-anchored at 18:00 for the
+// next session. By 09:30 it already carries the whole night's business, which is what makes it a trend
+// reference rather than a session average: the 09:30 VWAP the entries ride starts from nothing each morning,
+// this one does not.
 // It is evaluated ONCE, on the bar the range breaks, and latched: a filter that kept re-deciding as price
 // crossed back and forth would arm and disarm the same setup all day.
 gTrend    = "Trend filter - Globex anchored VWAP"
 useGxVwap = input.bool(false, "Only trade WITH the Globex VWAP", group = gTrend,
      tooltip = "OFF (default) - no direction gate, exactly as before. ON - a LONG setup is only taken when the break bar closes ABOVE the Globex-anchored VWAP, a SHORT only when it closes BELOW it. A setup the filter rejects is dropped for the day; it is not re-tested later.")
-gxSess    = input.session("1800-1700", "Globex session (VWAP anchors at its START)", group = gTrend,
-     tooltip = "The VWAP re-anchors on the first bar of this session. 1800-1700 is the CME futures day: it opens 18:00 ET, runs through the night and the next RTH, and stops at 17:00 ET for the maintenance break. Anchoring is what the START time does; the end time only decides where the accumulation stops.")
+gxSess    = input.session("1800-1600", "Globex session (VWAP anchors at its START)", group = gTrend,
+     tooltip = "The VWAP re-anchors on the first bar of this session and accumulates to its end. 1800-1600 is one Globex trading session as this strategy uses it: it opens 18:00 ET the previous day, runs through the night and the whole of the following RTH, and stops at the 16:00 ET cash close - then re-anchors at 18:00 for the next session. Anchoring is what the START time does; the end time only decides where the accumulation stops, so the value read during RTH is the same whatever end you pick.")
 showGxVwap = input.bool(true, "Plot the Globex VWAP", group = gTrend)
 
 // ---------------------------------------------------------------- Automation (PickMyTrade webhook -> Tradovate)
@@ -417,7 +419,7 @@ avwapDev = na(avwapVar) ? na : math.sqrt(avwapVar)
 
 // ---- VWAP #2: anchored to the GLOBEX OPEN, 18:00 ET the previous day. This is the TREND filter. ----
 // Same arithmetic, a different anchor and a much longer window: it re-anchors at 18:00 ET and keeps
-// accumulating straight through the overnight and the following RTH until 17:00 ET. By the time the 09:30
+// accumulating straight through the overnight and the following RTH until the 16:00 ET close. By the time the 09:30
 // range forms it already carries the whole night's business, which is what makes it a trend reference rather
 // than a session average - unlike VWAP #1, which starts from nothing every morning.
 inGx  = not na(time(timeframe.period, gxSess, tz))

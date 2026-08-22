@@ -133,9 +133,10 @@ together.
 
 **Globex trend filter** (off by default): ticked on, a long is only taken when the break bar
 closes above a VWAP anchored to the **18:00 ET Globex open**, a short only when it closes below.
-That VWAP accumulates through the overnight into RTH, so by 09:30 it already carries the night's
-business — unlike the 09:30 VWAP the third rung rides, which starts from nothing each morning.
-The gate is decided once, on the break bar, and latched.
+One session runs 18:00 ET the previous day → 16:00 ET today, then re-anchors at 18:00 for the
+next one, so every RTH morning is read against the VWAP of the overnight that led into it —
+unlike the 09:30 VWAP the third rung rides, which starts from nothing each morning. The gate is
+decided once, on the break bar, and latched.
 
 **Every rung is its own trade.** Each carries its own target and its own exit order; the stop is
 shared and ends the day for all of them. When the VWAP rung reaches its target it closes only
