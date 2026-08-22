@@ -123,6 +123,11 @@ order. The first fill of any rung sets the stop and target for the whole ladder;
 fill averages down into that same trade, under the same two exit prices, and all three exit
 together.
 
+- **Each rung toggles on and off independently** (`Run the 25% / 50% / 09:30 VWAP rung`), across
+  ORB and IB at once — the same idea as `Run HALYARD`. Untick the two fib rungs and the Strategy
+  Tester shows the VWAP entry on its own equity curve. A rung switched off is inert: never armed,
+  never drawn, never filled, and left out of the ladder totals. Leaving ORB or IB on with all
+  three rungs off raises a runtime error rather than showing a silently empty tester.
 - Each rung has its own contract count, its own risk budget, and is sized on its own stop
   distance. The reported average entry is **size-weighted**.
 - The two fib rungs are fixed when the range closes. The **VWAP rung is a moving limit**:

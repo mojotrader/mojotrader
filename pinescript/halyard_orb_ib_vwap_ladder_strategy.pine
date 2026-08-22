@@ -120,6 +120,17 @@ gStrat    = "Strategies (toggle to track each separately)"
 runHAL    = input.bool(true, "Run HALYARD strategy (15m break, timeframe-independent)", group = gStrat, tooltip = "Turn OFF to backtest ORB/IB alone.")
 runORB    = input.bool(true, "Run ORB strategy", group = gStrat, tooltip = "Turn OFF to backtest the IB strategy alone in the Strategy Tester.")
 runIB     = input.bool(true, "Run IB strategy",  group = gStrat, tooltip = "Turn OFF to backtest the ORB strategy alone.")
+// WHICH RUNGS RUN. runORB / runIB above pick the SETUP; these pick the RUNG, across both setups at once, so
+// each entry type can be isolated and measured on its own equity curve exactly the way Run HALYARD isolates
+// Halyard. Untick the 25% and 50% rungs and the Strategy Tester shows the 09:30 VWAP entry alone.
+// A rung switched off is treated exactly like one dropped for want of stop clearance: never armed, never
+// drawn, never filled, and left out of the ladder totals.
+runR25    = input.bool(true, "Run the 25% rung (ORB + IB)", group = gStrat,
+     tooltip = "The fib rung at a 25% retracement of the range from the edge that broke.")
+runR50    = input.bool(true, "Run the 50% rung (ORB + IB)", group = gStrat,
+     tooltip = "The fib rung at the midpoint of the range.")
+runRVw    = input.bool(true, "Run the 09:30 VWAP rung (ORB + IB)", group = gStrat,
+     tooltip = "The moving rung that rests on the 09:30 anchored VWAP. Untick the other two rungs to backtest this entry on its own.")
 orbCarry  = input.bool(false, "Carry an unfilled ORB past the IB (test idea)", group = gStrat,
      tooltip = "OFF: an ORB limit that has not filled by the time the IB forms is cancelled - the standard rule. ON: that unfilled limit keeps resting, so a pullback that finally arrives after 10:30 still gets taken. It gives way the moment the IB breaks its own range and arms a setup, and otherwise expires at the ORB cutoff or the EOD flatten.")
 
@@ -228,6 +239,11 @@ halRngMax     = input.float(0, "Max ORB Range (pts, 0=off)", minval = 0, step = 
 // rather than as a typo. Fail loudly instead.
 if halRngMax > 0 and halRngMin > halRngMax
     runtime.error("Halyard Range Filter: Min ORB Range is above Max ORB Range, so no day can ever pass. Fix one of them.")
+
+// Every rung switched off while ORB or IB is still switched on can never place an order, and an empty Strategy
+// Tester reads as "the setup never triggered" rather than as a settings mistake. Fail loudly instead.
+if (runORB or runIB) and not (runR25 or runR50 or runRVw)
+    runtime.error("Run ORB / Run IB is on but all three rungs (25%, 50%, 09:30 VWAP) are off, so no entry can ever be placed. Switch a rung on, or switch the setups off.")
 
 // ---------------------------------------------------------------- Filters (ORB / IB)
 gFilt     = "Filters - ORB / IB"
@@ -1132,8 +1148,8 @@ if or_rDone and not na(or_rH) and or_rH > or_rL
         minD = orbibMinStopFrac * or_rng
         d25  = or_dir == 1 ? or_L25 - or_zstop : or_zstop - or_L25
         d50  = or_dir == 1 ? or_L50 - or_zstop : or_zstop - or_L50
-        or_ok25 := d25 >= minD
-        or_ok50 := d50 >= minD
+        or_ok25 := runR25 and d25 >= minD
+        or_ok50 := runR50 and d50 >= minD
         if or_ok25
             or_sz25 := sizeByRisk ? f_size(orbRisk25, d25) : orbQty25
         if or_ok50
@@ -1142,7 +1158,7 @@ if or_rDone and not na(or_rH) and or_rH > or_rL
 // ---- the VWAP rung, re-read every bar ----
 float or_LVw = or_dir != 0 ? avwap : na
 float or_dVw = (na(or_LVw) or na(or_zstop)) ? na : (or_dir == 1 ? or_LVw - or_zstop : or_zstop - or_LVw)
-bool  or_okVw = not na(or_dVw) and not na(or_rng) and or_rng > 0 and or_dVw >= orbibMinStopFrac * or_rng
+bool  or_okVw = runRVw and not na(or_dVw) and not na(or_rng) and or_rng > 0 and or_dVw >= orbibMinStopFrac * or_rng
 float or_szVw = na
 if or_okVw
     or_szVw := sizeByRisk ? f_size(orbRiskVw, or_dVw) : orbQtyVw
@@ -1481,8 +1497,8 @@ if ib_rDone and not na(ib_rH) and ib_rH > ib_rL
         minD = orbibMinStopFrac * ib_rng
         d25  = ib_dir == 1 ? ib_L25 - ib_zstop : ib_zstop - ib_L25
         d50  = ib_dir == 1 ? ib_L50 - ib_zstop : ib_zstop - ib_L50
-        ib_ok25 := d25 >= minD
-        ib_ok50 := d50 >= minD
+        ib_ok25 := runR25 and d25 >= minD
+        ib_ok50 := runR50 and d50 >= minD
         if ib_ok25
             ib_sz25 := sizeByRisk ? f_size(ibRisk25, d25) : ibQty25
         if ib_ok50
@@ -1491,7 +1507,7 @@ if ib_rDone and not na(ib_rH) and ib_rH > ib_rL
 // ---- the VWAP rung, re-read every bar ----
 float ib_LVw = ib_dir != 0 ? avwap : na
 float ib_dVw = (na(ib_LVw) or na(ib_zstop)) ? na : (ib_dir == 1 ? ib_LVw - ib_zstop : ib_zstop - ib_LVw)
-bool  ib_okVw = not na(ib_dVw) and not na(ib_rng) and ib_rng > 0 and ib_dVw >= orbibMinStopFrac * ib_rng
+bool  ib_okVw = runRVw and not na(ib_dVw) and not na(ib_rng) and ib_rng > 0 and ib_dVw >= orbibMinStopFrac * ib_rng
 float ib_szVw = na
 if ib_okVw
     ib_szVw := sizeByRisk ? f_size(ibRiskVw, ib_dVw) : ibQtyVw
@@ -2006,19 +2022,25 @@ if runORB and or_placed and not or_placed[1] and not na(or_zstop)
     orbLbVw := na
     if showFibs
         f_drawFibs(or_rL, or_rng, color.new(color.orange, 0), orbFib)
+    // Which rungs get a box. The FIRST enabled rung always draws and carries the ladder total, whichever rung
+    // that turns out to be - with the rung toggles the 25% one may not be running at all. showRR2 then decides
+    // whether the remaining rungs get their own boxes too.
+    en25 = or_ok25 and or_sz25 >= 1
+    en50 = or_ok50 and or_sz50 >= 1
+    enVw = or_okVw and or_szVw >= 1
     if showRR
-        if or_ok25 and or_sz25 >= 1
+        if en25
             [b1, r1, l1] = f_drawRR(or_dir, or_L25, or_zstop, orTP, or_sz25, color.new(color.orange, 0), "ORB 25% rung", false, ptVal, totR, totW)
             orbBw25 := b1
             orbBr25 := r1
             orbLb25 := l1
-        if or_ok50 and or_sz50 >= 1 and showRR2
-            [b2, r2, l2] = f_drawRR(or_dir, or_L50, or_zstop, orTP, or_sz50, color.new(color.orange, 0), "ORB 50% rung", true, ptVal, float(na), float(na))
+        if en50 and (showRR2 or not en25)
+            [b2, r2, l2] = f_drawRR(or_dir, or_L50, or_zstop, orTP, or_sz50, color.new(color.orange, 0), "ORB 50% rung", en25, ptVal, en25 ? float(na) : totR, en25 ? float(na) : totW)
             orbBw50 := b2
             orbBr50 := r2
             orbLb50 := l2
-        if or_okVw and or_szVw >= 1 and showRR2
-            [b3, r3, l3] = f_drawRR(or_dir, or_LVw, or_zstop, orTPv, or_szVw, color.new(color.orange, 0), "ORB VWAP rung", true, ptVal, float(na), float(na))
+        if enVw and (showRR2 or not (en25 or en50))
+            [b3, r3, l3] = f_drawRR(or_dir, or_LVw, or_zstop, orTPv, or_szVw, color.new(color.orange, 0), "ORB VWAP rung", en25 or en50, ptVal, (en25 or en50) ? float(na) : totR, (en25 or en50) ? float(na) : totW)
             orbBwVw := b3
             orbBrVw := r3
             orbLbVw := l3
@@ -2066,19 +2088,25 @@ if runIB and ib_placed and not ib_placed[1] and not na(ib_zstop)
     ibLbVw := na
     if showFibs
         f_drawFibs(ib_rL, ib_rng, color.new(color.teal, 0), ibFib)
+    // Which rungs get a box. The FIRST enabled rung always draws and carries the ladder total, whichever rung
+    // that turns out to be - with the rung toggles the 25% one may not be running at all. showRR2 then decides
+    // whether the remaining rungs get their own boxes too.
+    en25 = ib_ok25 and ib_sz25 >= 1
+    en50 = ib_ok50 and ib_sz50 >= 1
+    enVw = ib_okVw and ib_szVw >= 1
     if showRR
-        if ib_ok25 and ib_sz25 >= 1
+        if en25
             [c1, s1, m1] = f_drawRR(ib_dir, ib_L25, ib_zstop, ibTP, ib_sz25, color.new(color.teal, 0), "IB 25% rung", false, ptVal, tR, tW)
             ibBw25 := c1
             ibBr25 := s1
             ibLb25 := m1
-        if ib_ok50 and ib_sz50 >= 1 and showRR2
-            [c2, s2, m2] = f_drawRR(ib_dir, ib_L50, ib_zstop, ibTP, ib_sz50, color.new(color.teal, 0), "IB 50% rung", true, ptVal, float(na), float(na))
+        if en50 and (showRR2 or not en25)
+            [c2, s2, m2] = f_drawRR(ib_dir, ib_L50, ib_zstop, ibTP, ib_sz50, color.new(color.teal, 0), "IB 50% rung", en25, ptVal, en25 ? float(na) : tR, en25 ? float(na) : tW)
             ibBw50 := c2
             ibBr50 := s2
             ibLb50 := m2
-        if ib_okVw and ib_szVw >= 1 and showRR2
-            [c3, s3, m3] = f_drawRR(ib_dir, ib_LVw, ib_zstop, ibTPv, ib_szVw, color.new(color.teal, 0), "IB VWAP rung", true, ptVal, float(na), float(na))
+        if enVw and (showRR2 or not (en25 or en50))
+            [c3, s3, m3] = f_drawRR(ib_dir, ib_LVw, ib_zstop, ibTPv, ib_szVw, color.new(color.teal, 0), "IB VWAP rung", en25 or en50, ptVal, (en25 or en50) ? float(na) : tR, (en25 or en50) ? float(na) : tW)
             ibBwVw := c3
             ibBrVw := s3
             ibLbVw := m3
@@ -2133,7 +2161,7 @@ if showInfo and barstate.islast
     table.cell(info, 0, 7,  "  + close no deeper than " + str.tostring(orbDepth, "#") + "% (ORB) / " + str.tostring(ibDepth, "#") + "% (IB) into the range",
          text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 8,  "LADDER: 3 rungs rest together, first touched fires first",   text_color = color.white,   text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 9,  "  25% line | 50% line | 09:30 VWAP (moving limit)",          text_color = color.silver,  text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 9,  "  live rungs: " + (runR25 ? "25% " : "") + (runR50 ? "50% " : "") + (runRVw ? "09:30 VWAP" : "") + ((runR25 or runR50 or runRVw) ? "" : "NONE"), text_color = color.silver,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 18, "Each rung exits on its OWN target; stop is shared",           text_color = color.aqua,    text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 19, "VWAP-rung target: ORB " + orbTpVwL + " L / " + orbTpVwS + " S  |  IB " + ibTpVwL + " L / " + ibTpVwS + " S", text_color = color.white, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 10, "Stop: ORB " + orbSl + "  |  IB " + ibSl,                     text_color = color.white,   text_size = size.small, text_halign = text.align_left)
