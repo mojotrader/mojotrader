@@ -170,6 +170,21 @@ ibDepth   = input.float(100, "IB bias: max close depth into the range (%)", minv
 orbMinRngPct = input.float(0.40, "Min ORB range (% of price, 0 = off)", minval = 0, step = 0.05, group = gFilt,
      tooltip = "Skip ORB setups whose 15-min opening range is smaller than this % of price (range / range-low * 100). IB is NOT filtered. Set 0 to disable.")
 
+// ---------------------------------------------------------------- Trend filter (ORB / IB)
+// ONE reference line, two ways to draw it, and a setup is only allowed to trade with it. The test is made ONCE,
+// on the bar that breaks the range, and then latched for the rest of that setup's life: a long needs the break
+// bar to CLOSE above the reference, a short below it. Fail it and nothing is placed at all - no order, no
+// risk/reward box, no fib lines - exactly as if any other filter had rejected the break. Halyard is untouched.
+gTrend    = "Trend filter - ORB / IB"
+trendMode = input.string("Off", "Trend filter", options = ["Off", "Globex anchored VWAP", "Daily 5 EMA"], group = gTrend,
+     tooltip = "OFF (default): no trend test - every break is taken, exactly as before.\n\nGLOBEX ANCHORED VWAP: a volume-weighted average anchored to the 18:00 ET Globex open of the PREVIOUS day and run to 16:00 ET today, then re-anchored at 18:00 for the next session. It carries the whole overnight auction into the RTH break, so the filter asks 'is this break with or against where the overnight volume traded?'\n\nDAILY 5 EMA: a 5-period exponential moving average of DAILY closes, pulled from the daily timeframe through YESTERDAY'S completed close - it cannot repaint intraday and it does not move while today is still forming. A slower, purely swing-level bias.")
+gxSess    = input.session("1800-1600", "  Globex VWAP session (ET)", group = gTrend,
+     tooltip = "The anchor window for the Globex VWAP. 1800-1600 wraps midnight: it starts at the 18:00 Globex open, runs all night and all of the RTH day, and ends at the 16:00 close - then the next 18:00 resets the sums to zero. Change it only if you want a different anchor.")
+dEmaLen   = input.int(5, "  Daily EMA length", minval = 1, maxval = 200, group = gTrend,
+     tooltip = "Number of DAILY closes in the EMA. 5 is one trading week.")
+showTrend = input.bool(true, "Plot the active trend reference", group = gTrend,
+     tooltip = "Draws whichever reference the dropdown has selected. Nothing is drawn when the filter is Off.")
+
 // ---------------------------------------------------------------- Automation (PickMyTrade webhook -> Tradovate)
 grpA      = "Automation - PickMyTrade"
 autoOn    = input.bool(false, "Enable webhook alerts", group = grpA,
@@ -347,6 +362,35 @@ var bool orbibLive = false
 // lag orbibLive already runs on. It does not matter: the hand-over that sets it also cancels the ORB order on
 // that very bar, so the lag can never let an extra fill through.
 var bool orbYield = false
+
+// ================================================================ Trend filter reference (ORB / IB)
+// GLOBEX ANCHORED VWAP. Running sums of price*volume and volume, zeroed the moment the 18:00 session opens and
+// accumulated straight through the overnight into the RTH day, so at 09:45 the line already carries every
+// contract traded since the previous evening. Outside the window it is na and the plot simply breaks.
+gxIn  = not na(time(timeframe.period, gxSess, tz))
+gxNew = gxIn and not gxIn[1]
+var float gxPV = 0.0
+var float gxV  = 0.0
+if gxNew
+    gxPV := 0.0
+    gxV  := 0.0
+if gxIn
+    gxVol = nz(volume, 1.0)                           // tick charts and cash indices can report no volume
+    gxPV += hlc3 * gxVol
+    gxV  += gxVol
+gxVwap = gxIn and gxV > 0 ? gxPV / gxV : na
+
+// DAILY EMA. Requested with the expr[1] + lookahead_on idiom: that pair returns the value as of the LAST CLOSED
+// daily bar on every intraday bar of today, so the number is fixed for the whole session and identical in
+// backtest and in real time - no repainting and no peek at a close that has not happened.
+dEma = request.security(syminfo.tickerid, "D", ta.ema(close, dEmaLen)[1], lookahead = barmerge.lookahead_on)
+
+trendRef = trendMode == "Globex anchored VWAP" ? gxVwap : trendMode == "Daily 5 EMA" ? dEma : na
+
+// The gate itself. Off, or a reference that has not printed yet, lets everything through - the filter never
+// blocks a trade just because it has no data.
+f_trendOK(int d) =>
+    trendMode == "Off" or na(trendRef) ? true : d == 1 ? close > trendRef : close < trendRef
 
 // ================================================================ HALYARD ENGINE
 // Single-candle opening-range breakout with an optional loser-reversal, on 15-MINUTE candles that this engine
@@ -879,6 +923,7 @@ var bool  or_beDone = false
 var bool  or_closed = false
 var bool  or_oppBroke = false
 var bool  or_missed = false      // the ORB pullback traded through while a Halyard trade held the seat
+var bool  or_trendOK = true      // trend filter verdict, taken on the break bar and latched
 var float orbSz1 = na
 var float orbSz2 = na
 
@@ -901,6 +946,7 @@ if newSession
     or_closed := false
     or_oppBroke := false
     or_missed := false
+    or_trendOK := true
     orbSz1 := na
     orbSz2 := na
     orbYield := false
@@ -939,6 +985,8 @@ or_useAdd = orbAvg and not na(or_e2)
 // break by selected type
 or_brk = orbBreak == "Wick (touch)" ? ((or_dir == 1 and high >= or_rH) or (or_dir == -1 and low <= or_rL)) : ((or_dir == 1 and close > or_rH) or (or_dir == -1 and close < or_rL))
 if or_dir != 0 and or_brk
+    if not or_broke
+        or_trendOK := f_trendOK(or_dir)   // judged once, on the break bar itself, then held for the day
     or_broke := true
 // double-break detection: opposite range extreme is violated
 if or_dir == 1 and low < or_rL
@@ -959,7 +1007,7 @@ orbWin = inSess and not dayHalt and orbDayOK and tod <= (orbCutH*60 + orbCutM) a
 if runORB and or_dir != 0 and or_broke and not or_placed and not or_closed and halLive and not na(or_e1)
     if (or_dir == 1 and low <= or_e1) or (or_dir == -1 and high >= or_e1)
         or_missed := true
-if runORB and or_dir != 0 and or_broke and not or_placed and not or_closed and orbWin and not flatten and (not noDbl or not or_oppBroke) and orbSz1 >= 1 and not halLive and not or_missed
+if runORB and or_dir != 0 and or_broke and not or_placed and not or_closed and orbWin and not flatten and (not noDbl or not or_oppBroke) and orbSz1 >= 1 and not halLive and not or_missed and or_trendOK
     if ordersOn
         if or_dir == 1
             strategy.entry("ORL", strategy.long, qty = orbSz1, limit = or_e1)
@@ -1008,7 +1056,7 @@ if (or_f1 or or_f2) and not or_closed and not na(or_curStop)
 // Cancel resting ORB entries once the window closes unfilled, or done/flat/off/double-break/missed. The carry
 // no longer needs its own hold flag here: orbWin itself now stays open past the IB forming, and the IB taking
 // the seat is handled by the hand-over after the IB engine below (ib_broke is not known this early in the bar).
-if ordersOn and (or_closed or flatten or not runORB or or_missed or (noDbl and or_oppBroke) or ((not orbWin) and not (or_f1 or or_f2)))
+if ordersOn and (or_closed or flatten or not runORB or or_missed or not or_trendOK or (noDbl and or_oppBroke) or ((not orbWin) and not (or_f1 or or_f2)))
     strategy.cancel("ORL")
     strategy.cancel("ORL2")
     strategy.cancel("ORS")
@@ -1140,6 +1188,7 @@ var bool  ib_beDone = false
 var bool  ib_closed = false
 var bool  ib_oppBroke = false
 var bool  ib_missed = false      // the IB pullback was reached while another setup held the seat -> skip IB today
+var bool  ib_trendOK = true      // trend filter verdict, taken on the break bar and latched
 var float ibSz1 = na
 var float ibSz2 = na
 
@@ -1162,6 +1211,7 @@ if newSession
     ib_closed := false
     ib_oppBroke := false
     ib_missed := false
+    ib_trendOK := true
     ibSz1 := na
     ibSz2 := na
 if ib_inR
@@ -1199,6 +1249,8 @@ ibHeld    = orbLive or halLive
 ib_useAdd = ibAvg and not na(ib_e2)
 ib_brk = ibBreak == "Wick (touch)" ? ((ib_dir == 1 and high >= ib_rH) or (ib_dir == -1 and low <= ib_rL)) : ((ib_dir == 1 and close > ib_rH) or (ib_dir == -1 and close < ib_rL))
 if ib_dir != 0 and ib_brk
+    if not ib_broke
+        ib_trendOK := f_trendOK(ib_dir)   // judged once, on the break bar itself, then held for the day
     ib_broke := true
 if ib_dir == 1 and low < ib_rL
     ib_oppBroke := true
@@ -1209,7 +1261,7 @@ ibWin = inSess and not dayHalt and ibDayOK and tod <= (ibCutH*60 + ibCutM)
 if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and ibHeld and not na(ib_e1)
     if (ib_dir == 1 and low <= ib_e1) or (ib_dir == -1 and high >= ib_e1)
         ib_missed := true
-if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and ibWin and not flatten and (not noDbl or not ib_oppBroke) and ibSz1 >= 1 and not ibHeld and not ib_missed
+if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and ibWin and not flatten and (not noDbl or not ib_oppBroke) and ibSz1 >= 1 and not ibHeld and not ib_missed and ib_trendOK
     if ordersOn
         if ib_dir == 1
             strategy.entry("IBL", strategy.long, qty = ibSz1, limit = ib_e1)
@@ -1255,7 +1307,7 @@ if (ib_f1 or ib_f2) and not ib_closed and not na(ib_curStop)
         ib_closed := true
     if ib_dir == -1 and (high >= ib_curStop or low <= ib_curTP)
         ib_closed := true
-if ordersOn and (ib_closed or flatten or not runIB or ib_missed or (noDbl and ib_oppBroke) or ((not ibWin) and not (ib_f1 or ib_f2)))
+if ordersOn and (ib_closed or flatten or not runIB or ib_missed or not ib_trendOK or (noDbl and ib_oppBroke) or ((not ibWin) and not (ib_f1 or ib_f2)))
     strategy.cancel("IBL")
     strategy.cancel("IBL2")
     strategy.cancel("IBS")
@@ -1699,7 +1751,7 @@ if halGrow
 // ---------------------------------------------------------------- Strategy rules panel (top-right)
 var table info = na
 if showInfo and barstate.islast
-    info := table.new(position.top_right, 1, 18, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
+    info := table.new(position.top_right, 1, 19, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
     table.cell(info, 0, 0,  (ordersOn ? "" : "[INDICATOR - no orders]  ") + "HALYARD + BREAK-THEN-PULLBACK (ORB + IB)",
          text_color = ordersOn ? color.aqua : color.orange, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 1,  "HALYARD: 15m candles built from chart bars - any chart TF",  text_color = color.fuchsia, text_size = size.small, text_halign = text.align_left)
@@ -1720,6 +1772,7 @@ if showInfo and barstate.islast
     table.cell(info, 0, 15, "Skip double-break days | ORB/IB flatten 15:30 ET",           text_color = color.silver,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 16, "Toggle Run HAL / ORB / IB + weekdays to isolate results",    text_color = color.aqua,    text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 17, modeTxt + (maxDayLoss > 0 ? "  | day stop $" + str.tostring(maxDayLoss, "#") + (dayHalt ? " - HIT" : "") : "") + (rmFixed ? "" : " (per entry, fixed capital)"), text_color = dayHalt ? color.red : color.yellow, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 18, trendMode == "Off" ? "Trend filter: OFF" : "Trend filter: " + trendMode + " - break bar must close on its side", text_color = trendMode == "Off" ? color.gray : color.lime, text_size = size.small, text_halign = text.align_left)
 
 // ---------------------------------------------------------------- Probability table (ORB / IB setups only)
 // Columns: N = sample size, Reach = how often that starting point is even reached, then the odds of price
@@ -1811,6 +1864,8 @@ plot(runIB and not na(ib_rH) ? ib_rH : na, "IB High", color = color.new(color.te
 plot(runIB and not na(ib_rL) ? ib_rL : na, "IB Low",  color = color.new(color.teal, 45), style = plot.style_linebr)
 plot(runIB and ib_dir != 0 and not na(ib_e1) ? ib_e1 : na, "IB Entry", color = color.new(color.aqua, 0), style = plot.style_linebr)
 plot(runIB and ib_dir != 0 and not na(ib_zstop) ? ib_zstop : na, "IB Stop", color = color.new(color.red, 25), style = plot.style_linebr)
+// Trend filter reference - whichever of the two the dropdown selected
+plot(showTrend and trendMode != "Off" ? trendRef : na, "Trend filter reference", color = color.new(color.blue, 0), style = plot.style_linebr, linewidth = 2)
 // Halyard's 15-minute range, drawn from the engine's own candles
 plot(runHAL and not na(halRH) ? halRH : na, "Halyard range high", color = color.new(color.fuchsia, 0),  style = plot.style_linebr)
 plot(runHAL and not na(halRL) ? halRL : na, "Halyard range low",  color = color.new(color.fuchsia, 45), style = plot.style_linebr)

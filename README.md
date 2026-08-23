@@ -173,6 +173,22 @@ extensions, as in the original.
   box, pinned by `text_valign` to whichever edge is the entry — the 0 line. `Write the numbers on
   the box` turns the text off for bare boxes. The old labels are gone entirely, so `keepLab` went
   with them; box text cannot pile up because it belongs to the box.
+- **Entry location**: the range's own close no longer moves the entry. The first unit is *always*
+  the 25% retracement and the average-down *always* the 50% line, so both units exist on every
+  setup. Direction logic is unchanged.
+- **Trend filter (ORB / IB)**: one dropdown, `Off` (default) / `Globex anchored VWAP` /
+  `Daily 5 EMA`. The test is made **once, on the bar that breaks the range**, and latched for the
+  rest of that setup's life — a long needs that bar to *close above* the reference, a short below
+  it. Fail it and nothing is placed at all: no order, no R/R box, no fib lines, exactly as when any
+  other filter rejects a break. Halyard is untouched.
+  - *Globex anchored VWAP* — `sum(hlc3 * volume) / sum(volume)` anchored to the 18:00 ET Globex
+    open of the previous day, run to 16:00 ET today, re-anchored at 18:00 for the next session
+    (session string `1800-1600`, editable). It carries the whole overnight auction into the RTH
+    break.
+  - *Daily 5 EMA* — a 5-period EMA of daily closes, pulled with the `expr[1]` + `lookahead_on`
+    idiom so it is the EMA through *yesterday's completed* daily close: fixed for the whole
+    session, non-repainting, identical in backtest and live. Length is editable.
+  - The active reference is plotted (blue, toggleable) and the rules panel names which one is live.
 - **Halyard defaults**: fixed size of 4 contracts with `$ Risk Position Sizing` off, reverse trade
   on (so the day's cap is 2 fills and the reverse R:R is live), first-trade R:R 0.9.
 - **Webhook**: the average-down sends the *increment* with `pyramid:true` so it stacks instead of
