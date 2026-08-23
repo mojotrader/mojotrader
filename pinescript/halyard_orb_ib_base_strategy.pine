@@ -192,7 +192,13 @@ autoOn    = input.bool(false, "Enable webhook alerts", group = grpA,
 pmtToken  = input.string("", "PickMyTrade token", group = grpA)
 pmtAcct   = input.string("", "Tradovate account id", group = grpA)
 pmtSym    = input.string("MNQ1!", "Broker symbol", group = grpA)
-pmtType   = input.string("market", "Order type", options = ["market", "limit"], group = grpA)
+pmtWhen   = input.string("At arm - resting limit + bracket", "When to transmit", options = ["At arm - resting limit + bracket", "On fill - market + bracket"], group = grpA,
+     tooltip = "AT ARM (default): the moment a setup is armed - the range has broken and every filter has passed - the pullback limit, its stop and its target are transmitted, so the working order sits at the broker straight away and you can see the strategy's plan as live orders. The average-down limit goes out in the same breath. Nothing is sent when price actually reaches the level: the broker's own resting order is what fills.\n\nON FILL: the original behaviour - nothing leaves until TradingView's simulated limit fills, then a MARKET order with the bracket attached is sent to chase it.\n\nHALYARD is unaffected either way. It enters at the 15m close with a market order, so its arm and its fill are the same instant and it always uses the on-fill path.")
+pmtCxl    = input.string("close", "Word that pulls a working order", options = ["close", "cancel", "(send nothing)"], group = grpA,
+     tooltip = "AT-ARM MODE ONLY. When an armed setup expires without ever being filled - cutoff passed, double-break, seat lost, EOD - the resting order has to be pulled off the broker or it will fill tomorrow. This is the value sent in the 'data' field to do that; it is only ever sent while the account is FLAT, so it can never close a live trade belonging to another setup. 'close' is PickMyTrade's documented flatten-and-clear. Switch to 'cancel' if your PickMyTrade template uses that word for pending orders, or to '(send nothing)' if you would rather pull the order by hand.")
+pmtType   = input.string("market", "Order type (on-fill mode)", options = ["market", "limit"], group = grpA,
+     tooltip = "The order type used by the ON-FILL path only - the chase order sent once TradingView's own limit has filled, and every Halyard entry. At-arm entries are always limits, since the whole point of them is a resting order at the pullback price.")
+armLimits = pmtWhen == "At arm - resting limit + bracket"
 pmtDebug  = input.bool(true, "Show the last webhook payload on the chart", group = grpA,
      tooltip = "Prints the exact JSON the script last transmitted, as a label on the most recent bar. TradingView gives you no way to see an alert() message after it has fired, so this is how you check that sl and tp really are leaving with a price on them. Turn it off once you are satisfied.")
 
@@ -1458,7 +1464,9 @@ if dayHalt
 // is the documented name, and "action" is kept so a setup that was already working on it keeps working. An
 // unrecognised extra key is ignored by the endpoint; a MISSING one is not.
 //
-// sl and tp are ABSOLUTE PRICE LEVELS, not distances - 0 means "no level, use the account default".
+// sl and tp are ABSOLUTE PRICE LEVELS, not distances - 0 means "no level, use the account default". `price` is
+// the limit price and is only written when order_type is "limit" - a market order that carries a stray price
+// field is a rejection waiting to happen, and the key is simply left out rather than sent as 0.
 //
 // EVERY NUMBER GOES THROUGH f_num, and that is the fix for a bracket that gets REJECTED. str.tostring(na)
 // renders the three characters NaN, which is not valid JSON: one na stop or target and the whole message is
@@ -1478,11 +1486,12 @@ if dayHalt
 // that should never happen, but if it ever did, flattening is the safe reading.
 f_num(float v) => na(v) ? "0" : str.tostring(math.round_to_mintick(v))
 
-f_pmt(string act, float q, float slp, float tpp, bool add) =>
+f_pmt(string act, float q, float slp, float tpp, bool add, string otype, float px) =>
     '{"token":"' + pmtToken + '","account_id":"' + pmtAcct + '","symbol":"' + pmtSym +
       '","data":"' + act + '","action":"' + act + '","quantity":' + str.tostring(q) +
-      ',"order_type":"' + pmtType +
-      '","sl":' + f_num(slp) +
+      ',"order_type":"' + otype + '"' +
+      (otype == "limit" ? ',"price":' + f_num(px) : "") +
+      ',"sl":' + f_num(slp) +
       ',"tp":' + f_num(tpp) +
       ',"pyramid":' + (add ? "true" : "false") +
       ',"same_direction_ignore":false,"reverse_order_close":true' +
@@ -1532,17 +1541,77 @@ autoQty  = isAdd ? math.abs(posNow - posPrev) : math.abs(posNow)
 buyNow   = posNow > 0 and (posPrev <= 0 or posNow > posPrev)
 sellNow  = posNow < 0 and (posPrev >= 0 or posNow < posPrev)
 closeNow = posNow == 0 and posPrev != 0
+// In AT-ARM mode the ORB and IB entries are already resting at the broker, so their fills must NOT be chased
+// with a second order - the broker filled its own limit and the bracket went out with it. Halyard is different:
+// it is a market order at the 15m close, so its arm and its fill are the same event and it keeps this path.
+// halLive is the tell - the seat rules mean an ORB/IB fill can never happen while a Halyard trade is open.
+sendFill = not armLimits or halLive
 // the exact string that went out, kept for the on-chart readout below
 var string pmtLast = ""
-if autoOn and ordersOn and buyNow
-    pmtLast := f_pmt("buy",  autoQty, autoStop, autoTP, isAdd)
+if autoOn and ordersOn and buyNow and sendFill
+    pmtLast := f_pmt("buy",  autoQty, autoStop, autoTP, isAdd, pmtType, float(na))
     alert(pmtLast, alert.freq_once_per_bar)
-if autoOn and ordersOn and sellNow
-    pmtLast := f_pmt("sell", autoQty, autoStop, autoTP, isAdd)
+if autoOn and ordersOn and sellNow and sendFill
+    pmtLast := f_pmt("sell", autoQty, autoStop, autoTP, isAdd, pmtType, float(na))
     alert(pmtLast, alert.freq_once_per_bar)
 if autoOn and ordersOn and closeNow
-    pmtLast := f_pmt("close", 0, 0.0, 0.0, false)
+    pmtLast := f_pmt("close", 0, 0.0, 0.0, false, "market", float(na))
     alert(pmtLast, alert.freq_once_per_bar)
+
+// ---------------------------------------------------------------- AT-ARM TRANSMISSION (resting limit + bracket)
+// The setup's whole plan goes to the broker the moment it is ARMED - the bar the range breaks and every filter
+// passes - instead of after price has come back and TradingView's simulated limit has filled. Two orders leave
+// together: the first unit's limit at the 25% line and the average-down's limit at the 50% line, each carrying
+// the SAME absolute stop (the far range edge) and the SAME absolute target. The second one is flagged as an add
+// so PickMyTrade stacks it under one bracket instead of reading it as a fresh position, and
+// same_direction_ignore stays false so it is never silently dropped as a duplicate.
+//
+// WHY barstate.isconfirmed + alert.freq_all, when everything else here uses freq_once_per_bar: once_per_bar
+// lets only the FIRST alert() of the bar out, which would silently swallow the average-down order. freq_all
+// lets both through, and would normally re-fire on every tick of the live bar - isconfirmed is what stops that,
+// by only letting the block run on the bar's final iteration. Historical bars never fire alerts at all.
+//
+// The prices are fixed at arm and cannot drift afterwards: the stop is the range extreme, breakeven-move is off
+// in this build, and both targets are range EXTENSIONS. (Switch orbTpL/orbTpS or ibTpL/ibTpS in the hardcoded
+// config to "HOD/LOD" and that stops being true - the level transmitted would be the day's high/low as it stood
+// at the break, while the Strategy Tester would keep using the one at the fill.)
+orbArm = armLimits and runORB and or_placed and not or_placed[1] and not na(or_e1) and not na(or_zstop) and or_dir != 0
+ibArm  = armLimits and runIB  and ib_placed and not ib_placed[1] and not na(ib_e1) and not na(ib_zstop) and ib_dir != 0
+if autoOn and ordersOn and barstate.isconfirmed and orbArm
+    orbArmTP  = f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
+    orbArmAct = or_dir == 1 ? "buy" : "sell"
+    pmtLast := f_pmt(orbArmAct, orbSz1, or_zstop, orbArmTP, false, "limit", or_e1)
+    alert(pmtLast, alert.freq_all)
+    if or_useAdd and orbSz2 >= 1
+        pmtLast := f_pmt(orbArmAct, orbSz2, or_zstop, orbArmTP, true, "limit", or_e2)
+        alert(pmtLast, alert.freq_all)
+if autoOn and ordersOn and barstate.isconfirmed and ibArm
+    ibArmTP  = f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
+    ibArmAct = ib_dir == 1 ? "buy" : "sell"
+    pmtLast := f_pmt(ibArmAct, ibSz1, ib_zstop, ibArmTP, false, "limit", ib_e1)
+    alert(pmtLast, alert.freq_all)
+    if ib_useAdd and ibSz2 >= 1
+        pmtLast := f_pmt(ibArmAct, ibSz2, ib_zstop, ibArmTP, true, "limit", ib_e2)
+        alert(pmtLast, alert.freq_all)
+
+// PULLING A WORKING ORDER. An armed setup that never fills has to have its resting order taken off the broker,
+// or it is still there tomorrow. These mirror the strategy.cancel conditions in the two engines exactly, and
+// fire on the transition so one message goes out per setup. The "and flat" guard is the safety: the pull word
+// is only ever sent while the account holds nothing, so it can never flatten a live trade of another seat.
+orbDead = or_placed and not (or_f1 or or_f2) and (or_closed or flatten or not runORB or or_missed or not or_trendOK or (noDbl and or_oppBroke) or not orbWin)
+ibDead  = ib_placed and not (ib_f1 or ib_f2) and (ib_closed or flatten or not runIB  or ib_missed or not ib_trendOK or (noDbl and ib_oppBroke) or not ibWin)
+armCxl  = armLimits and pmtCxl != "(send nothing)" and strategy.position_size == 0 and ((orbDead and not orbDead[1]) or (ibDead and not ibDead[1]))
+if autoOn and ordersOn and barstate.isconfirmed and armCxl
+    pmtLast := f_pmt(pmtCxl, 0, 0.0, 0.0, false, "market", float(na))
+    alert(pmtLast, alert.freq_all)
+
+// EOD BACKSTOP. In at-arm mode the broker owns the fills, so it is possible for it to be holding a position or a
+// working order that TradingView never registered - a limit that traded on the broker's feed but not on the
+// chart's. One unconditional flatten-and-clear on the first bar of the EOD window closes that gap. It is skipped
+// when the netted position is already producing a close of its own, so the log stays readable.
+if autoOn and ordersOn and barstate.isconfirmed and armLimits and flatten and not flatten[1] and not closeNow
+    pmtLast := f_pmt("close", 0, 0.0, 0.0, false, "market", float(na))
+    alert(pmtLast, alert.freq_all)
 
 // ---- on-chart readout of the LAST payload, so you can read what was actually transmitted ----
 // TradingView does not show you an alert()'s message after the fact, which is why a rejected bracket is so
@@ -1751,7 +1820,7 @@ if halGrow
 // ---------------------------------------------------------------- Strategy rules panel (top-right)
 var table info = na
 if showInfo and barstate.islast
-    info := table.new(position.top_right, 1, 19, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
+    info := table.new(position.top_right, 1, 20, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
     table.cell(info, 0, 0,  (ordersOn ? "" : "[INDICATOR - no orders]  ") + "HALYARD + BREAK-THEN-PULLBACK (ORB + IB)",
          text_color = ordersOn ? color.aqua : color.orange, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 1,  "HALYARD: 15m candles built from chart bars - any chart TF",  text_color = color.fuchsia, text_size = size.small, text_halign = text.align_left)
@@ -1772,6 +1841,7 @@ if showInfo and barstate.islast
     table.cell(info, 0, 15, "Skip double-break days | ORB/IB flatten 15:30 ET",           text_color = color.silver,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 16, "Toggle Run HAL / ORB / IB + weekdays to isolate results",    text_color = color.aqua,    text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 17, modeTxt + (maxDayLoss > 0 ? "  | day stop $" + str.tostring(maxDayLoss, "#") + (dayHalt ? " - HIT" : "") : "") + (rmFixed ? "" : " (per entry, fixed capital)"), text_color = dayHalt ? color.red : color.yellow, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 19, autoOn ? (armLimits ? "Webhook: AT ARM - limits + bracket sent on the break" : "Webhook: ON FILL - market chase after the pullback") : "Webhook: off", text_color = autoOn ? color.lime : color.gray, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 18, trendMode == "Off" ? "Trend filter: OFF" : "Trend filter: " + trendMode + " - break bar must close on its side", text_color = trendMode == "Off" ? color.gray : color.lime, text_size = size.small, text_halign = text.align_left)
 
 // ---------------------------------------------------------------- Probability table (ORB / IB setups only)

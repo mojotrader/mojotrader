@@ -195,3 +195,24 @@ extensions, as in the original.
   forcing a flatten-and-reenter, and every price goes through `f_num` (na → `0`, never the `NaN`
   that made strict JSON reject the whole payload and strip the bracket). Direction ships as `data`
   as well as `action`; an on-chart label prints the last transmitted payload.
+- **Webhook transmission timing** — `When to transmit`, defaulting to **At arm**:
+  - *At arm — resting limit + bracket* (default): the moment a setup is armed (the range has
+    broken and every filter has passed), both pullback limits go to the broker as **working limit
+    orders** — `order_type:"limit"` with a `price` key — each carrying the same absolute `sl`
+    (the far range edge) and `tp`. The add is flagged `pyramid:true` / `update_sl` / `update_tp` so
+    the pair ends up under one bracket. Nothing is sent when price reaches the level: the broker's
+    own resting order fills it. The strategy's plan is visible as live orders in Tradovate.
+  - *On fill — market + bracket*: the original behaviour — nothing leaves until TradingView's
+    simulated limit fills, then a market order chases it with the bracket attached.
+  - Halyard is unaffected either way: it is a market order at the 15m close, so its arm and its
+    fill are the same instant and it always uses the on-fill path (`sendFill = not armLimits or
+    halLive`).
+  - **Pulling a working order**: an armed setup that expires unfilled (cutoff, double-break, seat
+    lost, EOD) sends `Word that pulls a working order` — `close` (default), `cancel`, or nothing.
+    It is only ever sent while the account is **flat**, so it can never close another seat's trade.
+    A backstop `close` also goes out on the first bar of the EOD window, covering a broker fill the
+    chart never registered.
+  - Both legs leave on the *same* bar, which needs `barstate.isconfirmed` + `alert.freq_all`:
+    `alert.freq_once_per_bar` lets only the first `alert()` of a bar through and would silently
+    swallow the average-down order, while bare `freq_all` would re-fire on every tick of the live
+    bar.
