@@ -157,61 +157,47 @@ Stops, filters, seat precedence, cutoffs, flattens, the Halyard engine, the prob
 and the webhook are otherwise as in the previous version.
 
 ### `pinescript/halyard_orb_ib_base_strategy.pine`
-The base Halyard + Break-then-Pullback build with tuned defaults and the webhook fixed. No
-selectable targets/stops — the stop is the far range edge and the targets are the hardcoded
-extensions, as in the original.
+The base Halyard + Break-then-Pullback build with tuned defaults, the webhook fixed, and orders
+transmitted to the broker the moment a setup arms. No selectable targets/stops — the stop is the
+far range edge and the targets are the hardcoded extensions, as in the original.
 
+- **Entry location — the low-drawdown rule.** Where the range's own candle CLOSED decides the
+  entry. Shallow (a close in the outer quarter: `or_pos >= 0.75` long, `<= 0.25` short) → first
+  entry on the **25% line**, average-down on the **50% line**. Any deeper close → a single unit
+  **on the 50% line**, and the average-down is suppressed (`or_useAdd` requires `or_shallow`),
+  because the entry already *is* the 50% line. That suppression is what keeps risk per setup at
+  0.50·range on the common day instead of 1.25·range.
+- **No ORB carry.** `orbWin` closes the instant the IB range FORMS at 10:30: an unfilled ORB limit
+  is cancelled there, and an ORB that breaks after 10:30 is never placed. The ORB owns the
+  09:45–10:30 slot and hands the day over cleanly.
+- **No ORB/IB trend filter.** Direction is the which-extreme-came-first test alone. (Halyard keeps
+  its own `halUseTrend` EMA gate, which ships off.)
 - **Contracts**: ORB 1 / 1, IB 2 / 2 (first entry / average-down).
-- **ORB carry on by default**: the IB range *forming* at 10:30 no longer ends the ORB. The setup
-  stays armed — it can still be placed, keeps resting, and its R/R box keeps extending — until the
-  IB actually *breaks* and arms a setup.
-- **Close-depth filter off**: both depths default to `100`, so any close passes and only the
-  which-extreme-came-first test decides direction. Lower either to switch that side back on.
-- **Rules panel and probability table off** by default — both are reference readouts that cover a
-  corner of the chart.
-- **R/R numbers are written on the box**, not in a floating label: one small line inside the reward
-  box, pinned by `text_valign` to whichever edge is the entry — the 0 line. `Write the numbers on
-  the box` turns the text off for bare boxes. The old labels are gone entirely, so `keepLab` went
-  with them; box text cannot pile up because it belongs to the box.
-- **Entry location**: the range's own close no longer moves the entry. The first unit is *always*
-  the 25% retracement and the average-down *always* the 50% line, so both units exist on every
-  setup. Direction logic is unchanged.
-- **Trend filter (ORB / IB)**: one dropdown, `Off` (default) / `Globex anchored VWAP` /
-  `Daily 5 EMA`. The test is made **once, on the bar that breaks the range**, and latched for the
-  rest of that setup's life — a long needs that bar to *close above* the reference, a short below
-  it. Fail it and nothing is placed at all: no order, no R/R box, no fib lines, exactly as when any
-  other filter rejects a break. Halyard is untouched.
-  - *Globex anchored VWAP* — `sum(hlc3 * volume) / sum(volume)` anchored to the 18:00 ET Globex
-    open of the previous day, run to 16:00 ET today, re-anchored at 18:00 for the next session
-    (session string `1800-1600`, editable). It carries the whole overnight auction into the RTH
-    break.
-  - *Daily 5 EMA* — a 5-period EMA of daily closes, pulled with the `expr[1]` + `lookahead_on`
-    idiom so it is the EMA through *yesterday's completed* daily close: fixed for the whole
-    session, non-repainting, identical in backtest and live. Length is editable.
-  - The active reference is plotted (blue, toggleable) and the rules panel names which one is live.
+- **Close-depth filter off**: both depths default to `100`, so any close passes the direction test.
+- **Rules panel and probability table off** by default.
+- **R/R numbers written on the box**, not in a floating label: one small line inside the reward box,
+  pinned by `text_valign` to whichever edge is the entry — the 0 line.
 - **Halyard defaults**: fixed size of 4 contracts with `$ Risk Position Sizing` off, reverse trade
-  on (so the day's cap is 2 fills and the reverse R:R is live), first-trade R:R 0.9.
+  on, first-trade R:R 0.9.
 - **Webhook**: the average-down sends the *increment* with `pyramid:true` so it stacks instead of
   forcing a flatten-and-reenter, and every price goes through `f_num` (na → `0`, never the `NaN`
   that made strict JSON reject the whole payload and strip the bracket). Direction ships as `data`
   as well as `action`; an on-chart label prints the last transmitted payload.
 - **Webhook transmission timing** — `When to transmit`, defaulting to **At arm**:
-  - *At arm — resting limit + bracket* (default): the moment a setup is armed (the range has
-    broken and every filter has passed), both pullback limits go to the broker as **working limit
-    orders** — `order_type:"limit"` with a `price` key — each carrying the same absolute `sl`
-    (the far range edge) and `tp`. The add is flagged `pyramid:true` / `update_sl` / `update_tp` so
-    the pair ends up under one bracket. Nothing is sent when price reaches the level: the broker's
-    own resting order fills it. The strategy's plan is visible as live orders in Tradovate.
-  - *On fill — market + bracket*: the original behaviour — nothing leaves until TradingView's
-    simulated limit fills, then a market order chases it with the bracket attached.
-  - Halyard is unaffected either way: it is a market order at the 15m close, so its arm and its
-    fill are the same instant and it always uses the on-fill path (`sendFill = not armLimits or
-    halLive`).
-  - **Pulling a working order**: an armed setup that expires unfilled (cutoff, double-break, seat
-    lost, EOD) sends `Word that pulls a working order` — `close` (default), `cancel`, or nothing.
-    It is only ever sent while the account is **flat**, so it can never close another seat's trade.
-    A backstop `close` also goes out on the first bar of the EOD window, covering a broker fill the
-    chart never registered.
+  - *At arm — resting limit + bracket* (default): the moment a setup arms, its pullback limit goes
+    to the broker as a **working limit order** — `order_type:"limit"` with a `price` key — carrying
+    the absolute `sl` (far range edge) and `tp`. A shallow setup sends its average-down limit in the
+    same breath, flagged `pyramid:true` / `update_sl` / `update_tp` so the pair ends up under one
+    bracket; a deeper setup has no second unit, so one order leaves. Nothing is sent when price
+    reaches the level — the broker's own resting order fills it.
+  - *On fill — market + bracket*: nothing leaves until TradingView's simulated limit fills, then a
+    market order chases it with the bracket attached.
+  - Halyard is unaffected either way — it is a market order at the 15m close, so its arm and its
+    fill are the same instant (`sendFill = not armLimits or halLive`).
+  - **Pulling a working order**: an armed setup that expires unfilled (the 10:30 hand-over, the
+    cutoff, a double-break, the seat lost, EOD) sends `Word that pulls a working order` — `close`
+    (default), `cancel`, or nothing. Only ever sent while the account is **flat**, so it can never
+    close another seat's trade. A backstop `close` also goes out on the first bar of the EOD window.
   - Both legs leave on the *same* bar, which needs `barstate.isconfirmed` + `alert.freq_all`:
     `alert.freq_once_per_bar` lets only the first `alert()` of a bar through and would silently
     swallow the average-down order, while bare `freq_all` would re-fire on every tick of the live
