@@ -162,6 +162,9 @@ selectable targets/stops — the stop is the far range edge and the targets are 
 extensions, as in the original.
 
 - **Contracts**: ORB 1 / 1, IB 2 / 2 (first entry / average-down).
+- **ORB carry on by default**: the IB range *forming* at 10:30 no longer ends the ORB. The setup
+  stays armed — it can still be placed, keeps resting, and its R/R box keeps extending — until the
+  IB actually *breaks* and arms a setup.
 - **Close-depth filter off**: both depths default to `100`, so any close passes and only the
   which-extreme-came-first test decides direction. Lower either to switch that side back on.
 - **Rules panel and probability table off** by default — both are reference readouts that cover a

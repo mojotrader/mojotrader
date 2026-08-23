@@ -70,8 +70,8 @@ gStrat    = "Strategies (toggle to track each separately)"
 runHAL    = input.bool(true, "Run HALYARD strategy (15m break, timeframe-independent)", group = gStrat, tooltip = "Turn OFF to backtest ORB/IB alone.")
 runORB    = input.bool(true, "Run ORB strategy", group = gStrat, tooltip = "Turn OFF to backtest the IB strategy alone in the Strategy Tester.")
 runIB     = input.bool(true, "Run IB strategy",  group = gStrat, tooltip = "Turn OFF to backtest the ORB strategy alone.")
-orbCarry  = input.bool(false, "Carry an unfilled ORB past the IB (test idea)", group = gStrat,
-     tooltip = "OFF: an ORB limit that has not filled by the time the IB forms is cancelled - the standard rule. ON: that unfilled limit keeps resting, so a pullback that finally arrives after 10:30 still gets taken. It gives way the moment the IB breaks its own range and arms a setup, and otherwise expires at the ORB cutoff or the EOD flatten.")
+orbCarry  = input.bool(true, "Carry an unfilled ORB past the IB", group = gStrat,
+     tooltip = "ON (default): the IB range FORMING at 10:30 no longer ends the ORB. The ORB setup stays armed - it can still be placed, it keeps resting, and its risk/reward box keeps extending - until the IB actually BREAKS its own range and arms a setup. Only then does the ORB give way. It still expires at the ORB cutoff, on a double-break, on the daily halt or at the EOD flatten.\n\nOFF: the old rule - an ORB that has not filled by 10:30 is cancelled, and an ORB that breaks after 10:30 is never placed at all.")
 
 // ---------------------------------------------------------------- Trade-day filters (see which weekday hurts each)
 gDayO     = "Trade days - ORB"
@@ -341,6 +341,12 @@ f_tp(int d, float rH, float rL, float rg, float dHi, float dLo, string tpL, stri
 // engines, and read by Halyard above them - so Halyard sees the value as of the previous chart bar. On a 1m
 // chart that is a one-minute lag on a gate that only matters when a fill and a 15m close land on the same bar.
 var bool orbibLive = false
+
+// Has the IB taken the seat from a carried ORB? Latched at the bottom of the IB engine, where ib_broke is
+// finally known, and read by the ORB engine above it - so the ORB sees it a chart bar later, the same one-bar
+// lag orbibLive already runs on. It does not matter: the hand-over that sets it also cancels the ORB order on
+// that very bar, so the lag can never let an extra fill through.
+var bool orbYield = false
 
 // ================================================================ HALYARD ENGINE
 // Single-candle opening-range breakout with an optional loser-reversal, on 15-MINUTE candles that this engine
@@ -899,6 +905,7 @@ if newSession
     or_missed := false
     orbSz1 := na
     orbSz2 := na
+    orbYield := false
 if or_inR
     if na(or_rH) or high > or_rH
         or_rH := high
@@ -939,7 +946,12 @@ if or_dir == -1 and high > or_rH
     or_oppBroke := true
 // entry window: before IB forms (when IB is on), within ORB cutoff otherwise, on an allowed weekday
 orbSizeOK = orbMinRngPct <= 0 or (not na(or_rng) and or_rL > 0 and or_rng / or_rL * 100 >= orbMinRngPct)
-orbWin = inSess and not dayHalt and orbDayOK and tod <= (orbCutH*60 + orbCutM) and (not runIB or not ibFormed) and orbSizeOK
+// THE IB CLEARANCE. Without carry the ORB window shuts the moment the IB range FORMS at 10:30 - which not
+// only cancels a resting limit but means an ORB that breaks after 10:30 is never placed at all. With carry on
+// the window instead stays open until the IB actually BREAKS and arms a setup. Everything downstream reads
+// orbWin, so this one line is also what keeps a carried setup's risk/reward box extending past 10:30.
+orbIbClear = not runIB or not ibFormed or (orbCarry and not orbYield)
+orbWin = inSess and not dayHalt and orbDayOK and tod <= (orbCutH*60 + orbCutM) and orbIbClear and orbSizeOK
 // SEAT: a live HALYARD trade holds the ORB limit back rather than cancelling it - same rule the IB has always
 // had behind an open ORB. If the ORB pullback entry trades through during the hold, that fill was missed and
 // the ORB is done for the day.
@@ -992,12 +1004,10 @@ if (or_f1 or or_f2) and not or_closed and not na(or_curStop)
         or_closed := true
     if or_dir == -1 and (high >= or_curStop or low <= or_curTP)
         or_closed := true
-// cancel resting ORB entries once the window closes unfilled, or done/flat/off/double-break/missed.
-// CARRY: with the option armed, an unfilled ORB limit survives the IB forming. It still dies at the ORB cutoff,
-// on a double-break, on the daily halt or at the flatten - and it gives way as soon as the IB arms its own
-// setup, which is handled after the IB engine below (ib_broke is not known this early in the bar).
-orbHold = orbCarry and or_placed and not (or_f1 or or_f2) and inSess and not dayHalt and orbDayOK and tod <= (orbCutH*60 + orbCutM)
-if ordersOn and (or_closed or flatten or not runORB or or_missed or (noDbl and or_oppBroke) or ((not orbWin) and not (or_f1 or or_f2) and not orbHold))
+// Cancel resting ORB entries once the window closes unfilled, or done/flat/off/double-break/missed. The carry
+// no longer needs its own hold flag here: orbWin itself now stays open past the IB forming, and the IB taking
+// the seat is handled by the hand-over after the IB engine below (ib_broke is not known this early in the bar).
+if ordersOn and (or_closed or flatten or not runORB or or_missed or (noDbl and or_oppBroke) or ((not orbWin) and not (or_f1 or or_f2)))
     strategy.cancel("ORL")
     strategy.cancel("ORL2")
     strategy.cancel("ORS")
@@ -1255,6 +1265,8 @@ if ordersOn and (ib_closed or flatten or not runIB or ib_missed or (noDbl and ib
 
 // CARRY hand-over: the moment the IB breaks its range and has a valid setup, a carried ORB limit that is still
 // unfilled is dropped - the IB gets the seat. A carried ORB that HAS filled keeps it (see orbLive above).
+if runIB and ib_dir != 0 and ib_broke
+    orbYield := true                        // from here the ORB window is shut whatever the carry setting
 if runORB and orbCarry and not or_closed and not (or_f1 or or_f2) and ib_dir != 0 and ib_broke
     if ordersOn
         strategy.cancel("ORL")
@@ -1726,7 +1738,7 @@ if showInfo and barstate.islast
     table.cell(info, 0, 11, "Target: ORB L +10% / S +30% ; IB +30% extension",            text_color = color.white,   text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 12, "Avg-down: 2nd unit @ 50% - own size & risk",                 text_color = color.silver,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 13, "SEAT: Halyard > ORB > IB - one trade at a time",             text_color = color.aqua,    text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 14, orbCarry ? "ORB carry ON: unfilled ORB rests past 10:30" : "ORB carry off (unfilled ORB dies at 10:30)", text_color = orbCarry ? color.orange : color.gray, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 14, orbCarry ? "ORB carry ON: ORB lives until the IB BREAKS, not 10:30" : "ORB carry off (unfilled ORB dies at 10:30)", text_color = orbCarry ? color.orange : color.gray, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 15, "Skip double-break days | ORB/IB flatten 15:30 ET",           text_color = color.silver,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 16, "Toggle Run HAL / ORB / IB + weekdays to isolate results",    text_color = color.aqua,    text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 17, modeTxt + (maxDayLoss > 0 ? "  | day stop $" + str.tostring(maxDayLoss, "#") + (dayHalt ? " - HIT" : "") : "") + (rmFixed ? "" : " (per entry, fixed capital)"), text_color = dayHalt ? color.red : color.yellow, text_size = size.small, text_halign = text.align_left)
