@@ -268,8 +268,7 @@ a { color: var(--s1); }
     <h1>Halyard <span class="x">×</span> QuantFlow V3</h1>
     <p class="standfirst">Two intraday MNQ strategies measured apart and then as one book. Run together on
       <strong>__JOINED_CAP__</strong> they returned <strong>__JOINED_NET__</strong> (__JOINED_ANN__ annualised)
-      against a __JOINED_DDPCT__ worst drawdown — a better risk profile than either curve alone, because their
-      losing days rarely line up.</p>
+      against a __JOINED_DDPCT__ worst drawdown. __STANDFIRST_TAIL__</p>
   </div>
 </header>
 
@@ -287,7 +286,7 @@ a { color: var(--s1); }
     <p class="eyebrow">Equity</p>
     <h2>Cumulative profit</h2>
     <p class="lede">Closed-trade PnL booked on the exit date, starting from zero. The joined line is the
-      arithmetic sum of the two — one account trading both.</p>
+      arithmetic sum of the two books, run side by side.</p>
     <div class="chartbox">
       <div class="chart-head">
         <span class="chart-title">Cumulative net profit</span>
@@ -347,7 +346,7 @@ a { color: var(--s1); }
   <section id="monthly">
     <p class="eyebrow">Consistency</p>
     <h2>Month by month</h2>
-    <p class="lede">Thirteen calendar months, both books.</p>
+    <p class="lede">__MONTHS_N__ calendar months, both books.</p>
     <div class="chartbox">
       <div class="chart-head">
         <span class="chart-title">Monthly net profit</span>
@@ -363,8 +362,7 @@ a { color: var(--s1); }
   <section id="sides">
     <p class="eyebrow">Direction</p>
     <h2>Long versus short</h2>
-    <p class="lede">Both books lean long, and both are meaningfully weaker on the short side — the same
-      asymmetry, which means joining them does not diversify it away.</p>
+    <p class="lede">__LEDE_SIDES__</p>
     __SIDES__
   </section>
 
@@ -395,33 +393,19 @@ a { color: var(--s1); }
     <div class="notes">
       <div class="note">
         <h4>Commission</h4>
-        <p>The exports were not run on the same cost basis: Halyard's charged <strong>__RAW_COMM_A__</strong>
-          over the year, QuantFlow's charged <strong>__RAW_COMM_B__</strong>. Every figure on this page
-          re-prices both at <strong>__COMM__ per contract per side</strong> (__COMM_RT__ round turn), which
-          costs QuantFlow roughly a thousand dollars of its raw net profit. Slippage is still not modelled
-          anywhere — at 765 round turns a single MNQ tick of slippage per side is about $8,000.</p>
+        <p>__NOTE_COMMISSION__</p>
       </div>
       <div class="note">
         <h4>Capital base</h4>
-        <p>The two testers ran different accounts — <strong>__CAP_A__</strong> for Halyard against
-          <strong>__CAP_B__</strong> for QuantFlow — so the percentage returns are not like for like.
-          Halyard's __ANN_A__ and QuantFlow's __ANN_B__ describe the same dollar engine measured against
-          different denominators. Compare profit factor, expectancy and Sharpe across the two; compare the
-          percentages only against their own capital.</p>
+        <p>__NOTE_CAPITAL__</p>
       </div>
       <div class="note">
         <h4>Tail risk</h4>
-        <p>Halyard's worst single day was <strong>__WORST_DAY_A__</strong>, or __WORST_DAY_A_PCT__ of its
-          stated capital, and it runs up to four contracts. A book that can lose a tenth of its account in a
-          session is sized for the backtest's best case, not for a gap. The joined book's peak of
-          __CONTRACTS__ concurrent contracts is the number to check margin against, not the average of 2.57.</p>
+        <p>__NOTE_TAIL__</p>
       </div>
       <div class="note">
         <h4>Sample</h4>
-        <p>One year, one instrument, one regime — a strongly trending Nasdaq. 765 trades is a healthy sample
-          for trade-level statistics but only thirteen independent months for the equity curve, so the
-          Sharpe, Calmar and drawdown figures carry far less certainty than their decimal places suggest.
-          No walk-forward or out-of-sample split is present in these exports.</p>
+        <p>__NOTE_SAMPLE__</p>
       </div>
     </div>
   </section>

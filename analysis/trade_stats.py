@@ -39,7 +39,7 @@ def strategy_name(path: str) -> str:
     base = os.path.basename(path)
     base = re.sub(r"\.csv$", "", base)
     base = re.sub(r"^[0-9a-f]{6,}-", "", base)               # upload hash prefix
-    base = re.sub(r"_CME_MINI_[A-Z0-9!]+_\d{8}$", "", base)  # symbol + date suffix
+    base = re.sub(r"_CME_MINI_[A-Z0-9!]+_\d{8,}$", "", base)  # symbol + export-date suffix
     base = base.replace("___", " - ").replace("__", " ").replace("_", " ")
     return re.sub(r"\s+", " ", base).strip(" -")
 
@@ -200,6 +200,10 @@ def metrics(t: pd.DataFrame, capital: float, index: pd.DatetimeIndex, label: str
         "trades_per_month": len(t) / (years * 12) if years else np.nan,
         "contracts_traded": int(t["qty"].sum() * 2),
         "avg_size": t["qty"].mean(),
+        "max_size": int(t["qty"].max()),
+        # One MNQ tick is 0.25 index points = $0.50/contract, so a tick of slippage
+        # on entry and exit costs $1 per contract per round turn.
+        "slippage_1tick": float(t["qty"].sum() * 2 * POINT_VALUE * 0.25),
 
         "net_pnl": pnl.sum(),
         "net_pnl_pct": pnl.sum() / capital * 100,
@@ -308,6 +312,7 @@ ROWS = [
     ("Trades", lambda m: f"{m['trades']:,}"),
     ("Trades / month", lambda m: num(m["trades_per_month"], 1)),
     ("Avg position size", lambda m: f"{num(m['avg_size'], 2)} contracts"),
+    ("Max position size", lambda m: f"{m['max_size']} contracts"),
     ("Net profit", lambda m: money(m["net_pnl"])),
     ("Net profit % of capital", lambda m: pct(m["net_pnl_pct"])),
     ("Annualised return", lambda m: pct(m["ann_return_pct"])),

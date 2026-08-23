@@ -46,7 +46,7 @@ GROUPS = [
         "Best month / worst month", "Positive months",
     ]),
     ("Execution & exposure", [
-        "Starting capital", "Avg position size", "Avg MFE (max favourable excursion)",
+        "Starting capital", "Avg position size", "Max position size", "Avg MFE (max favourable excursion)",
         "Avg MAE (max adverse excursion)", "Edge ratio (MFE / MAE)",
         "Avg hold time", "Median hold time", "Time in market",
         "Trades held past the session",
@@ -74,8 +74,9 @@ KEY = {  # metric-name -> raw key, for numeric comparison
     "Edge ratio (MFE / MAE)": "edge_ratio", "Winning days": "daily_win_rate",
 }
 
-SHORT = {"Halyard BreakthenPullback ORB IB": "Halyard",
-         "QuantFlow V3 - 8 Contract Risk - Aggressive Risk": "QuantFlow V3"}
+# Prefix -> display name, so a re-exported file with a slightly different suffix
+# still gets the short label.
+SHORT = {"Halyard": "Halyard", "QuantFlow V3": "QuantFlow V3"}
 
 
 def esc(s: str) -> str:
@@ -83,7 +84,10 @@ def esc(s: str) -> str:
 
 
 def short(label: str) -> str:
-    return SHORT.get(label, label)
+    for prefix, name in SHORT.items():
+        if label.startswith(prefix):
+            return name
+    return label
 
 
 def signed(v: float, fmt=ts.money) -> str:
@@ -185,10 +189,11 @@ def monthly_html(mt: pd.DataFrame) -> str:
 
 def cards_html(all_m: list[dict]) -> str:
     out = []
+    n_books = len(all_m) - 1
     for i, m in enumerate(all_m):
         kind = "joined" if m["label"] == "JOINED" else f"s{i + 1}"
         name = "Joined book" if m["label"] == "JOINED" else short(m["label"])
-        sub = ("both strategies, one account" if m["label"] == "JOINED"
+        sub = (f'{n_books} funded accounts · {ts.money(m["capital"])} total' if m["label"] == "JOINED"
                else f'{m["trades"]} trades · {ts.money(m["capital"])} base')
         out.append(f'''<article class="card {kind}">
   <header><span class="swatch"></span><h3>{esc(name)}</h3></header>
@@ -203,6 +208,100 @@ def cards_html(all_m: list[dict]) -> str:
   </dl>
 </article>''')
     return "\n".join(out)
+
+
+
+WORDS = {1: "One", 2: "Two", 3: "Three", 4: "Four", 5: "Five", 6: "Six", 7: "Seven",
+         8: "Eight", 9: "Nine", 10: "Ten", 11: "Eleven", 12: "Twelve", 13: "Thirteen",
+         14: "Fourteen", 15: "Fifteen", 16: "Sixteen", 17: "Seventeen", 18: "Eighteen",
+         19: "Nineteen", 20: "Twenty"}
+
+
+def word(n: int) -> str:
+    return WORDS.get(n, f"{n:,}")
+
+
+def note_commission(mets: list[dict], extra: dict, joined: dict) -> str:
+    """Say whether the exports agreed on cost, then price the un-modelled part."""
+    rate, raw = extra["commission_rate"], extra["raw_commission"]
+    charged = [(short(m["label"]), raw[m["label"]], m["commission"]) for m in mets]
+    same = len({round(r, 2) for _, r, _ in charged}) == 1
+    slip = joined["slippage_1tick"]
+    tail = (f' Slippage is not modelled anywhere. At {joined["trades"]:,} round turns and '
+            f'{ts.num(joined["avg_size"], 2)} contracts a trade, one MNQ tick of slippage per side is '
+            f'{ts.money(slip)} — {slip / joined["net_pnl"] * 100:.0f}% of the joined net profit.')
+    if same:
+        return (f'Both exports charged the same commission, and every figure here re-prices them at '
+                f'<strong>{ts.money(rate)} per contract per side</strong> ({ts.money(rate * 2)} round turn).'
+                + tail)
+    parts = " and ".join(f'{n} charged <strong>{ts.money(r)}</strong>' for n, r, _ in charged)
+    worst = max(charged, key=lambda c: abs(c[2] - c[1]))
+    return (f'The exports were not run on the same cost basis: over the year, {parts}. Every figure on this '
+            f'page re-prices both at <strong>{ts.money(rate)} per contract per side</strong> '
+            f'({ts.money(rate * 2)} round turn), which moves {worst[0]} by '
+            f'<strong>{ts.money(abs(worst[2] - worst[1]))}</strong> against its raw net profit.' + tail)
+
+
+def note_capital(mets: list[dict], joined: dict) -> str:
+    a, b = mets
+    if a["capital"] == b["capital"]:
+        return (f'Both testers ran the same <strong>{ts.money(a["capital"])}</strong> account, so the '
+                f'percentage returns are directly comparable — {short(a["label"])}\'s {ts.pct(a["ann_return_pct"])} '
+                f'against {short(b["label"])}\'s {ts.pct(b["ann_return_pct"])} is a real difference, not a '
+                f'difference of denominators. The joined column assumes <strong>two separately funded '
+                f'{ts.money(a["capital"])} accounts</strong> totalling {ts.money(joined["capital"])}. Running '
+                f'both strategies inside a single {ts.money(a["capital"])} account is a different, more '
+                f'leveraged proposition than what is shown here.')
+    return (f'The two testers ran different accounts — <strong>{ts.money(a["capital"])}</strong> for '
+            f'{short(a["label"])} against <strong>{ts.money(b["capital"])}</strong> for {short(b["label"])} — '
+            f'so the percentage returns are not like for like. {short(a["label"])}\'s '
+            f'{ts.pct(a["ann_return_pct"])} and {short(b["label"])}\'s {ts.pct(b["ann_return_pct"])} measure '
+            f'similar dollar engines against different denominators. Compare profit factor, expectancy in R '
+            f'and Sharpe across the two; compare the percentages only against their own capital.')
+
+
+def note_tail(mets: list[dict], joined: dict, extra: dict) -> str:
+    w = min(mets, key=lambda m: m["worst_day_pct"])
+    return (f'{short(w["label"])}\'s worst single day was <strong>{ts.money(w["worst_day"])}</strong>, '
+            f'{ts.pct(abs(w["worst_day_pct"]))} of its stated capital, and it runs up to {w["max_size"]} '
+            f'contracts. A book that can lose that much of its account in one session is sized for the '
+            f'backtest\'s best case, not for a gap. The joined book\'s peak of '
+            f'<strong>{extra["max_concurrent_contracts"]} concurrent contracts</strong> '
+            f'({ts.money(extra["max_concurrent_notional"])} notional) is the number to check margin against, '
+            f'not the {ts.num(joined["avg_size"], 2)} average. Drawdowns here are measured on closed-trade '
+            f'equity, so they understate what the account saw while positions were open.')
+
+
+def note_sample(joined: dict) -> str:
+    return (f'One year, one instrument, one regime — a strongly trending Nasdaq. {joined["trades"]:,} trades '
+            f'is a healthy sample for trade-level statistics, but the equity curve rests on only '
+            f'{joined["total_months"]} months, so the Sharpe, Calmar and drawdown figures carry far less '
+            f'certainty than their decimal places suggest. No walk-forward or out-of-sample split is present '
+            f'in these exports, and both strategies were tuned on this same window.')
+
+
+def lede_sides(mets: list[dict]) -> str:
+    weaker = [m for m in mets if m["short"]["profit_factor"] < m["long"]["profit_factor"]]
+    if len(weaker) == len(mets):
+        return ("Both books lean long, and both are weaker on the short side — the same asymmetry in each, "
+                "which means joining them does not diversify it away.")
+    if not weaker:
+        return "Both books are stronger short than long."
+    m = weaker[0]
+    return (f'{short(m["label"])} is weaker on the short side; '
+            f'{short([x for x in mets if x is not m][0]["label"])} is not.')
+
+
+def standfirst_tail(extra: dict, joined: dict, mets: list[dict]) -> str:
+    better = joined["max_dd_pct"] < min(m["max_dd_pct"] for m in mets)
+    if better and extra["corr"] < 0.4:
+        return ("That is a shallower drawdown than either book runs on its own, because at a "
+                f'{extra["corr"]:.2f} daily correlation their losing days rarely line up.')
+    if extra["corr"] < 0.4:
+        return (f'Their daily results are near-independent at a {extra["corr"]:.2f} correlation, so the '
+                "combined curve is steadier than either alone.")
+    return (f'Their daily results move together at a {extra["corr"]:.2f} correlation, so combining them adds '
+            "size more than it adds diversification.")
 
 
 def main(argv: list[str]) -> int:
@@ -261,8 +360,13 @@ def main(argv: list[str]) -> int:
         "__YEARS__": f'{joined["years"]:.2f}',
         "__COMM__": f'${extra["commission_rate"]:.2f}',
         "__COMM_RT__": f'${extra["commission_rate"] * 2:.2f}',
-        "__RAW_COMM_A__": ts.money(extra["raw_commission"][mets[0]["label"]]),
-        "__RAW_COMM_B__": ts.money(extra["raw_commission"][mets[1]["label"]]),
+        "__NOTE_COMMISSION__": note_commission(mets, extra, joined),
+        "__NOTE_CAPITAL__": note_capital(mets, joined),
+        "__NOTE_TAIL__": note_tail(mets, joined, extra),
+        "__NOTE_SAMPLE__": note_sample(joined),
+        "__LEDE_SIDES__": lede_sides(mets),
+        "__STANDFIRST_TAIL__": standfirst_tail(extra, joined, mets),
+        "__MONTHS_N__": word(joined["total_months"]),
         "__CORR__": f'{div["corr"]:.2f}',
         "__BOTH_DAYS__": str(div["both_days"]),
         "__ANY_DAYS__": str(div["any_days"]),
