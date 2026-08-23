@@ -1182,6 +1182,12 @@ if ib_rDone and not na(ib_rH) and ib_rH > ib_rL
     if ib_dir != 0
         ibSz1 := sizeByRisk ? f_size(ibRiskDlr1, math.abs(ib_e1 - ib_zstop)) : ibQty1
         ibSz2 := sizeByRisk ? f_size(ibRiskDlr2, math.abs(ib_e2 - ib_zstop)) : ibQty2
+// SEAT: an OPEN trade of ANY other setup keeps priority - the IB order is held back (either direction, so the
+// two can never stack risk or hedge each other). The IB is not cancelled, only delayed: the moment the seat
+// frees the IB limit goes in, provided price has NOT already traded through the IB entry level while it was
+// held. If it has, that pullback was missed and the IB is done for the day.
+orbLive   = runORB and (or_f1 or or_f2) and not or_closed
+ibHeld    = orbLive or halLive
 ib_useAdd = ibAvg and ib_shallow and not na(ib_e2)
 ib_brk = ibBreak == "Wick (touch)" ? ((ib_dir == 1 and high >= ib_rH) or (ib_dir == -1 and low <= ib_rL)) : ((ib_dir == 1 and close > ib_rH) or (ib_dir == -1 and close < ib_rL))
 if ib_dir != 0 and ib_brk
