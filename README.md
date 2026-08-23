@@ -155,3 +155,20 @@ behind its entry falls back to a 1R target.
 
 Stops, filters, seat precedence, cutoffs, flattens, the Halyard engine, the probability study
 and the webhook are otherwise as in the previous version.
+
+### `pinescript/halyard_orb_ib_base_strategy.pine`
+The base Halyard + Break-then-Pullback build with tuned defaults and the webhook fixed. No
+selectable targets/stops — the stop is the far range edge and the targets are the hardcoded
+extensions, as in the original.
+
+- **Contracts**: ORB 1 / 1, IB 2 / 2 (first entry / average-down).
+- **Close-depth filter off**: both depths default to `100`, so any close passes and only the
+  which-extreme-came-first test decides direction. Lower either to switch that side back on.
+- **Rules panel and probability table off** by default — both are reference readouts that cover a
+  corner of the chart.
+- **R/R label opens leftward** (`style_label_right` anchored at the current bar) so it no longer
+  sits over the newest candles and the price scale.
+- **Webhook**: the average-down sends the *increment* with `pyramid:true` so it stacks instead of
+  forcing a flatten-and-reenter, and every price goes through `f_num` (na → `0`, never the `NaN`
+  that made strict JSON reject the whole payload and strip the bracket). Direction ships as `data`
+  as well as `action`; an on-chart label prints the last transmitted payload.
