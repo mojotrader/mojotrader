@@ -190,7 +190,7 @@ brkAlerts = input.bool(true, "Alert when a range breaks (Halyard / ORB / IB)", g
 grpRR     = "Risk / Reward tool"
 showRR    = input.bool(true, "Show risk/reward box at the break", group = grpRR)
 showRR2   = input.bool(true, "  ... and a second box for the average-down unit (ORB / IB)", group = grpRR,
-     tooltip = "The average-down unit is a trade of its own - its own entry price, contract count, risk and reward. With this on it gets its own pair of boxes (dashed border, lighter fill) measured from the 50% line to the same stop and target, plus its own $ label.")
+     tooltip = "The average-down unit is a trade of its own - its own entry price, contract count, risk and reward. It arms on EVERY setup now, since the first entry is always the 25% line and the add always the 50% line. With this on it gets its own pair of boxes (dashed border, lighter fill) measured from the 50% line to the same stop and target.")
 showRRHal = input.bool(true, "  ... and a box for the Halyard trade", group = grpRR,
      tooltip = "Halyard's risk/reward box, drawn exactly like the ORB and IB ones: green reward box, red risk box, one label with contracts, $ risk, $ reward and the R multiple. Border is fuchsia so it is told apart from ORB orange and IB teal.")
 showRRText = input.bool(true, "Write the numbers on the box (entry line)", group = grpRR,
@@ -864,7 +864,6 @@ var float or_rL = na
 var int   or_rHbar = na
 var int   or_rLbar = na
 var int   or_dir = 0
-var bool  or_shallow = false
 var float or_e1 = na
 var float or_e2 = na
 var float or_zstop = na
@@ -887,7 +886,6 @@ if newSession
     or_rH := na
     or_rL := na
     or_dir := 0
-    or_shallow := false
     or_e1 := na
     or_e2 := na
     or_zstop := na
@@ -913,6 +911,11 @@ if or_inR
     if na(or_rL) or low < or_rL
         or_rL := low
         or_rLbar := bar_index
+// WHERE THE RANGE'S OWN CLOSE SAT NO LONGER MOVES THE ENTRY. It used to: a close in the outer quarter made
+// the setup "shallow" and put the first entry on the 25% retracement, while any deeper close pushed that entry
+// down onto the 50% line - where the average-down already sits, which is why the add was then suppressed.
+// Now the first entry is ALWAYS the 25% retracement and the average-down is ALWAYS the 50% line, so both units
+// exist on every setup. or_pos is still read, but only by the close-depth DIRECTION filter (off by default).
 if or_rDone and not na(or_rH) and or_rH > or_rL
     or_rng := or_rH - or_rL
     or_lf = or_rLbar < or_rHbar
@@ -920,21 +923,19 @@ if or_rDone and not na(or_rH) and or_rH > or_rL
     orbDepF = orbDepth / 100.0                    // how deep the close may sit, measured from the breaking level
     if orbLong and or_lf and or_pos >= 1.0 - orbDepF
         or_dir := 1
-        or_shallow := or_pos >= 0.75
-        or_e1 := or_shallow ? or_rL + 0.75*or_rng : or_rL + 0.5*or_rng
+        or_e1 := or_rL + 0.75*or_rng    // 25% retracement off the broken high - ALWAYS
         or_e2 := or_rL + 0.5*or_rng
         or_zstop := or_rL                     // the stop is ALWAYS the far side of the range
     else if orbShort and (not or_lf) and or_pos <= orbDepF
         or_dir := -1
-        or_shallow := or_pos <= 0.25
-        or_e1 := or_shallow ? or_rL + 0.25*or_rng : or_rL + 0.5*or_rng
+        or_e1 := or_rL + 0.25*or_rng    // 25% retracement off the broken low - ALWAYS
         or_e2 := or_rL + 0.5*or_rng
         or_zstop := or_rH                     // the stop is ALWAYS the far side of the range
     if or_dir != 0
         // each unit is sized on its own budget and its own stop distance (the add sits closer to the stop)
         orbSz1 := sizeByRisk ? f_size(orbRiskDlr1, math.abs(or_e1 - or_zstop)) : orbQty1
         orbSz2 := sizeByRisk ? f_size(orbRiskDlr2, math.abs(or_e2 - or_zstop)) : orbQty2
-or_useAdd = orbAvg and or_shallow and not na(or_e2)
+or_useAdd = orbAvg and not na(or_e2)
 // break by selected type
 or_brk = orbBreak == "Wick (touch)" ? ((or_dir == 1 and high >= or_rH) or (or_dir == -1 and low <= or_rL)) : ((or_dir == 1 and close > or_rH) or (or_dir == -1 and close < or_rL))
 if or_dir != 0 and or_brk
@@ -1124,7 +1125,6 @@ var float ib_rL = na
 var int   ib_rHbar = na
 var int   ib_rLbar = na
 var int   ib_dir = 0
-var bool  ib_shallow = false
 var float ib_e1 = na
 var float ib_e2 = na
 var float ib_zstop = na
@@ -1147,7 +1147,6 @@ if newSession
     ib_rH := na
     ib_rL := na
     ib_dir := 0
-    ib_shallow := false
     ib_e1 := na
     ib_e2 := na
     ib_zstop := na
@@ -1172,6 +1171,7 @@ if ib_inR
     if na(ib_rL) or low < ib_rL
         ib_rL := low
         ib_rLbar := bar_index
+// Same rule as the ORB engine: first entry always the 25% retracement, average-down always the 50% line.
 if ib_rDone and not na(ib_rH) and ib_rH > ib_rL
     ib_rng := ib_rH - ib_rL
     ib_lf = ib_rLbar < ib_rHbar
@@ -1179,14 +1179,12 @@ if ib_rDone and not na(ib_rH) and ib_rH > ib_rL
     ibDepF = ibDepth / 100.0
     if ibLong and ib_lf and ib_pos >= 1.0 - ibDepF
         ib_dir := 1
-        ib_shallow := ib_pos >= 0.75
-        ib_e1 := ib_shallow ? ib_rL + 0.75*ib_rng : ib_rL + 0.5*ib_rng
+        ib_e1 := ib_rL + 0.75*ib_rng    // 25% retracement off the broken high - ALWAYS
         ib_e2 := ib_rL + 0.5*ib_rng
         ib_zstop := ib_rL                     // the stop is ALWAYS the far side of the range
     else if ibShort and (not ib_lf) and ib_pos <= ibDepF
         ib_dir := -1
-        ib_shallow := ib_pos <= 0.25
-        ib_e1 := ib_shallow ? ib_rL + 0.25*ib_rng : ib_rL + 0.5*ib_rng
+        ib_e1 := ib_rL + 0.25*ib_rng    // 25% retracement off the broken low - ALWAYS
         ib_e2 := ib_rL + 0.5*ib_rng
         ib_zstop := ib_rH                     // the stop is ALWAYS the far side of the range
     if ib_dir != 0
@@ -1198,7 +1196,7 @@ if ib_rDone and not na(ib_rH) and ib_rH > ib_rL
 // held. If it has, that pullback was missed and the IB is done for the day.
 orbLive   = runORB and (or_f1 or or_f2) and not or_closed
 ibHeld    = orbLive or halLive
-ib_useAdd = ibAvg and ib_shallow and not na(ib_e2)
+ib_useAdd = ibAvg and not na(ib_e2)
 ib_brk = ibBreak == "Wick (touch)" ? ((ib_dir == 1 and high >= ib_rH) or (ib_dir == -1 and low <= ib_rL)) : ((ib_dir == 1 and close > ib_rH) or (ib_dir == -1 and close < ib_rL))
 if ib_dir != 0 and ib_brk
     ib_broke := true
@@ -1713,7 +1711,7 @@ if showInfo and barstate.islast
     table.cell(info, 0, 7,  (orbDepth >= 100 and ibDepth >= 100) ? "  close-depth filter: OFF (both at 100%)" : "  + close no deeper than " + str.tostring(orbDepth, "#") + "% (ORB) / " + str.tostring(ibDepth, "#") + "% (IB) into the range",
          text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 8,  "Enter AFTER the range breaks; limit at fib pullback:",       text_color = color.white,   text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 9,  "  shallow -> 25% line | deeper -> 50% line",                 text_color = color.silver,  text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 9,  "  entry ALWAYS 25% line | avg-down ALWAYS 50% line",         text_color = color.silver,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 10, "Stop: always the range extreme (100%)",                      text_color = color.white,   text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 11, "Target: ORB L +10% / S +30% ; IB +30% extension",            text_color = color.white,   text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 12, "Avg-down: 2nd unit @ 50% - own size & risk",                 text_color = color.silver,  text_size = size.small, text_halign = text.align_left)
