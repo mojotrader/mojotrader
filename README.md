@@ -169,8 +169,12 @@ extensions, as in the original.
   which-extreme-came-first test decides direction. Lower either to switch that side back on.
 - **Rules panel and probability table off** by default — both are reference readouts that cover a
   corner of the chart.
-- **R/R label opens leftward** (`style_label_right` anchored at the current bar) so it no longer
-  sits over the newest candles and the price scale.
+- **R/R numbers are written on the box**, not in a floating label: one small line inside the reward
+  box, pinned by `text_valign` to whichever edge is the entry — the 0 line. `Write the numbers on
+  the box` turns the text off for bare boxes. The old labels are gone entirely, so `keepLab` went
+  with them; box text cannot pile up because it belongs to the box.
+- **Halyard defaults**: fixed size of 4 contracts with `$ Risk Position Sizing` off, reverse trade
+  on (so the day's cap is 2 fills and the reverse R:R is live), first-trade R:R 0.9.
 - **Webhook**: the average-down sends the *increment* with `pyramid:true` so it stacks instead of
   forcing a flatten-and-reenter, and every price goes through `f_num` (na → `0`, never the `NaN`
   that made strict JSON reject the whole payload and strip the bracket). Direction ships as `data`

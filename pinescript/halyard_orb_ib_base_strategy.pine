@@ -121,17 +121,17 @@ modeTxt    = rmFixed ? "Sizing: fixed contracts" : "Sizing: risk $ per entry"
 
 // ---------------------------------------------------------------- Halyard - Position sizing
 gHPS          = "Halyard - Position sizing"
-halUseRiskSz  = input.bool(true, "Use $ Risk Position Sizing", group = gHPS)
-halRiskUSD    = input.float(535, "Risk Per Trade ($)", minval = 0, group = gHPS)
-halQtyFixed   = input.int(1, "Contracts (If Risk Sizing Off)", minval = 1, group = gHPS)
+halUseRiskSz  = input.bool(false, "Use $ Risk Position Sizing", group = gHPS, tooltip = "OFF by default: Halyard trades the fixed contract count below and the Risk Per Trade ($) figure is not read at all. Tick it to size from the dollar risk instead.")
+halRiskUSD    = input.float(535, "Risk Per Trade ($)", minval = 0, group = gHPS, tooltip = "UNREAD while $ Risk Position Sizing is off.")
+halQtyFixed   = input.int(4, "Contracts (If Risk Sizing Off)", minval = 1, group = gHPS, tooltip = "The live setting, since $ Risk Position Sizing ships OFF.")
 halMaxQty     = input.int(1000, "Max Contracts", minval = 1, group = gHPS, tooltip = "Hard cap on the risk-sized quantity.")
 
 // ---------------------------------------------------------------- Halyard - Trade management
 // Both R:R inputs are exposed, not just the first: the reverse one is UNREAD while the toggle is off but goes
 // LIVE the moment it is ticked, and shipping a toggle that silently arms a hidden number is a trap.
 gHTM          = "Halyard - Trade management"
-halRR         = input.float(0.8, "Risk:Reward (First Trade)", minval = 0.1, step = 0.01, group = gHTM)
-halRevOn      = input.bool(false, "Enable Reverse Trade", group = gHTM, tooltip = "Also sets the day's fill cap: 2 on, 1 off.")
+halRR         = input.float(0.9, "Risk:Reward (First Trade)", minval = 0.1, step = 0.01, group = gHTM)
+halRevOn      = input.bool(true, "Enable Reverse Trade", group = gHTM, tooltip = "ON by default. Also sets the day's fill cap: 2 on, 1 off - so the Risk:Reward (Reverse Trade) input below IS read.")
 halRevRR      = input.float(1.0, "Risk:Reward (Reverse Trade)", minval = 0.1, step = 0.01, group = gHTM, tooltip = "Only read while Enable Reverse Trade is on.")
 
 // ---------------------------------------------------------------- Halyard - Day filter
@@ -193,13 +193,13 @@ showRR2   = input.bool(true, "  ... and a second box for the average-down unit (
      tooltip = "The average-down unit is a trade of its own - its own entry price, contract count, risk and reward. With this on it gets its own pair of boxes (dashed border, lighter fill) measured from the 50% line to the same stop and target, plus its own $ label.")
 showRRHal = input.bool(true, "  ... and a box for the Halyard trade", group = grpRR,
      tooltip = "Halyard's risk/reward box, drawn exactly like the ORB and IB ones: green reward box, red risk box, one label with contracts, $ risk, $ reward and the R multiple. Border is fuchsia so it is told apart from ORB orange and IB teal.")
+showRRText = input.bool(true, "Write the numbers on the box (entry line)", group = grpRR,
+     tooltip = "The contracts, R multiple and $ risk are printed as one small line INSIDE the reward box, pinned to the entry - the 0 line. Untick for bare boxes with no text at all. This replaces the old floating label, which needed four lines of text and covered the price action it was describing.")
 showFibs  = input.bool(true, "Show fib retracement lines (25/50/75) - ORB / IB", group = grpRR, tooltip = "Dotted lines only, no text: the 25/50/75 levels of the range. Which one is the entry is shown by the R/R box.")
 showInfo  = input.bool(false, "Show strategy rules panel", group = grpRR, tooltip = "Off by default - it is a reference card, not a live readout, and it covers the top-right of the chart.")
 ptVal     = input.float(2.0, "$ per point per contract", group = grpRR, tooltip = "MNQ=2, NQ=20, MES=5, ES=50. Used for the ORB/IB boxes and sizing. Halyard's own box and sizing read the symbol's point value directly.")
 keepBox   = input.int(0, "Keep R/R boxes for the last N setups (0 = all)", 0, 250, group = grpRR,
      tooltip = "0 keeps every past setup's boxes and fib lines. Pine caps a script at 500 boxes and 500 lines: a setup with an average-down unit draws four boxes, so that is the most recent ~125 setups.")
-keepLab   = input.int(3, "Keep R/R labels for the last N setups (0 = all)", 0, 250, group = grpRR,
-     tooltip = "The boxes are cheap to look at; the text labels are what makes a chart unreadable when they stack up. This keeps the $ labels on the newest few setups only, while the boxes stay for the whole history. 0 keeps every label.")
 
 // ---------------------------------------------------------------- Historical probabilities (ORB / IB)
 grpP      = "Historical probabilities"
@@ -643,8 +643,8 @@ if halEnterS
         strategy.exit("HAL-Sx", from_entry = "HAL-S", stop = sl, limit = tp)
 
 // --- Reversal trade (only if the FIRST trade closed at a LOSS) ---
-// OFF BY DEFAULT: Enable Reverse Trade ships unticked, so neither branch fires and the day's cap is 1 fill
-// until someone ticks it. Ticking it also makes the Risk:Reward (Reverse Trade) input live.
+// ON BY DEFAULT: Enable Reverse Trade ships ticked, so the day's cap is 2 fills and the Risk:Reward (Reverse
+// Trade) input IS read. Untick it to go back to one attempt per day.
 // NOT filtered. The reversal is gated on the day-of-week, the direction and the losing first trade only - the
 // entry filters apply to the FIRST trade. Note the per-day direction grid DOES reach it: a weekday set to one
 // side can never take the reversal, since the reversal is by definition the opposite side of the loser.
@@ -1539,19 +1539,16 @@ if brkAlerts and runIB and ib_dir != 0 and ib_broke and not ib_broke[1]
 // any past setup at the price levels it actually had. Only the text labels are capped by default.
 var array<box>   dBox = array.new<box>()
 var array<line>  dLin = array.new<line>()
-var array<label> dLab = array.new<label>()
 
-// An ORB/IB setup draws up to FOUR boxes (first entry + average-down unit, two each) and up to TWO labels, so
-// the per-setup limits are multiplied out here. Halyard draws two boxes and one label, well inside the same cap.
+// An ORB/IB setup draws up to FOUR boxes (first entry + average-down unit, two each) and three fib lines, so
+// the per-setup limits are multiplied out here. Halyard draws two boxes. There are no R/R labels to cap any
+// more - the text lives on the box itself, so it can never stack up into an unreadable pile.
 f_trimDraws() =>
     if keepBox > 0
         while array.size(dBox) > keepBox * 4
             box.delete(array.shift(dBox))
         while array.size(dLin) > keepBox * 3
             line.delete(array.shift(dLin))
-    if keepLab > 0
-        while array.size(dLab) > keepLab * 2
-            label.delete(array.shift(dLab))
 
 // Markup for ONE entry unit.
 // d      = 1 long, -1 short.
@@ -1559,39 +1556,39 @@ f_trimDraws() =>
 // pv     = $ per point per contract used for the money figures. ORB/IB pass the "$ per point" input; Halyard
 //          passes the symbol's own point value, which is what its position sizer divides by - so every box
 //          reports the money that setup actually risks.
-// ent2/q2= the OTHER unit, passed only on the first entry so its label can also show the setup total; pass
+// ent2/q2= the OTHER unit, passed only on the first entry so its text can also show the setup total; pass
 //          na/0 on an average-down unit and on Halyard, which has no second unit.
 // dashed = draw this unit's boxes with a dashed border and a lighter fill, so an add is told apart at a glance.
+//
+// THE NUMBERS ARE WRITTEN ON THE BOX, NOT IN A LABEL. A label big enough for four lines of text sits on top of
+// the price action it is describing, which is what made the old ones unreadable. One short line goes inside
+// the REWARD box instead, pinned by text_valign to whichever edge of it IS the entry - the bottom for a long,
+// the top for a short - so it annotates the 0 line and nothing else. It also cannot pile up: the text belongs
+// to the box, so it disappears with it.
 f_drawRR(int d, float ent, float zstop, float ptp, float q, color sigCol, string tag, float ent2, float q2, bool dashed, float pv) =>
     riskUsd = math.abs(ent - zstop) * pv * q
     rewUsd  = math.abs(ptp - ent) * pv * q
-    risk1   = math.abs(ent - zstop) * pv
-    rew1    = math.abs(ptp - ent) * pv
-    rrr = riskUsd > 0 ? rewUsd / riskUsd : na
+    rrr     = riskUsd > 0 ? rewUsd / riskUsd : na
     gCol = color.new(color.green, dashed ? 89 : 82)
     rCol = color.new(color.red,   dashed ? 89 : 82)
-    bw = box.new(bar_index, d == 1 ? ptp : ent, bar_index + 1, d == 1 ? ent : ptp, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = gCol)
+    txt = ""
+    if showRRText
+        txt := tag + " " + str.tostring(q, "#.#") + "c @" + str.tostring(math.round_to_mintick(ent)) +
+             "  " + str.tostring(rrr, "#.##") + "R  risk $" + str.tostring(riskUsd, "#")
+        if not na(ent2) and q2 > 0
+            totR = riskUsd + math.abs(ent2 - zstop) * pv * q2
+            totW = rewUsd  + math.abs(ptp - ent2)  * pv * q2
+            txt := txt + "  |  +add " + str.tostring(q2, "#.#") + "c @" + str.tostring(math.round_to_mintick(ent2)) +
+                 " -> setup $" + str.tostring(totR, "#") + " risk / $" + str.tostring(totW, "#") + " reward"
+    bw = box.new(bar_index, d == 1 ? ptp : ent, bar_index + 1, d == 1 ? ent : ptp, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = gCol,
+         text = txt, text_color = color.new(color.white, 10), text_size = size.tiny, text_halign = text.align_left, text_valign = d == 1 ? text.align_bottom : text.align_top)
     br = box.new(bar_index, d == 1 ? ent : zstop, bar_index + 1, d == 1 ? zstop : ent, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = rCol)
     if dashed
         box.set_border_style(bw, line.style_dashed)
         box.set_border_style(br, line.style_dashed)
-    txt = tag + "  " + str.tostring(q, "#.#") + " contract" + (q == 1 ? "" : "s") + " @ " + str.tostring(math.round_to_mintick(ent)) +
-         "\nRisk $" + str.tostring(riskUsd, "#") + " | Reward $" + str.tostring(rewUsd, "#") + " (" + str.tostring(rrr, "#.##") + "R)" +
-         "\n1 contract: Risk $" + str.tostring(risk1, "#") + " | Reward $" + str.tostring(rew1, "#")
-    if not na(ent2) and q2 > 0
-        totR = riskUsd + math.abs(ent2 - zstop) * pv * q2
-        totW = rewUsd  + math.abs(ptp - ent2)  * pv * q2
-        txt := txt + "\n+ avg-down " + str.tostring(q2, "#.#") + " @ " + str.tostring(math.round_to_mintick(ent2)) +
-             "  ->  setup total Risk $" + str.tostring(totR, "#") + " | Reward $" + str.tostring(totW, "#") +
-             " (" + str.tostring(totR > 0 ? totW / totR : na, "#.##") + "R)"
-    // style_label_RIGHT puts the pointer on the label's right edge, so the BODY opens to the LEFT of the
-    // anchor. Anchored at bar_index that lays the text back over bars already printed instead of into the
-    // empty margin on the right, where it used to sit on top of the newest candles and the price scale.
-    lb = label.new(bar_index, ent, txt, xloc = xloc.bar_index, style = label.style_label_right, color = color.new(color.gray, dashed ? 35 : 15), textcolor = color.white, size = size.small)
     array.push(dBox, bw)
     array.push(dBox, br)
-    array.push(dLab, lb)
-    [bw, br, lb]
+    [bw, br]
 
 f_drawFibs(float rL, float rg, color sigCol, array<line> dest) =>
     array.clear(dest)
@@ -1602,12 +1599,10 @@ f_drawFibs(float rL, float rg, color sigCol, array<line> dest) =>
         array.push(dLin, ln)
 
 // stretch one live unit's drawings to the current bar; prices stay exactly where they were set
-f_growUnit(box bw, box br, label lb) =>
+f_growUnit(box bw, box br) =>
     if not na(bw)
         box.set_right(bw, bar_index)
         box.set_right(br, bar_index)
-        if not na(lb)
-            label.set_x(lb, bar_index)
 
 f_growFibs(array<line> fib) =>
     if array.size(fib) > 0
@@ -1620,38 +1615,32 @@ f_growFibs(array<line> fib) =>
 // under one contract, or a limit waiting behind an open Halyard/ORB trade - draws nothing at all.
 var box   orbBw  = na
 var box   orbBr  = na
-var label orbLb  = na
 var box   orbBw2 = na            // the average-down unit's own pair of boxes
 var box   orbBr2 = na
-var label orbLb2 = na
 var bool  orbGrow = false
 var array<line> orbFib = array.new<line>()
 if runORB and or_placed and not or_placed[1] and not na(or_e1) and not na(or_zstop)
     orTP = f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
     orbBw  := na
     orbBr  := na
-    orbLb  := na
     orbBw2 := na
     orbBr2 := na
-    orbLb2 := na
     if showFibs
         f_drawFibs(or_rL, or_rng, color.new(color.orange, 0), orbFib)
     if showRR
         orbAdd = or_useAdd and orbSz2 >= 1
-        [bw, br, lb] = f_drawRR(or_dir, or_e1, or_zstop, orTP, orbSz1, color.new(color.orange, 0), "ORB entry 1", orbAdd ? or_e2 : na, orbAdd ? orbSz2 : 0, false, ptVal)
+        [bw, br] = f_drawRR(or_dir, or_e1, or_zstop, orTP, orbSz1, color.new(color.orange, 0), "ORB entry 1", orbAdd ? or_e2 : na, orbAdd ? orbSz2 : 0, false, ptVal)
         orbBw := bw
         orbBr := br
-        orbLb := lb
         if orbAdd and showRR2
-            [bwA, brA, lbA] = f_drawRR(or_dir, or_e2, or_zstop, orTP, orbSz2, color.new(color.orange, 0), "ORB avg-down", float(na), 0.0, true, ptVal)
+            [bwA, brA] = f_drawRR(or_dir, or_e2, or_zstop, orTP, orbSz2, color.new(color.orange, 0), "ORB avg-down", float(na), 0.0, true, ptVal)
             orbBw2 := bwA
             orbBr2 := brA
-            orbLb2 := lbA
     orbGrow := true
     f_trimDraws()
 if orbGrow
-    f_growUnit(orbBw,  orbBr,  orbLb)
-    f_growUnit(orbBw2, orbBr2, orbLb2)
+    f_growUnit(orbBw,  orbBr)
+    f_growUnit(orbBw2, orbBr2)
     f_growFibs(orbFib)
     if or_closed or flatten or (not (or_f1 or or_f2) and not orbWin)
         orbGrow := false
@@ -1659,38 +1648,32 @@ if orbGrow
 // ---------------------------------------------------------------- IB drawings
 var box   ibBw  = na
 var box   ibBr  = na
-var label ibLb  = na
 var box   ibBw2 = na             // the average-down unit's own pair of boxes
 var box   ibBr2 = na
-var label ibLb2 = na
 var bool  ibGrow = false
 var array<line> ibFib = array.new<line>()
 if runIB and ib_placed and not ib_placed[1] and not na(ib_e1) and not na(ib_zstop)
     ibTP = f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
     ibBw  := na
     ibBr  := na
-    ibLb  := na
     ibBw2 := na
     ibBr2 := na
-    ibLb2 := na
     if showFibs
         f_drawFibs(ib_rL, ib_rng, color.new(color.teal, 0), ibFib)
     if showRR
         ibAdd = ib_useAdd and ibSz2 >= 1
-        [bw2, br2, lb2] = f_drawRR(ib_dir, ib_e1, ib_zstop, ibTP, ibSz1, color.new(color.teal, 0), "IB entry 1", ibAdd ? ib_e2 : na, ibAdd ? ibSz2 : 0, false, ptVal)
+        [bw2, br2] = f_drawRR(ib_dir, ib_e1, ib_zstop, ibTP, ibSz1, color.new(color.teal, 0), "IB entry 1", ibAdd ? ib_e2 : na, ibAdd ? ibSz2 : 0, false, ptVal)
         ibBw := bw2
         ibBr := br2
-        ibLb := lb2
         if ibAdd and showRR2
-            [bwB, brB, lbB] = f_drawRR(ib_dir, ib_e2, ib_zstop, ibTP, ibSz2, color.new(color.teal, 0), "IB avg-down", float(na), 0.0, true, ptVal)
+            [bwB, brB] = f_drawRR(ib_dir, ib_e2, ib_zstop, ibTP, ibSz2, color.new(color.teal, 0), "IB avg-down", float(na), 0.0, true, ptVal)
             ibBw2 := bwB
             ibBr2 := brB
-            ibLb2 := lbB
     ibGrow := true
     f_trimDraws()
 if ibGrow
-    f_growUnit(ibBw,  ibBr,  ibLb)
-    f_growUnit(ibBw2, ibBr2, ibLb2)
+    f_growUnit(ibBw,  ibBr)
+    f_growUnit(ibBw2, ibBr2)
     f_growFibs(ibFib)
     if ib_closed or flatten or (not (ib_f1 or ib_f2) and not ibWin)
         ibGrow := false
@@ -1701,20 +1684,17 @@ if ibGrow
 // point value, which is exactly what the Halyard position sizer divides by.
 var box   halBw   = na
 var box   halBr   = na
-var label halLb   = na
 var bool  halGrow = false
 if runHAL and halEntered and showRR and showRRHal
     halBw := na
     halBr := na
-    halLb := na
-    [bwH, brH, lbH] = f_drawRR(halEntDir, halEnt, halStp, halTgt, halQty, halSigCol, halEntDir == 1 ? "HALYARD long" : "HALYARD short", float(na), 0.0, false, syminfo.pointvalue)
+    [bwH, brH] = f_drawRR(halEntDir, halEnt, halStp, halTgt, halQty, halSigCol, halEntDir == 1 ? "HALYARD long" : "HALYARD short", float(na), 0.0, false, syminfo.pointvalue)
     halBw := bwH
     halBr := brH
-    halLb := lbH
     halGrow := true
     f_trimDraws()
 if halGrow
-    f_growUnit(halBw, halBr, halLb)
+    f_growUnit(halBw, halBr)
     if halTrDir == 0
         halGrow := false
 
