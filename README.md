@@ -202,3 +202,14 @@ far range edge and the targets are the hardcoded extensions, as in the original.
     `alert.freq_once_per_bar` lets only the first `alert()` of a bar through and would silently
     swallow the average-down order, while bare `freq_all` would re-fire on every tick of the live
     bar.
+  - **The average-down leg is sent as a plain new order, not an `add`.** `add` (`pyramid` /
+    `update_sl` / `update_tp` = true) means "amend the bracket already working on this symbol" —
+    that's correct for the fill-driven paths, where a real position exists to amend, but at arm
+    *neither* leg has filled yet, so there is no working bracket for an amend to target. Flagging
+    the avg-down leg as an add here was silently dropping it at the broker while the first leg went
+    through fine. Both legs at arm are independent new limit orders now.
+  - **Diagnostic label at the arm bar** (shown when `Show the last webhook payload` is on): prints,
+    right where the setup armed and kept in history, whether the avg-down alert actually fired —
+    `avg-down limit sent`, `SKIPPED (sizing < 1 contract)`, or `SKIPPED (deep close - one unit
+    only, no add on this setup)`. Scroll back to any break to see which case it was, without
+    relying on the single "last payload" label further down getting overwritten by a later event.

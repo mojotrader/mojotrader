@@ -1407,6 +1407,11 @@ if dayHalt
 //               second one, so the whole enlarged position ends up under ONE stop and ONE target. That is
 //               right for THIS file, where the first entry and the average-down deliberately share the same
 //               two exit prices.
+// This `add` machinery is for the FILL-DRIVEN paths only (the buy/sell alerts below, and Halyard) - a real
+// position exists there for pyramid/update_sl/update_tp to act on. The AT-ARM transmission further down sends
+// its average-down leg with add = false: at arm neither leg has filled, so there is no working bracket yet for
+// an "amend" to target, and flagging it as an add was silently dropping that leg at the broker.
+//
 // same_direction_ignore is pinned false: a same-direction signal must never be silently dropped, or the add
 // would vanish. reverse_order_close is pinned true so a direction flip flattens first - the seat rules mean
 // that should never happen, but if it ever did, flattening is the safe reading.
@@ -1489,10 +1494,15 @@ if autoOn and ordersOn and closeNow
 // passes - instead of after price has come back and TradingView's simulated limit has filled. The first unit's
 // limit goes out at whichever fib line this setup entered on (the 25% line on a shallow setup, the 50% line on
 // a deeper one), carrying the absolute stop - the far range edge - and the absolute target. A SHALLOW setup
-// also has an average-down unit, and its limit at the 50% line leaves in the same breath, flagged as an add so
-// PickMyTrade stacks it under one bracket instead of reading it as a fresh position; same_direction_ignore
-// stays false so it is never silently dropped as a duplicate. A deeper setup has no second unit (its entry IS
-// the 50% line), so exactly one order leaves.
+// also has an average-down unit, and its limit at the 50% line leaves in the same breath - as its OWN fresh
+// pending order, NOT flagged as an add. `add` (pyramid / update_sl / update_tp true) means "amend the bracket
+// ALREADY WORKING on this symbol", which only makes sense once a position exists to amend - see the `add`
+// note above f_pmt. At arm, NEITHER leg has filled yet, so there is no working bracket for the second leg to
+// amend; flagging it as an add here told PickMyTrade to update a position that was not there yet, which is
+// very likely why the first leg's limit reached the broker and the average-down's silently did not. Both legs
+// are plain new limit orders instead; same_direction_ignore stays false on both so neither is dropped as a
+// duplicate of the other. A deeper setup has no second unit (its entry IS the 50% line), so exactly one order
+// leaves.
 //
 // WHY barstate.isconfirmed + alert.freq_all, when everything else here uses freq_once_per_bar: once_per_bar
 // lets only the FIRST alert() of the bar out, which would silently swallow the average-down order. freq_all
@@ -1505,22 +1515,38 @@ if autoOn and ordersOn and closeNow
 // at the break, while the Strategy Tester would keep using the one at the fill.)
 orbArm = armLimits and runORB and or_placed and not or_placed[1] and not na(or_e1) and not na(or_zstop) and or_dir != 0
 ibArm  = armLimits and runIB  and ib_placed and not ib_placed[1] and not na(ib_e1) and not na(ib_zstop) and ib_dir != 0
+// DIAGNOSTIC LABEL, drawn on the arm bar itself and kept in history (unlike the "last payload" label below,
+// which just shows whatever fired most recently and gets overwritten by the next event). Answers exactly one
+// question when you scroll back to a specific break: did the avg-down alert actually fire from Pine, or did
+// this setup never have one to begin with (a deep close, one unit only)? If it says "sent" and the broker still
+// only shows one resting order, the drop is happening downstream of TradingView (PickMyTrade/Tradovate), not
+// in this script - check the order log there.
+f_armLbl(float y, string nm, bool addSent, bool useAdd) =>
+    string txt = nm + " armed: entry limit sent" + (addSent ? " | avg-down limit sent" : useAdd ? " | avg-down SKIPPED (sizing < 1 contract)" : " | avg-down SKIPPED (deep close - one unit only, no add on this setup)")
+    label.new(bar_index, y, txt, style = label.style_label_down, color = color.new(color.blue, 70), textcolor = color.white, size = size.tiny)
+
 if autoOn and ordersOn and barstate.isconfirmed and orbArm
     orbArmTP  = f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
     orbArmAct = or_dir == 1 ? "buy" : "sell"
     pmtLast := f_pmt(orbArmAct, orbSz1, or_zstop, orbArmTP, false, "limit", or_e1)
     alert(pmtLast, alert.freq_all)
-    if or_useAdd and orbSz2 >= 1
-        pmtLast := f_pmt(orbArmAct, orbSz2, or_zstop, orbArmTP, true, "limit", or_e2)
+    orbAddSent = or_useAdd and orbSz2 >= 1
+    if orbAddSent
+        pmtLast := f_pmt(orbArmAct, orbSz2, or_zstop, orbArmTP, false, "limit", or_e2)
         alert(pmtLast, alert.freq_all)
+    if pmtDebug
+        f_armLbl(or_e1, "ORB", orbAddSent, or_useAdd)
 if autoOn and ordersOn and barstate.isconfirmed and ibArm
     ibArmTP  = f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
     ibArmAct = ib_dir == 1 ? "buy" : "sell"
     pmtLast := f_pmt(ibArmAct, ibSz1, ib_zstop, ibArmTP, false, "limit", ib_e1)
     alert(pmtLast, alert.freq_all)
-    if ib_useAdd and ibSz2 >= 1
-        pmtLast := f_pmt(ibArmAct, ibSz2, ib_zstop, ibArmTP, true, "limit", ib_e2)
+    ibAddSent = ib_useAdd and ibSz2 >= 1
+    if ibAddSent
+        pmtLast := f_pmt(ibArmAct, ibSz2, ib_zstop, ibArmTP, false, "limit", ib_e2)
         alert(pmtLast, alert.freq_all)
+    if pmtDebug
+        f_armLbl(ib_e1, "IB", ibAddSent, ib_useAdd)
 
 // PULLING A WORKING ORDER. An armed setup that never fills has to have its resting order taken off the broker,
 // or it is still there tomorrow. With the carry gone the commonest case is the 10:30 hand-over: orbWin shuts as
