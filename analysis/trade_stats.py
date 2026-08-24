@@ -439,8 +439,17 @@ def markdown_report(mets: list[dict], joined: dict, extra: dict, sig: dict[str, 
 
 # --------------------------------------------------------------------------- #
 
-def analyse(files: list[str], commission_per_contract_side: float = 1.0) -> dict:
-    """Run the full analysis and return every piece the reporters need."""
+def analyse(files: list[str], commission_per_contract_side: float = 1.0,
+            joined_capital: float | None = None) -> dict:
+    """Run the full analysis and return every piece the reporters need.
+
+    By default the joined book is priced as separately funded accounts (each
+    strategy keeps its own tester capital, summed). Pass `joined_capital` to
+    price it instead as every strategy trading out of one shared account of
+    that size — e.g. running both strategies' signals on a single $30k account.
+    Only the capital denominator changes: the same trades, in the same size,
+    are assumed to fire regardless of account structure.
+    """
     trades = [load_trades(f) for f in files]
     raw_comm = {t.attrs["name"]: float(t["commission"].sum()) for t in trades}
     trades = [apply_commission(t, commission_per_contract_side) for t in trades]
@@ -452,7 +461,9 @@ def analyse(files: list[str], commission_per_contract_side: float = 1.0) -> dict
     mets = [metrics(t, t.attrs["capital"], index, t.attrs["name"]) for t in trades]
 
     joined_trades = pd.concat(trades, ignore_index=True).sort_values("exit_time")
-    joined_capital = sum(t.attrs["capital"] for t in trades)
+    shared_account = joined_capital is not None
+    if joined_capital is None:
+        joined_capital = sum(t.attrs["capital"] for t in trades)
     joined = metrics(joined_trades, joined_capital, index, "JOINED")
 
     # Diversification / concurrency
@@ -478,6 +489,7 @@ def analyse(files: list[str], commission_per_contract_side: float = 1.0) -> dict
     monthly_table.index = monthly_table.index.strftime("%Y-%m")
 
     extra = {
+        "shared_account": shared_account,
         "commission_rate": commission_per_contract_side,
         "raw_commission": raw_comm,
         "corr": corr,
@@ -504,9 +516,12 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--commission-per-contract-side", type=float, default=1.0,
                     help="normalise every export to this commission rate (default $1.00)")
     ap.add_argument("--out-dir", default="analysis/out")
+    ap.add_argument("--joined-capital", type=float, default=None,
+                    help="price the joined book on one shared account of this size "
+                         "instead of the strategies' summed tester capital")
     args = ap.parse_args(argv)
 
-    res = analyse(args.files, args.commission_per_contract_side)
+    res = analyse(args.files, args.commission_per_contract_side, args.joined_capital)
     mets, joined, extra, sig = res["metrics"], res["joined"], res["extra"], res["signals"]
 
     os.makedirs(args.out_dir, exist_ok=True)

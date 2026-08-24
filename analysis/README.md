@@ -56,3 +56,19 @@ Options (both scripts):
 | `report_template.html` | Page layout, styles and chart code; placeholders filled by `build_report.py` |
 | `data/` | The TradingView exports the current report was built from |
 | `out/` | Generated reports |
+
+## Single shared-account scenario
+
+To price the joined book as **one account trading both strategies** instead of
+two separately funded accounts summed, pass `--joined-capital`:
+
+```bash
+python3 analysis/build_report.py analysis/data/*.csv --joined-capital 30000 \
+  --out analysis/out/joined_performance_30k_shared_account.html
+```
+
+Only the capital denominator for the joined column changes — same trades, same
+contract sizes. Percentage returns, drawdown % and worst-day % move; Sharpe and
+Sortino don't (they're scale-invariant to a constant capital divisor). The
+report's capital-base and tail-risk notes switch to describing margin/leverage
+on the shared account rather than comparing two separate capital bases.

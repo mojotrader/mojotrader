@@ -187,14 +187,18 @@ def monthly_html(mt: pd.DataFrame) -> str:
     return "".join(out)
 
 
-def cards_html(all_m: list[dict]) -> str:
+def cards_html(all_m: list[dict], shared_account: bool) -> str:
     out = []
     n_books = len(all_m) - 1
     for i, m in enumerate(all_m):
         kind = "joined" if m["label"] == "JOINED" else f"s{i + 1}"
         name = "Joined book" if m["label"] == "JOINED" else short(m["label"])
-        sub = (f'{n_books} funded accounts · {ts.money(m["capital"])} total' if m["label"] == "JOINED"
-               else f'{m["trades"]} trades · {ts.money(m["capital"])} base')
+        if m["label"] != "JOINED":
+            sub = f'{m["trades"]} trades · {ts.money(m["capital"])} base'
+        elif shared_account:
+            sub = f'both strategies · one {ts.money(m["capital"])} account'
+        else:
+            sub = f'{n_books} funded accounts · {ts.money(m["capital"])} total'
         out.append(f'''<article class="card {kind}">
   <header><span class="swatch"></span><h3>{esc(name)}</h3></header>
   <p class="sub">{esc(sub)}</p>
@@ -242,8 +246,15 @@ def note_commission(mets: list[dict], extra: dict, joined: dict) -> str:
             f'<strong>{ts.money(abs(worst[2] - worst[1]))}</strong> against its raw net profit.' + tail)
 
 
-def note_capital(mets: list[dict], joined: dict) -> str:
+def note_capital(mets: list[dict], joined: dict, extra: dict) -> str:
     a, b = mets
+    if extra["shared_account"]:
+        return (f'The joined column here is <strong>one {ts.money(joined["capital"])} account</strong> trading '
+                f'both strategies\' signals side by side — not two separately funded accounts summed. Same '
+                f'trades, same contract sizes, smaller denominator: net profit is unchanged in dollars but '
+                f'every percentage figure (return, drawdown %, worst day %) is now measured against '
+                f'{ts.money(joined["capital"])} instead of the strategies\' combined tester capital, so it '
+                f'reads as more leveraged. Check the margin note below before sizing this for real.')
     if a["capital"] == b["capital"]:
         return (f'Both testers ran the same <strong>{ts.money(a["capital"])}</strong> account, so the '
                 f'percentage returns are directly comparable — {short(a["label"])}\'s {ts.pct(a["ann_return_pct"])} '
@@ -262,14 +273,24 @@ def note_capital(mets: list[dict], joined: dict) -> str:
 
 def note_tail(mets: list[dict], joined: dict, extra: dict) -> str:
     w = min(mets, key=lambda m: m["worst_day_pct"])
+    peak = (f'<strong>{extra["max_concurrent_contracts"]} concurrent contracts</strong> '
+            f'({ts.money(extra["max_concurrent_notional"])} notional)')
+    if extra["shared_account"]:
+        lev = extra["max_concurrent_notional"] / joined["capital"]
+        return (f'On {ts.money(joined["capital"])} of capital, the book peaks at {peak} open at once — '
+                f'{lev:.1f}× the account in notional. That is what your broker\'s intraday margin has to '
+                f'cover, not the {ts.num(joined["avg_size"], 2)}-contract average; check it against your '
+                f'actual margin schedule before running this live, since a margin call would force an exit '
+                f'neither strategy chose. The joined book\'s worst day here was '
+                f'<strong>{ts.money(joined["worst_day"])}</strong>, {ts.pct(abs(joined["worst_day_pct"]))} of '
+                f'{ts.money(joined["capital"])} — and that figure, like max drawdown, is measured on '
+                f'closed-trade equity, so it understates what the account saw while positions were open.')
     return (f'{short(w["label"])}\'s worst single day was <strong>{ts.money(w["worst_day"])}</strong>, '
             f'{ts.pct(abs(w["worst_day_pct"]))} of its stated capital, and it runs up to {w["max_size"]} '
             f'contracts. A book that can lose that much of its account in one session is sized for the '
-            f'backtest\'s best case, not for a gap. The joined book\'s peak of '
-            f'<strong>{extra["max_concurrent_contracts"]} concurrent contracts</strong> '
-            f'({ts.money(extra["max_concurrent_notional"])} notional) is the number to check margin against, '
-            f'not the {ts.num(joined["avg_size"], 2)} average. Drawdowns here are measured on closed-trade '
-            f'equity, so they understate what the account saw while positions were open.')
+            f'backtest\'s best case, not for a gap. The joined book\'s peak of {peak} is the number to check '
+            f'margin against, not the {ts.num(joined["avg_size"], 2)} average. Drawdowns here are measured on '
+            f'closed-trade equity, so they understate what the account saw while positions were open.')
 
 
 def note_sample(joined: dict) -> str:
@@ -293,6 +314,15 @@ def lede_sides(mets: list[dict]) -> str:
 
 
 def standfirst_tail(extra: dict, joined: dict, mets: list[dict]) -> str:
+    if extra["shared_account"]:
+        worse = joined["max_dd_pct"] > max(m["max_dd_pct"] for m in mets)
+        if worse:
+            tail = (" — worse than either strategy sees on its own capital, because the same drawdown "
+                     "dollars now sit on a smaller base")
+        else:
+            tail = (" — still gentler than either strategy alone, even squeezed onto one account, because "
+                     f'at a {extra["corr"]:.2f} daily correlation their losing days rarely land together')
+        return f'That is measured against the single {ts.money(joined["capital"])} account{tail}.'
     better = joined["max_dd_pct"] < min(m["max_dd_pct"] for m in mets)
     if better and extra["corr"] < 0.4:
         return ("That is a shallower drawdown than either book runs on its own, because at a "
@@ -310,9 +340,12 @@ def main(argv: list[str]) -> int:
     ap.add_argument("files", nargs="+")
     ap.add_argument("--commission-per-contract-side", type=float, default=1.0)
     ap.add_argument("--out", default="analysis/out/joined_performance.html")
+    ap.add_argument("--joined-capital", type=float, default=None,
+                    help="price the joined book on one shared account of this size "
+                         "instead of the strategies' summed tester capital")
     args = ap.parse_args(argv)
 
-    res = ts.analyse(args.files, args.commission_per_contract_side)
+    res = ts.analyse(args.files, args.commission_per_contract_side, args.joined_capital)
     mets, joined, extra, sig = res["metrics"], res["joined"], res["extra"], res["signals"]
     all_m = mets + [joined]
 
@@ -348,7 +381,7 @@ def main(argv: list[str]) -> int:
     html = open(TEMPLATE).read()
     repl = {
         "__CHART_DATA__": json.dumps(chart),
-        "__CARDS__": cards_html(all_m),
+        "__CARDS__": cards_html(all_m, extra["shared_account"]),
         "__MATRIX__": matrix_html(all_m),
         "__SIDES__": side_html(all_m),
         "__MONTHLY__": monthly_html(mt),
@@ -361,7 +394,7 @@ def main(argv: list[str]) -> int:
         "__COMM__": f'${extra["commission_rate"]:.2f}',
         "__COMM_RT__": f'${extra["commission_rate"] * 2:.2f}',
         "__NOTE_COMMISSION__": note_commission(mets, extra, joined),
-        "__NOTE_CAPITAL__": note_capital(mets, joined),
+        "__NOTE_CAPITAL__": note_capital(mets, joined, extra),
         "__NOTE_TAIL__": note_tail(mets, joined, extra),
         "__NOTE_SAMPLE__": note_sample(joined),
         "__LEDE_SIDES__": lede_sides(mets),

@@ -1,0 +1,723 @@
+<title>Halyard × QuantFlow</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+:root {
+  color-scheme: light;
+  --bg:            #f5f6f8;
+  --panel:         #ffffff;
+  --panel-2:       #fafbfc;
+  --ink:           #111721;
+  --ink-2:         #59636f;
+  --ink-3:         #8b95a1;
+  --rule:          #e3e7eb;
+  --rule-strong:   #cfd6dd;
+  --s1:            #2a78d6;
+  --s2:            #eb6834;
+  --s3:            #1baf7a;
+  --neg:           #cc3a3a;
+  --grid:          #eceff2;
+  --shadow:        0 1px 2px rgba(17,23,33,.05), 0 8px 24px -16px rgba(17,23,33,.22);
+  --maxw:          1180px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --bg:          #101319;
+    --panel:       #181c23;
+    --panel-2:     #1d222a;
+    --ink:         #eef1f5;
+    --ink-2:       #a2acb9;
+    --ink-3:       #6f7a87;
+    --rule:        #272d36;
+    --rule-strong: #39414c;
+    --s1:          #3987e5;
+    --s2:          #d95926;
+    --s3:          #199e70;
+    --neg:         #e8807f;
+    --grid:        #21262e;
+    --shadow:      0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.7);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg:          #101319;
+  --panel:       #181c23;
+  --panel-2:     #1d222a;
+  --ink:         #eef1f5;
+  --ink-2:       #a2acb9;
+  --ink-3:       #6f7a87;
+  --rule:        #272d36;
+  --rule-strong: #39414c;
+  --s1:          #3987e5;
+  --s2:          #d95926;
+  --s3:          #199e70;
+  --neg:         #e8807f;
+  --grid:        #21262e;
+  --shadow:      0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.7);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px 96px; }
+
+h1, h2, h3, .hero { font-family: Archivo, "IBM Plex Sans", ui-sans-serif, sans-serif; }
+
+/* ---------- masthead ---------- */
+.mast {
+  border-bottom: 1px solid var(--rule);
+  background: var(--panel);
+  margin-bottom: 40px;
+}
+.mast .wrap { padding-top: 40px; padding-bottom: 32px; display: flex; flex-direction: column; gap: 18px; }
+.ticker {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px; font-weight: 500; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--ink-3);
+  display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center;
+}
+.ticker .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--s3); display: inline-block; flex: none; }
+.ticker > span:not(.dot) { white-space: nowrap; }
+h1 {
+  margin: 0; font-size: clamp(34px, 5vw, 52px); font-weight: 700;
+  letter-spacing: -.025em; line-height: 1.03; text-wrap: balance;
+}
+h1 .x { color: var(--ink-3); font-weight: 500; }
+.standfirst {
+  margin: 0; max-width: 66ch; color: var(--ink-2); font-size: 17px; line-height: 1.5;
+}
+.standfirst strong { color: var(--ink); font-weight: 600; }
+
+/* ---------- sections ---------- */
+section { margin-top: 56px; }
+.eyebrow {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px; font-weight: 500; letter-spacing: .16em; text-transform: uppercase;
+  color: var(--ink-3); margin: 0 0 6px;
+  display: flex; align-items: center; gap: 10px;
+}
+.eyebrow::after { content: ""; flex: 1; height: 1px; background: var(--rule); }
+h2 { margin: 0 0 6px; font-size: 25px; font-weight: 600; letter-spacing: -.015em; }
+.lede { margin: 0 0 22px; color: var(--ink-2); max-width: 72ch; }
+
+/* ---------- cards ---------- */
+.cards { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(258px, 1fr)); }
+.cards > *, .facts > * { min-width: 0; }
+.card {
+  background: var(--panel); border: 1px solid var(--rule); border-radius: 10px;
+  padding: 20px; box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 2px;
+}
+.card header { display: flex; align-items: center; gap: 9px; }
+.card h3 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -.005em; }
+.swatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.card.s1 .swatch { background: var(--s1); }
+.card.s2 .swatch { background: var(--s2); }
+.card.joined .swatch { background: var(--s3); }
+.card.joined { border-color: var(--rule-strong); background: var(--panel-2); }
+.card .sub { margin: 0 0 14px; font-size: 12.5px; color: var(--ink-3); }
+.card .hero {
+  margin: 0; font-size: 34px; font-weight: 700; letter-spacing: -.03em; line-height: 1.05;
+  font-variant-numeric: tabular-nums;
+}
+.card .heroSub { margin: 4px 0 16px; font-size: 12.5px; color: var(--ink-2); }
+.card dl { margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 12px 14px;
+           padding-top: 15px; border-top: 1px solid var(--rule); }
+.card dl div { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.card dt { font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-3); }
+.card dd { margin: 0; font-family: "IBM Plex Mono", monospace; font-size: 14px; font-weight: 500;
+           font-variant-numeric: tabular-nums; }
+.card dd .dim { color: var(--ink-3); font-weight: 400; }
+
+/* ---------- charts ---------- */
+.chartbox {
+  position: relative; background: var(--panel); border: 1px solid var(--rule);
+  border-radius: 10px; padding: 18px 18px 10px; box-shadow: var(--shadow);
+}
+.chartbox + .chartbox { margin-top: 14px; }
+.chart-head { display: flex; flex-wrap: wrap; justify-content: space-between;
+              align-items: baseline; gap: 10px; margin-bottom: 6px; }
+.chart-title { font-size: 13px; font-weight: 600; }
+.chart-note { font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 2px 0 10px; }
+.legend span { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--ink-2); }
+.legend i { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
+svg { display: block; width: 100%; overflow: visible; }
+svg text { font-family: "IBM Plex Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+.tip {
+  position: absolute; pointer-events: none; opacity: 0; transition: opacity .1s;
+  background: var(--panel); border: 1px solid var(--rule-strong); border-radius: 7px;
+  box-shadow: var(--shadow); padding: 9px 11px; font-size: 12.5px; min-width: 168px;
+  z-index: 5; font-variant-numeric: tabular-nums;
+}
+.tip.on { opacity: 1; }
+.tip .t-date { font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--ink-3);
+               letter-spacing: .04em; margin-bottom: 6px; }
+.tip .t-row { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+.tip .t-row b { font-weight: 500; color: var(--ink-2); display: flex; align-items: center; gap: 7px; }
+.tip .t-row i { width: 9px; height: 3px; border-radius: 2px; }
+.tip .t-row var { font-style: normal; font-family: "IBM Plex Mono", monospace; font-weight: 500; }
+
+/* ---------- tables ---------- */
+.scroll { overflow-x: auto; background: var(--panel); border: 1px solid var(--rule);
+          border-radius: 10px; box-shadow: var(--shadow); }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+thead th {
+  text-align: right; font-weight: 600; font-size: 11px; letter-spacing: .07em;
+  text-transform: uppercase; color: var(--ink-3); padding: 13px 16px;
+  border-bottom: 1px solid var(--rule-strong); white-space: nowrap; background: var(--panel);
+}
+thead th:first-child { text-align: left; }
+tbody th {
+  text-align: left; font-weight: 400; color: var(--ink-2); padding: 8px 16px;
+  white-space: nowrap; border-bottom: 1px solid var(--rule);
+}
+tbody td { padding: 8px 16px; border-bottom: 1px solid var(--rule); }
+tbody tr:last-child th, tbody tr:last-child td { border-bottom: 0; }
+td.num { text-align: right; font-family: "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums;
+         white-space: nowrap; }
+tbody tr:hover td, tbody tr:hover th { background: var(--panel-2); }
+tr.grp th {
+  background: var(--panel-2); color: var(--ink); font-family: Archivo, sans-serif;
+  font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase;
+  padding: 11px 16px; border-bottom: 1px solid var(--rule-strong);
+  border-top: 1px solid var(--rule-strong);
+}
+tr.grp:first-child th { border-top: 0; }
+.matrix tbody th { color: var(--ink); }
+.joined-col { background: color-mix(in srgb, var(--s3) 6%, transparent); }
+tbody tr:hover td.joined-col { background: color-mix(in srgb, var(--s3) 11%, transparent); }
+thead th.joined-col { color: var(--ink); }
+td.best { font-weight: 600; }
+td.best::after { content: " ●"; color: var(--s3); font-size: 8px; vertical-align: middle; }
+.joined-row th, .joined-row td { background: color-mix(in srgb, var(--s3) 6%, transparent); }
+.pos { color: var(--ink); }
+.neg { color: var(--neg); }
+.flat { color: var(--ink-3); }
+.side { font-family: "IBM Plex Mono", monospace; font-size: 11px; letter-spacing: .06em;
+        text-transform: uppercase; padding: 2px 7px; border-radius: 4px; border: 1px solid var(--rule-strong);
+        color: var(--ink-2); }
+.side-long { border-color: color-mix(in srgb, var(--s1) 45%, var(--rule-strong)); }
+.side-short { border-color: color-mix(in srgb, var(--s2) 45%, var(--rule-strong)); }
+.barcell { width: 168px; min-width: 130px; position: relative; white-space: nowrap; }
+.bar { display: inline-block; height: 8px; border-radius: 0 3px 3px 0; vertical-align: middle;
+       max-width: calc(100% - 40px); }
+.pair-a .bar-pos { background: color-mix(in srgb, var(--s1) 62%, transparent); }
+.pair-b .bar-pos { background: color-mix(in srgb, var(--s2) 62%, transparent); }
+.bar-pos { background: color-mix(in srgb, var(--s1) 62%, transparent); }
+.bar-neg { background: color-mix(in srgb, var(--neg) 62%, transparent); }
+.barpct { font-family: "IBM Plex Mono", monospace; font-size: 11.5px; color: var(--ink-3);
+          margin-left: 8px; vertical-align: middle; }
+.months tbody th { font-family: "IBM Plex Mono", monospace; color: var(--ink); }
+
+/* ---------- callouts ---------- */
+.facts { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.fact { background: var(--panel); border: 1px solid var(--rule); border-radius: 10px;
+        padding: 17px 18px; box-shadow: var(--shadow); }
+.fact .k { margin: 0 0 5px; font-size: 11px; letter-spacing: .07em; text-transform: uppercase;
+           color: var(--ink-3); }
+.fact .v { margin: 0; font-family: Archivo, sans-serif; font-size: 27px; font-weight: 700;
+           letter-spacing: -.02em; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.fact .n { margin: 6px 0 0; font-size: 12.5px; color: var(--ink-2); line-height: 1.45; }
+
+.notes { display: grid; gap: 0; background: var(--panel); border: 1px solid var(--rule);
+         border-radius: 10px; box-shadow: var(--shadow); overflow: hidden; }
+.note { padding: 17px 20px; border-bottom: 1px solid var(--rule); display: grid;
+        grid-template-columns: 132px 1fr; gap: 4px 22px; align-items: start; }
+.note:last-child { border-bottom: 0; }
+.note h4 { margin: 0; font-family: "IBM Plex Mono", monospace; font-size: 11px; font-weight: 500;
+           letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); padding-top: 3px; }
+.note p { margin: 0; color: var(--ink-2); max-width: 76ch; }
+.note p strong { color: var(--ink); font-weight: 600; }
+.note p + p { margin-top: 8px; }
+@media (max-width: 640px) {
+  .note { grid-template-columns: 1fr; }
+  .note h4 { padding-top: 0; }
+}
+
+.pair { display: grid; gap: 30px; grid-template-columns: 1fr; }
+.pair > div { min-width: 0; }   /* keep the scroll containers from setting the page width */
+.pair h3 { margin: 0 0 4px; font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 9px; }
+.pair h3 .swatch { width: 9px; height: 9px; }
+.pair .h3sub { margin: 0 0 11px; font-size: 12.5px; color: var(--ink-3); }
+.pair-a h3 .swatch { background: var(--s1); }
+.pair-b h3 .swatch { background: var(--s2); }
+
+footer { margin-top: 64px; padding-top: 22px; border-top: 1px solid var(--rule);
+         color: var(--ink-3); font-size: 12.5px; display: flex; flex-wrap: wrap; gap: 6px 20px; }
+footer code { font-family: "IBM Plex Mono", monospace; font-size: 12px; color: var(--ink-2); }
+a { color: var(--s1); }
+:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; border-radius: 3px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+
+<header class="mast">
+  <div class="wrap">
+    <p class="ticker"><span class="dot"></span><span>CME_MINI · MNQ1!</span><span>2025-08-20 → 2026-08-21</span><span>1.00 years</span><span>771 round turns</span></p>
+    <h1>Halyard <span class="x">×</span> QuantFlow V3</h1>
+    <p class="standfirst">Two intraday MNQ strategies measured apart and then as one book. Run together on
+      <strong>$30,000</strong> they returned <strong>$89,892</strong> (299.0% annualised)
+      against a 3.9% worst drawdown. That is measured against the single $30,000 account — still gentler than either strategy alone, even squeezed onto one account, because at a 0.14 daily correlation their losing days rarely land together.</p>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <section id="headline" style="margin-top:0">
+    <p class="eyebrow">Headline</p>
+    <h2>Where each book stands</h2>
+    <p class="lede">Every figure below is re-priced at a single commission rate so the two exports are
+      comparable. Returns are on fixed (non-compounding) capital, matching how the strategies size positions.</p>
+    <div class="cards"><article class="card s1">
+  <header><span class="swatch"></span><h3>Halyard</h3></header>
+  <p class="sub">513 trades · $30,000 base</p>
+  <p class="hero">$50,800</p>
+  <p class="heroSub">net profit · 169.0% annualised</p>
+  <dl>
+    <div><dt>Profit factor</dt><dd>1.90</dd></div>
+    <div><dt>Max drawdown</dt><dd>$3,098 <span class="dim">(4.0%)</span></dd></div>
+    <div><dt>Sharpe</dt><dd>4.58</dd></div>
+    <div><dt>Win rate</dt><dd>64.9%</dd></div>
+  </dl>
+</article>
+<article class="card s2">
+  <header><span class="swatch"></span><h3>QuantFlow V3</h3></header>
+  <p class="sub">258 trades · $30,000 base</p>
+  <p class="hero">$39,092</p>
+  <p class="heroSub">net profit · 130.0% annualised</p>
+  <dl>
+    <div><dt>Profit factor</dt><dd>2.04</dd></div>
+    <div><dt>Max drawdown</dt><dd>$3,666 <span class="dim">(5.0%)</span></dd></div>
+    <div><dt>Sharpe</dt><dd>3.50</dd></div>
+    <div><dt>Win rate</dt><dd>64.7%</dd></div>
+  </dl>
+</article>
+<article class="card joined">
+  <header><span class="swatch"></span><h3>Joined book</h3></header>
+  <p class="sub">both strategies · one $30,000 account</p>
+  <p class="hero">$89,892</p>
+  <p class="heroSub">net profit · 299.0% annualised</p>
+  <dl>
+    <div><dt>Profit factor</dt><dd>1.96</dd></div>
+    <div><dt>Max drawdown</dt><dd>$4,636 <span class="dim">(3.9%)</span></dd></div>
+    <div><dt>Sharpe</dt><dd>5.31</dd></div>
+    <div><dt>Win rate</dt><dd>64.9%</dd></div>
+  </dl>
+</article></div>
+  </section>
+
+  <section id="equity">
+    <p class="eyebrow">Equity</p>
+    <h2>Cumulative profit</h2>
+    <p class="lede">Closed-trade PnL booked on the exit date, starting from zero. The joined line is the
+      arithmetic sum of the two books, run side by side.</p>
+    <div class="chartbox">
+      <div class="chart-head">
+        <span class="chart-title">Cumulative net profit</span>
+        <span class="chart-note">USD · hover for a date</span>
+      </div>
+      <div class="legend" id="lg-eq"></div>
+      <div id="c-equity"></div>
+      <div class="tip" id="tip-equity"></div>
+    </div>
+  </section>
+
+  <section id="risk">
+    <p class="eyebrow">Risk</p>
+    <h2>Time spent under water</h2>
+    <p class="lede">Distance below the running equity peak, in dollars. Shown as three panels rather than
+      three overlaid areas — what matters is the shape and length of each book's holes, not their overlap.</p>
+    <div id="c-dd"></div>
+  </section>
+
+  <section id="diversification">
+    <p class="eyebrow">Diversification</p>
+    <h2>What joining them actually buys</h2>
+    <p class="lede">The case for running both is not extra profit — it is that the profit arrives on
+      different days.</p>
+    <div class="facts">
+      <div class="fact">
+        <p class="k">Daily PnL correlation</p>
+        <p class="v">0.14</p>
+        <p class="n">Near-independent. They traded together on 154 of 267 active days.</p>
+      </div>
+      <div class="fact">
+        <p class="k">Drawdown saved</p>
+        <p class="v">$2,128</p>
+        <p class="n">Standalone drawdowns sum to $6,764; the joined book bottomed at $4,636.</p>
+      </div>
+      <div class="fact">
+        <p class="k">Sharpe, blended</p>
+        <p class="v">5.31</p>
+        <p class="n">Against 4.04 for the capital-weighted average of the two standalone books.</p>
+      </div>
+      <div class="fact">
+        <p class="k">Peak concurrent size</p>
+        <p class="v">11 <span style="font-size:15px;font-weight:500;color:var(--ink-3)">contracts</span></p>
+        <p class="n">$618,292 notional at the busiest moment — the margin the joined book must carry.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="matrix">
+    <p class="eyebrow">Full metric set</p>
+    <h2>Every number, side by side</h2>
+    <p class="lede">A dot marks the better of the two strategies on each comparable row. The joined column is
+      the combined book, not an average.</p>
+    <div class="scroll"><table class="matrix"><thead><tr><th>Metric</th><th>Halyard</th><th>QuantFlow V3</th><th class="joined-col">JOINED</th></tr></thead><tbody><tr class="grp"><th colspan="4">Return</th></tr><tr><th>Net profit</th><td class="num">$50,800</td><td class="num">$39,092</td><td class="num joined-col">$89,892</td></tr><tr><th>Net profit % of capital</th><td class="num">169.3%</td><td class="num">130.3%</td><td class="num joined-col">299.6%</td></tr><tr><th>Annualised return</th><td class="num">169.0%</td><td class="num">130.0%</td><td class="num joined-col">299.0%</td></tr><tr><th>Gross profit</th><td class="num">$106,984</td><td class="num">$76,566</td><td class="num joined-col">$183,550</td></tr><tr><th>Gross loss</th><td class="num">-$56,184</td><td class="num">-$37,474</td><td class="num joined-col">-$93,658</td></tr><tr><th>Profit factor</th><td class="num">1.90</td><td class="num best">2.04</td><td class="num joined-col">1.96</td></tr><tr><th>Commission paid</th><td class="num">$2,924</td><td class="num">$1,548</td><td class="num joined-col">$4,472</td></tr><tr><th>Commission % of gross profit</th><td class="num">2.7%</td><td class="num">2.0%</td><td class="num joined-col">2.4%</td></tr><tr class="grp"><th colspan="4">Risk</th></tr><tr><th>Max drawdown</th><td class="num">$3,098 (4.0%)</td><td class="num">$3,666 (5.0%)</td><td class="num joined-col">$4,636 (3.9%)</td></tr><tr><th>Max drawdown trough</th><td class="num">2026-07-29</td><td class="num">2026-08-17</td><td class="num joined-col">2026-07-29</td></tr><tr><th>Longest drawdown</th><td class="num">30 days</td><td class="num">44 days</td><td class="num joined-col">26 days</td></tr><tr><th>Recovery factor (profit / max DD)</th><td class="num best">16.40</td><td class="num">10.66</td><td class="num joined-col">19.39</td></tr><tr><th>Calmar ratio</th><td class="num best">42.06</td><td class="num">25.78</td><td class="num joined-col">76.13</td></tr><tr><th>Sharpe ratio (daily, ann.)</th><td class="num best">4.58</td><td class="num">3.50</td><td class="num joined-col">5.31</td></tr><tr><th>Sortino ratio (daily, ann.)</th><td class="num best">7.88</td><td class="num">7.09</td><td class="num joined-col">11.08</td></tr><tr><th>Largest loss</th><td class="num">-$1,396 (-4.7% of capital)</td><td class="num">-$1,040 (-3.5% of capital)</td><td class="num joined-col">-$1,396 (-4.7% of capital)</td></tr><tr><th>Worst day % of capital</th><td class="num">-9.7%</td><td class="num">-5.3%</td><td class="num joined-col">-9.7%</td></tr><tr><th>Max consecutive losses</th><td class="num">5</td><td class="num">6</td><td class="num joined-col">7</td></tr><tr><th>Trade PnL std dev</th><td class="num">$375</td><td class="num">$515</td><td class="num joined-col">$427</td></tr><tr class="grp"><th colspan="4">Trade quality</th></tr><tr><th>Trades</th><td class="num">513</td><td class="num">258</td><td class="num joined-col">771</td></tr><tr><th>Trades / month</th><td class="num">42.7</td><td class="num">21.5</td><td class="num joined-col">64.1</td></tr><tr><th>Win rate</th><td class="num best">64.9%</td><td class="num">64.7%</td><td class="num joined-col">64.9%</td></tr><tr><th>Wins / losses / scratches</th><td class="num">333 / 180 / 0</td><td class="num">167 / 91 / 0</td><td class="num joined-col">500 / 271 / 0</td></tr><tr><th>Avg trade (expectancy)</th><td class="num">$99</td><td class="num">$152</td><td class="num joined-col">$117</td></tr><tr><th>Median trade</th><td class="num">$154</td><td class="num">$187</td><td class="num joined-col">$166</td></tr><tr><th>Avg win</th><td class="num">$321</td><td class="num">$458</td><td class="num joined-col">$367</td></tr><tr><th>Avg loss</th><td class="num">-$312</td><td class="num">-$412</td><td class="num joined-col">-$346</td></tr><tr><th>Payoff ratio (avg win / avg loss)</th><td class="num">1.03</td><td class="num best">1.11</td><td class="num joined-col">1.06</td></tr><tr><th>Expectancy in R (avg loss = 1R)</th><td class="num">0.32</td><td class="num best">0.37</td><td class="num joined-col">0.34</td></tr><tr><th>Largest win</th><td class="num">$1,267</td><td class="num">$1,548</td><td class="num joined-col">$1,548</td></tr><tr><th>Max consecutive wins</th><td class="num">11</td><td class="num">11</td><td class="num joined-col">17</td></tr><tr class="grp"><th colspan="4">Consistency</th></tr><tr><th>Best day / worst day</th><td class="num">$2,032 / -$2,898</td><td class="num">$2,079 / -$1,578</td><td class="num joined-col">$3,598 / -$2,898</td></tr><tr><th>Winning days</th><td class="num best">70.4%</td><td class="num">61.2%</td><td class="num joined-col">70.0%</td></tr><tr><th>Best month / worst month</th><td class="num">$11,860 / -$111</td><td class="num">$7,108 / -$2,994</td><td class="num joined-col">$18,968 / -$196</td></tr><tr><th>Positive months</th><td class="num">12 / 13</td><td class="num">10 / 13</td><td class="num joined-col">12 / 13</td></tr><tr class="grp"><th colspan="4">Execution &amp; exposure</th></tr><tr><th>Starting capital</th><td class="num">$30,000</td><td class="num">$30,000</td><td class="num joined-col">$30,000</td></tr><tr><th>Avg position size</th><td class="num">2.85 contracts</td><td class="num">3.00 contracts</td><td class="num joined-col">2.90 contracts</td></tr><tr><th>Max position size</th><td class="num">4 contracts</td><td class="num">3 contracts</td><td class="num joined-col">4 contracts</td></tr><tr><th>Avg MFE (max favourable excursion)</th><td class="num">$271</td><td class="num">$415</td><td class="num joined-col">$319</td></tr><tr><th>Avg MAE (max adverse excursion)</th><td class="num">$207</td><td class="num">$269</td><td class="num joined-col">$228</td></tr><tr><th>Edge ratio (MFE / MAE)</th><td class="num">1.31</td><td class="num best">1.54</td><td class="num joined-col">1.40</td></tr><tr><th>Avg hold time</th><td class="num">95 min</td><td class="num">222 min</td><td class="num joined-col">138 min</td></tr><tr><th>Median hold time</th><td class="num">46 min</td><td class="num">40 min</td><td class="num joined-col">45 min</td></tr><tr><th>Time in market</th><td class="num">8.0%</td><td class="num">9.8%</td><td class="num joined-col">16.3%</td></tr><tr><th>Trades held past the session</th><td class="num">2 (0.4%)</td><td class="num">12 (4.7%)</td><td class="num joined-col">14 (1.8%)</td></tr></tbody></table></div>
+  </section>
+
+  <section id="monthly">
+    <p class="eyebrow">Consistency</p>
+    <h2>Month by month</h2>
+    <p class="lede">Thirteen calendar months, both books.</p>
+    <div class="chartbox">
+      <div class="chart-head">
+        <span class="chart-title">Monthly net profit</span>
+        <span class="chart-note">USD · hover a month</span>
+      </div>
+      <div class="legend" id="lg-mo"></div>
+      <div id="c-monthly"></div>
+      <div class="tip" id="tip-monthly"></div>
+    </div>
+    <div style="margin-top:14px"><div class="scroll"><table class="grid months"><thead><tr><th>Month</th><th>Halyard</th><th>QuantFlow V3</th><th class="joined-col">JOINED</th></tr></thead><tbody><tr><th>2025-08</th><td class="num"><span class="neg">-$111</span></td><td class="num"><span class="neg">-$86</span></td><td class="num joined-col"><span class="neg">-$196</span></td></tr><tr><th>2025-09</th><td class="num"><span class="pos">$1,696</span></td><td class="num"><span class="pos">$424</span></td><td class="num joined-col"><span class="pos">$2,120</span></td></tr><tr><th>2025-10</th><td class="num"><span class="pos">$2,840</span></td><td class="num"><span class="pos">$5,726</span></td><td class="num joined-col"><span class="pos">$8,565</span></td></tr><tr><th>2025-11</th><td class="num"><span class="pos">$938</span></td><td class="num"><span class="pos">$6,794</span></td><td class="num joined-col"><span class="pos">$7,732</span></td></tr><tr><th>2025-12</th><td class="num"><span class="pos">$910</span></td><td class="num"><span class="pos">$4,659</span></td><td class="num joined-col"><span class="pos">$5,569</span></td></tr><tr><th>2026-01</th><td class="num"><span class="pos">$5,830</span></td><td class="num"><span class="pos">$6,351</span></td><td class="num joined-col"><span class="pos">$12,181</span></td></tr><tr><th>2026-02</th><td class="num"><span class="pos">$3,336</span></td><td class="num"><span class="pos">$1,752</span></td><td class="num joined-col"><span class="pos">$5,088</span></td></tr><tr><th>2026-03</th><td class="num"><span class="pos">$11,860</span></td><td class="num"><span class="pos">$7,108</span></td><td class="num joined-col"><span class="pos">$18,968</span></td></tr><tr><th>2026-04</th><td class="num"><span class="pos">$3,681</span></td><td class="num"><span class="pos">$1,191</span></td><td class="num joined-col"><span class="pos">$4,872</span></td></tr><tr><th>2026-05</th><td class="num"><span class="pos">$4,146</span></td><td class="num"><span class="pos">$3,424</span></td><td class="num joined-col"><span class="pos">$7,571</span></td></tr><tr><th>2026-06</th><td class="num"><span class="pos">$5,455</span></td><td class="num"><span class="pos">$5,014</span></td><td class="num joined-col"><span class="pos">$10,470</span></td></tr><tr><th>2026-07</th><td class="num"><span class="pos">$5,541</span></td><td class="num"><span class="neg">-$2,994</span></td><td class="num joined-col"><span class="pos">$2,547</span></td></tr><tr><th>2026-08</th><td class="num"><span class="pos">$4,679</span></td><td class="num"><span class="neg">-$273</span></td><td class="num joined-col"><span class="pos">$4,406</span></td></tr></tbody></table></div></div>
+  </section>
+
+  <section id="sides">
+    <p class="eyebrow">Direction</p>
+    <h2>Long versus short</h2>
+    <p class="lede">Both books lean long, and both are weaker on the short side — the same asymmetry in each, which means joining them does not diversify it away.</p>
+    <div class="scroll"><table class="grid"><thead><tr><th>Book</th><th>Side</th><th>Trades</th><th>Net PnL</th><th>Win rate</th><th>Avg trade</th><th>Profit factor</th></tr></thead><tbody><tr><th>Halyard</th><td><span class="side side-long">long</span></td><td class="num">277</td><td class="num"><span class="pos">$28,674</span></td><td class="num">66.1%</td><td class="num"><span class="pos">$104</span></td><td class="num">1.98</td></tr><tr><th>Halyard</th><td><span class="side side-short">short</span></td><td class="num">236</td><td class="num"><span class="pos">$22,126</span></td><td class="num">63.6%</td><td class="num"><span class="pos">$94</span></td><td class="num">1.82</td></tr><tr><th>QuantFlow V3</th><td><span class="side side-long">long</span></td><td class="num">147</td><td class="num"><span class="pos">$26,400</span></td><td class="num">66.7%</td><td class="num"><span class="pos">$180</span></td><td class="num">2.25</td></tr><tr><th>QuantFlow V3</th><td><span class="side side-short">short</span></td><td class="num">111</td><td class="num"><span class="pos">$12,692</span></td><td class="num">62.2%</td><td class="num"><span class="pos">$114</span></td><td class="num">1.78</td></tr><tr class="joined-row"><th>JOINED</th><td><span class="side side-long">long</span></td><td class="num">424</td><td class="num"><span class="pos">$55,074</span></td><td class="num">66.3%</td><td class="num"><span class="pos">$130</span></td><td class="num">2.09</td></tr><tr class="joined-row"><th>JOINED</th><td><span class="side side-short">short</span></td><td class="num">347</td><td class="num"><span class="pos">$34,818</span></td><td class="num">63.1%</td><td class="num"><span class="pos">$100</span></td><td class="num">1.81</td></tr></tbody></table></div>
+  </section>
+
+  <section id="attribution">
+    <p class="eyebrow">Attribution</p>
+    <h2>Which entries carried the year</h2>
+    <p class="lede">Net profit by entry signal, as a share of each strategy's total. Bars are scaled to the
+      largest contributor within each book.</p>
+    <div class="pair">
+      <div class="pair-a">
+        <h3><span class="swatch"></span>Halyard</h3>
+        <p class="h3sub">Break-then-pullback, opening range and initial balance entries</p>
+        <div class="scroll"><table class="grid sig"><thead><tr><th>Entry signal</th><th>Net PnL</th><th>Share</th><th>Trades</th><th>Win rate</th><th>Avg trade</th><th>PF</th><th>Avg hold</th></tr></thead><tbody><tr><th>IBL</th><td class="num"><span class="pos">$10,903</span></td><td class="barcell"><span class="bar bar-pos" style="width:100.0%"></span><span class="barpct">21%</span></td><td class="num">60</td><td class="num">68.3%</td><td class="num"><span class="pos">$182</span></td><td class="num">2.70</td><td class="num">188 min</td></tr><tr><th>HAL-L</th><td class="num"><span class="pos">$7,842</span></td><td class="barcell"><span class="bar bar-pos" style="width:71.9%"></span><span class="barpct">15%</span></td><td class="num">121</td><td class="num">65.3%</td><td class="num"><span class="pos">$65</span></td><td class="num">1.53</td><td class="num">67 min</td></tr><tr><th>HAL-S</th><td class="num"><span class="pos">$7,756</span></td><td class="barcell"><span class="bar bar-pos" style="width:71.1%"></span><span class="barpct">15%</span></td><td class="num">87</td><td class="num">65.5%</td><td class="num"><span class="pos">$89</span></td><td class="num">1.78</td><td class="num">65 min</td></tr><tr><th>IBL2</th><td class="num"><span class="pos">$4,777</span></td><td class="barcell"><span class="bar bar-pos" style="width:43.8%"></span><span class="barpct">9%</span></td><td class="num">21</td><td class="num">71.4%</td><td class="num"><span class="pos">$227</span></td><td class="num">3.38</td><td class="num">112 min</td></tr><tr><th>HAL-RL</th><td class="num"><span class="pos">$4,268</span></td><td class="barcell"><span class="bar bar-pos" style="width:39.1%"></span><span class="barpct">8%</span></td><td class="num">28</td><td class="num">60.7%</td><td class="num"><span class="pos">$152</span></td><td class="num">2.50</td><td class="num">60 min</td></tr><tr><th>IBS2</th><td class="num"><span class="pos">$4,077</span></td><td class="barcell"><span class="bar bar-pos" style="width:37.4%"></span><span class="barpct">8%</span></td><td class="num">23</td><td class="num">69.6%</td><td class="num"><span class="pos">$177</span></td><td class="num">2.38</td><td class="num">124 min</td></tr><tr><th>HAL-RS</th><td class="num"><span class="pos">$3,472</span></td><td class="barcell"><span class="bar bar-pos" style="width:31.8%"></span><span class="barpct">7%</span></td><td class="num">29</td><td class="num">62.1%</td><td class="num"><span class="pos">$120</span></td><td class="num">1.92</td><td class="num">55 min</td></tr><tr><th>IBS</th><td class="num"><span class="pos">$2,560</span></td><td class="barcell"><span class="bar bar-pos" style="width:23.5%"></span><span class="barpct">5%</span></td><td class="num">50</td><td class="num">58.0%</td><td class="num"><span class="pos">$51</span></td><td class="num">1.35</td><td class="num">214 min</td></tr><tr><th>ORS</th><td class="num"><span class="pos">$2,413</span></td><td class="barcell"><span class="bar bar-pos" style="width:22.1%"></span><span class="barpct">5%</span></td><td class="num">34</td><td class="num">61.8%</td><td class="num"><span class="pos">$71</span></td><td class="num">2.11</td><td class="num">67 min</td></tr><tr><th>ORS2</th><td class="num"><span class="pos">$1,848</span></td><td class="barcell"><span class="bar bar-pos" style="width:17.0%"></span><span class="barpct">4%</span></td><td class="num">13</td><td class="num">69.2%</td><td class="num"><span class="pos">$142</span></td><td class="num">3.55</td><td class="num">67 min</td></tr><tr><th>ORL2</th><td class="num"><span class="pos">$478</span></td><td class="barcell"><span class="bar bar-pos" style="width:4.4%"></span><span class="barpct">1%</span></td><td class="num">13</td><td class="num">61.5%</td><td class="num"><span class="pos">$37</span></td><td class="num">1.50</td><td class="num">43 min</td></tr><tr><th>ORL</th><td class="num"><span class="pos">$406</span></td><td class="barcell"><span class="bar bar-pos" style="width:3.7%"></span><span class="barpct">1%</span></td><td class="num">34</td><td class="num">67.6%</td><td class="num"><span class="pos">$12</span></td><td class="num">1.17</td><td class="num">27 min</td></tr></tbody></table></div>
+      </div>
+      <div class="pair-b">
+        <h3><span class="swatch"></span>QuantFlow V3</h3>
+        <p class="h3sub">Order-flow ORB, aggressive continuation and power-of-three entries</p>
+        <div class="scroll"><table class="grid sig"><thead><tr><th>Entry signal</th><th>Net PnL</th><th>Share</th><th>Trades</th><th>Win rate</th><th>Avg trade</th><th>PF</th><th>Avg hold</th></tr></thead><tbody><tr><th>OF ORB A Long</th><td class="num"><span class="pos">$12,706</span></td><td class="barcell"><span class="bar bar-pos" style="width:100.0%"></span><span class="barpct">33%</span></td><td class="num">58</td><td class="num">56.9%</td><td class="num"><span class="pos">$219</span></td><td class="num">2.33</td><td class="num">157 min</td></tr><tr><th>AGT SC</th><td class="num"><span class="pos">$5,882</span></td><td class="barcell"><span class="bar bar-pos" style="width:46.3%"></span><span class="barpct">15%</span></td><td class="num">44</td><td class="num">81.8%</td><td class="num"><span class="pos">$134</span></td><td class="num">2.39</td><td class="num">71 min</td></tr><tr><th>PO3 Long</th><td class="num"><span class="pos">$5,674</span></td><td class="barcell"><span class="bar bar-pos" style="width:44.7%"></span><span class="barpct">15%</span></td><td class="num">27</td><td class="num">66.7%</td><td class="num"><span class="pos">$210</span></td><td class="num">2.30</td><td class="num">882 min</td></tr><tr><th>OF ORB A Short</th><td class="num"><span class="pos">$5,517</span></td><td class="barcell"><span class="bar bar-pos" style="width:43.4%"></span><span class="barpct">14%</span></td><td class="num">52</td><td class="num">46.2%</td><td class="num"><span class="pos">$106</span></td><td class="num">1.56</td><td class="num">76 min</td></tr><tr><th>OF ORB B Long</th><td class="num"><span class="pos">$4,958</span></td><td class="barcell"><span class="bar bar-pos" style="width:39.0%"></span><span class="barpct">13%</span></td><td class="num">23</td><td class="num">65.2%</td><td class="num"><span class="pos">$216</span></td><td class="num">2.76</td><td class="num">179 min</td></tr><tr><th>AGT LC</th><td class="num"><span class="pos">$3,062</span></td><td class="barcell"><span class="bar bar-pos" style="width:24.1%"></span><span class="barpct">8%</span></td><td class="num">39</td><td class="num">82.1%</td><td class="num"><span class="pos">$78</span></td><td class="num">1.69</td><td class="num">45 min</td></tr><tr><th>PO3 Short</th><td class="num"><span class="pos">$1,293</span></td><td class="barcell"><span class="bar bar-pos" style="width:10.2%"></span><span class="barpct">3%</span></td><td class="num">15</td><td class="num">60.0%</td><td class="num"><span class="pos">$86</span></td><td class="num">1.57</td><td class="num">755 min</td></tr></tbody></table></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="caveats">
+    <p class="eyebrow">Read before sizing</p>
+    <h2>What these numbers do not say</h2>
+    <p class="lede">Everything above is a backtest read off two TradingView exports. Four things materially
+      affect how the figures should be used.</p>
+    <div class="notes">
+      <div class="note">
+        <h4>Commission</h4>
+        <p>The exports were not run on the same cost basis: over the year, Halyard charged <strong>$2,924</strong> and QuantFlow V3 charged <strong>$0</strong>. Every figure on this page re-prices both at <strong>$1 per contract per side</strong> ($2 round turn), which moves QuantFlow V3 by <strong>$1,548</strong> against its raw net profit. Slippage is not modelled anywhere. At 771 round turns and 2.90 contracts a trade, one MNQ tick of slippage per side is $2,236 — 2% of the joined net profit.</p>
+      </div>
+      <div class="note">
+        <h4>Capital base</h4>
+        <p>The joined column here is <strong>one $30,000 account</strong> trading both strategies' signals side by side — not two separately funded accounts summed. Same trades, same contract sizes, smaller denominator: net profit is unchanged in dollars but every percentage figure (return, drawdown %, worst day %) is now measured against $30,000 instead of the strategies' combined tester capital, so it reads as more leveraged. Check the margin note below before sizing this for real.</p>
+      </div>
+      <div class="note">
+        <h4>Tail risk</h4>
+        <p>On $30,000 of capital, the book peaks at <strong>11 concurrent contracts</strong> ($618,292 notional) open at once — 20.6× the account in notional. That is what your broker's intraday margin has to cover, not the 2.90-contract average; check it against your actual margin schedule before running this live, since a margin call would force an exit neither strategy chose. The joined book's worst day here was <strong>-$2,898</strong>, 9.7% of $30,000 — and that figure, like max drawdown, is measured on closed-trade equity, so it understates what the account saw while positions were open.</p>
+      </div>
+      <div class="note">
+        <h4>Sample</h4>
+        <p>One year, one instrument, one regime — a strongly trending Nasdaq. 771 trades is a healthy sample for trade-level statistics, but the equity curve rests on only 13 months, so the Sharpe, Calmar and drawdown figures carry far less certainty than their decimal places suggest. No walk-forward or out-of-sample split is present in these exports, and both strategies were tuned on this same window.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span>Source: TradingView strategy-tester exports, MNQ1! · generated by <code>analysis/build_report.py</code></span>
+    <span>Commission normalised to $1.00/contract/side</span>
+  </footer>
+</div>
+
+<script>
+const D = {"dates": ["2025-08-20", "2025-08-21", "2025-08-22", "2025-08-23", "2025-08-24", "2025-08-25", "2025-08-26", "2025-08-27", "2025-08-28", "2025-08-29", "2025-08-30", "2025-08-31", "2025-09-01", "2025-09-02", "2025-09-03", "2025-09-04", "2025-09-05", "2025-09-06", "2025-09-07", "2025-09-08", "2025-09-09", "2025-09-10", "2025-09-11", "2025-09-12", "2025-09-13", "2025-09-14", "2025-09-15", "2025-09-16", "2025-09-17", "2025-09-18", "2025-09-19", "2025-09-20", "2025-09-21", "2025-09-22", "2025-09-23", "2025-09-24", "2025-09-25", "2025-09-26", "2025-09-27", "2025-09-28", "2025-09-29", "2025-09-30", "2025-10-01", "2025-10-02", "2025-10-03", "2025-10-04", "2025-10-05", "2025-10-06", "2025-10-07", "2025-10-08", "2025-10-09", "2025-10-10", "2025-10-11", "2025-10-12", "2025-10-13", "2025-10-14", "2025-10-15", "2025-10-16", "2025-10-17", "2025-10-18", "2025-10-19", "2025-10-20", "2025-10-21", "2025-10-22", "2025-10-23", "2025-10-24", "2025-10-25", "2025-10-26", "2025-10-27", "2025-10-28", "2025-10-29", "2025-10-30", "2025-10-31", "2025-11-01", "2025-11-02", "2025-11-03", "2025-11-04", "2025-11-05", "2025-11-06", "2025-11-07", "2025-11-08", "2025-11-09", "2025-11-10", "2025-11-11", "2025-11-12", "2025-11-13", "2025-11-14", "2025-11-15", "2025-11-16", "2025-11-17", "2025-11-18", "2025-11-19", "2025-11-20", "2025-11-21", "2025-11-22", "2025-11-23", "2025-11-24", "2025-11-25", "2025-11-26", "2025-11-27", "2025-11-28", "2025-11-29", "2025-11-30", "2025-12-01", "2025-12-02", "2025-12-03", "2025-12-04", "2025-12-05", "2025-12-06", "2025-12-07", "2025-12-08", "2025-12-09", "2025-12-10", "2025-12-11", "2025-12-12", "2025-12-13", "2025-12-14", "2025-12-15", "2025-12-16", "2025-12-17", "2025-12-18", "2025-12-19", "2025-12-20", "2025-12-21", "2025-12-22", "2025-12-23", "2025-12-24", "2025-12-25", "2025-12-26", "2025-12-27", "2025-12-28", "2025-12-29", "2025-12-30", "2025-12-31", "2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04", "2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09", "2026-01-10", "2026-01-11", "2026-01-12", "2026-01-13", "2026-01-14", "2026-01-15", "2026-01-16", "2026-01-17", "2026-01-18", "2026-01-19", "2026-01-20", "2026-01-21", "2026-01-22", "2026-01-23", "2026-01-24", "2026-01-25", "2026-01-26", "2026-01-27", "2026-01-28", "2026-01-29", "2026-01-30", "2026-01-31", "2026-02-01", "2026-02-02", "2026-02-03", "2026-02-04", "2026-02-05", "2026-02-06", "2026-02-07", "2026-02-08", "2026-02-09", "2026-02-10", "2026-02-11", "2026-02-12", "2026-02-13", "2026-02-14", "2026-02-15", "2026-02-16", "2026-02-17", "2026-02-18", "2026-02-19", "2026-02-20", "2026-02-21", "2026-02-22", "2026-02-23", "2026-02-24", "2026-02-25", "2026-02-26", "2026-02-27", "2026-02-28", "2026-03-01", "2026-03-02", "2026-03-03", "2026-03-04", "2026-03-05", "2026-03-06", "2026-03-07", "2026-03-08", "2026-03-09", "2026-03-10", "2026-03-11", "2026-03-12", "2026-03-13", "2026-03-14", "2026-03-15", "2026-03-16", "2026-03-17", "2026-03-18", "2026-03-19", "2026-03-20", "2026-03-21", "2026-03-22", "2026-03-23", "2026-03-24", "2026-03-25", "2026-03-26", "2026-03-27", "2026-03-28", "2026-03-29", "2026-03-30", "2026-03-31", "2026-04-01", "2026-04-02", "2026-04-03", "2026-04-04", "2026-04-05", "2026-04-06", "2026-04-07", "2026-04-08", "2026-04-09", "2026-04-10", "2026-04-11", "2026-04-12", "2026-04-13", "2026-04-14", "2026-04-15", "2026-04-16", "2026-04-17", "2026-04-18", "2026-04-19", "2026-04-20", "2026-04-21", "2026-04-22", "2026-04-23", "2026-04-24", "2026-04-25", "2026-04-26", "2026-04-27", "2026-04-28", "2026-04-29", "2026-04-30", "2026-05-01", "2026-05-02", "2026-05-03", "2026-05-04", "2026-05-05", "2026-05-06", "2026-05-07", "2026-05-08", "2026-05-09", "2026-05-10", "2026-05-11", "2026-05-12", "2026-05-13", "2026-05-14", "2026-05-15", "2026-05-16", "2026-05-17", "2026-05-18", "2026-05-19", "2026-05-20", "2026-05-21", "2026-05-22", "2026-05-23", "2026-05-24", "2026-05-25", "2026-05-26", "2026-05-27", "2026-05-28", "2026-05-29", "2026-05-30", "2026-05-31", "2026-06-01", "2026-06-02", "2026-06-03", "2026-06-04", "2026-06-05", "2026-06-06", "2026-06-07", "2026-06-08", "2026-06-09", "2026-06-10", "2026-06-11", "2026-06-12", "2026-06-13", "2026-06-14", "2026-06-15", "2026-06-16", "2026-06-17", "2026-06-18", "2026-06-19", "2026-06-20", "2026-06-21", "2026-06-22", "2026-06-23", "2026-06-24", "2026-06-25", "2026-06-26", "2026-06-27", "2026-06-28", "2026-06-29", "2026-06-30", "2026-07-01", "2026-07-02", "2026-07-03", "2026-07-04", "2026-07-05", "2026-07-06", "2026-07-07", "2026-07-08", "2026-07-09", "2026-07-10", "2026-07-11", "2026-07-12", "2026-07-13", "2026-07-14", "2026-07-15", "2026-07-16", "2026-07-17", "2026-07-18", "2026-07-19", "2026-07-20", "2026-07-21", "2026-07-22", "2026-07-23", "2026-07-24", "2026-07-25", "2026-07-26", "2026-07-27", "2026-07-28", "2026-07-29", "2026-07-30", "2026-07-31", "2026-08-01", "2026-08-02", "2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07", "2026-08-08", "2026-08-09", "2026-08-10", "2026-08-11", "2026-08-12", "2026-08-13", "2026-08-14", "2026-08-15", "2026-08-16", "2026-08-17", "2026-08-18", "2026-08-19", "2026-08-20", "2026-08-21"], "series": [{"name": "Halyard", "equity": [-831.0, -831.0, -378.0, -378.0, -378.0, -378.0, 169.0, 97.0, 89.0, -111.0, -111.0, -111.0, 2.0, 314.0, 227.0, 383.0, 467.0, 467.0, 467.0, -64.0, -230.0, -128.0, -10.0, -308.0, -308.0, -308.0, -25.0, 95.0, 657.0, 832.0, 832.0, 832.0, 832.0, 832.0, 914.0, 980.0, 1666.0, 1549.0, 1549.0, 1549.0, 1447.0, 1585.0, 1695.0, 1811.5, 1793.5, 1793.5, 1793.5, 1264.5, 1254.5, 1394.5, 1345.5, 1489.5, 1489.5, 1489.5, 1287.5, 2253.5, 2645.5, 2775.5, 4031.5, 4031.5, 4031.5, 3935.5, 2817.5, 3298.5, 3883.5, 3985.5, 3985.5, 3985.5, 4299.5, 4304.5, 4388.5, 4308.5, 4424.5, 4424.5, 4424.5, 4650.5, 5127.0, 4079.0, 4369.0, 4760.5, 4760.5, 4760.5, 4633.0, 4926.0, 5216.0, 5216.0, 5678.0, 5678.0, 5678.0, 5065.0, 4507.0, 4040.0, 4011.0, 4906.5, 4906.5, 4906.5, 4394.5, 5077.5, 5299.5, 5362.5, 5362.5, 5362.5, 5362.5, 5362.5, 5391.5, 5037.5, 4997.5, 4803.5, 4803.5, 4803.5, 4713.5, 4953.5, 5209.5, 4813.5, 5446.5, 5446.5, 5446.5, 5346.5, 5209.5, 5770.5, 6857.5, 6083.5, 6083.5, 6083.5, 6137.5, 6137.5, 6203.5, 6203.5, 6269.5, 6269.5, 6269.5, 6269.5, 6188.5, 6272.5, 6272.5, 6400.5, 6400.5, 6400.5, 5961.5, 5961.5, 6220.5, 6491.0, 7028.0, 7028.0, 7028.0, 7028.0, 7613.0, 7797.0, 8862.0, 9016.0, 9016.0, 9016.0, 8682.0, 9200.5, 10625.5, 10985.5, 10950.5, 10950.5, 10950.5, 11212.5, 11584.5, 11668.5, 11301.5, 12102.5, 12102.5, 12102.5, 12102.5, 12354.5, 12542.5, 13306.5, 14164.0, 14164.0, 14164.0, 14031.0, 13416.5, 13654.5, 13782.5, 15814.5, 15814.5, 15814.5, 15814.5, 14234.5, 13722.0, 13343.0, 14311.5, 14311.5, 14311.5, 14741.5, 14894.0, 14896.0, 14940.0, 15438.0, 15438.0, 15438.0, 16385.0, 16761.0, 17408.0, 17458.5, 17468.5, 17468.5, 17468.5, 17878.0, 18141.0, 19612.0, 20634.0, 20485.0, 20485.0, 20485.0, 20701.0, 21146.0, 22334.0, 23300.5, 23774.5, 23774.5, 23774.5, 23637.0, 23583.0, 24233.0, 24689.0, 26363.0, 26363.0, 26363.0, 28030.0, 27298.0, 27982.0, 27922.0, 28176.0, 28176.0, 28176.0, 28176.0, 28207.0, 29628.0, 28209.0, 28323.0, 28323.0, 28323.0, 28864.0, 29262.0, 29240.0, 29316.5, 29791.5, 29791.5, 29791.5, 29791.5, 29319.5, 30140.5, 29932.5, 30128.5, 30128.5, 30128.5, 30128.5, 30071.0, 31156.0, 30979.0, 31366.0, 31366.0, 31366.0, 31153.0, 31777.0, 31640.0, 30927.0, 31047.0, 31047.0, 31047.0, 30251.0, 30455.0, 30795.0, 31084.0, 31493.5, 31493.5, 31493.5, 32024.0, 32414.0, 33357.0, 33663.0, 33801.0, 33801.0, 33801.0, 33948.0, 34339.0, 34633.0, 34722.5, 35125.5, 35125.5, 35125.5, 35125.5, 35417.5, 36281.0, 36475.0, 36925.0, 36925.0, 36925.0, 36736.5, 36787.0, 34557.5, 35085.5, 36300.5, 36300.5, 36300.5, 36143.5, 36287.5, 36505.5, 36991.5, 37177.5, 37177.5, 36838.5, 37459.5, 38043.5, 37717.0, 38592.5, 39152.5, 39152.5, 39152.5, 39318.5, 40580.5, 40726.5, 42103.5, 42687.5, 42687.5, 42550.5, 43253.0, 44280.0, 43818.0, 44657.0, 44943.0, 44943.0, 44943.0, 45442.5, 46131.0, 45666.5, 45213.0, 45407.0, 45407.0, 45407.0, 46317.0, 46680.0, 47112.0, 46872.0, 46613.0, 46613.0, 46613.0, 46913.0, 46912.0, 44014.0, 45799.0, 46121.5, 46121.5, 46121.5, 46121.5, 46457.5, 46793.5, 47544.5, 47544.5, 47544.5, 47544.5, 47890.5, 48438.0, 48923.0, 48422.0, 48743.0, 48743.0, 48743.0, 48943.0, 49772.0, 50165.5, 50800.5, 50800.5], "dd": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -72.0, -80.0, -280.0, -280.0, -280.0, -167.0, 0.0, -87.0, 0.0, 0.0, 0.0, 0.0, -531.0, -697.0, -595.0, -477.0, -775.0, -775.0, -775.0, -492.0, -372.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -117.0, -117.0, -117.0, -219.0, -81.0, 0.0, 0.0, -18.0, -18.0, -18.0, -547.0, -557.0, -417.0, -466.0, -322.0, -322.0, -322.0, -524.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -96.0, -1214.0, -733.0, -148.0, -46.0, -46.0, -46.0, 0.0, 0.0, 0.0, -80.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1048.0, -758.0, -366.5, -366.5, -366.5, -494.0, -201.0, 0.0, 0.0, 0.0, 0.0, 0.0, -613.0, -1171.0, -1638.0, -1667.0, -771.5, -771.5, -771.5, -1283.5, -600.5, -378.5, -315.5, -315.5, -315.5, -315.5, -315.5, -286.5, -640.5, -680.5, -874.5, -874.5, -874.5, -964.5, -724.5, -468.5, -864.5, -231.5, -231.5, -231.5, -331.5, -468.5, 0.0, 0.0, -774.0, -774.0, -774.0, -720.0, -720.0, -654.0, -654.0, -588.0, -588.0, -588.0, -588.0, -669.0, -585.0, -585.0, -457.0, -457.0, -457.0, -896.0, -896.0, -637.0, -366.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -334.0, 0.0, 0.0, 0.0, -35.0, -35.0, -35.0, 0.0, 0.0, 0.0, -367.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -133.0, -747.5, -509.5, -381.5, 0.0, 0.0, 0.0, 0.0, -1580.0, -2092.5, -2471.5, -1503.0, -1503.0, -1503.0, -1073.0, -920.5, -918.5, -874.5, -376.5, -376.5, -376.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -149.0, -149.0, -149.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -137.5, -191.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -732.0, -48.0, -108.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1419.0, -1305.0, -1305.0, -1305.0, -764.0, -366.0, -388.0, -311.5, 0.0, 0.0, 0.0, 0.0, -472.0, 0.0, -208.0, -12.0, -12.0, -12.0, -12.0, -69.5, 0.0, -177.0, 0.0, 0.0, 0.0, -213.0, 0.0, -137.0, -850.0, -730.0, -730.0, -730.0, -1526.0, -1322.0, -982.0, -693.0, -283.5, -283.5, -283.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -188.5, -138.0, -2367.5, -1839.5, -624.5, -624.5, -624.5, -781.5, -637.5, -419.5, 0.0, 0.0, 0.0, -339.0, 0.0, 0.0, -326.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -137.0, 0.0, 0.0, -462.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -464.5, -918.0, -724.0, -724.0, -724.0, 0.0, 0.0, 0.0, -240.0, -499.0, -499.0, -499.0, -199.0, -200.0, -3098.0, -1313.0, -990.5, -990.5, -990.5, -990.5, -654.5, -318.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -501.0, -180.0, -180.0, -180.0, 0.0, 0.0, 0.0, 0.0, 0.0], "capital": 30000.0, "maxdd": 3098.0, "maxddpct": 4.017532939101566}, {"name": "QuantFlow V3", "equity": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 166.5, -589.5, -85.5, -85.5, -85.5, -85.5, -87.0, -87.0, -277.5, -1075.5, -1075.5, -1075.5, -1075.5, -1810.5, -1464.0, -1435.5, -973.5, -973.5, -973.5, -973.5, -792.0, -625.5, -219.0, -219.0, -219.0, -219.0, -219.0, 414.0, 532.5, 774.0, 774.0, 562.5, 562.5, 715.5, 603.0, 339.0, 339.0, -184.5, 763.5, 763.5, 763.5, 763.5, 763.5, 1960.5, 1984.5, 1704.0, 1704.0, 1704.0, 2104.5, 2104.5, 1861.5, 1989.0, 3378.0, 3378.0, 3378.0, 4192.5, 3994.5, 4365.0, 4365.0, 3991.5, 3991.5, 5365.5, 5944.5, 6339.0, 6141.0, 5476.5, 6064.5, 6064.5, 6258.0, 6378.0, 7015.5, 7015.5, 7015.5, 8197.5, 8197.5, 8197.5, 7567.5, 8341.5, 8710.5, 8710.5, 9790.5, 9790.5, 9790.5, 9861.0, 9861.0, 9253.5, 9253.5, 10020.0, 10020.0, 10020.0, 10767.0, 12201.0, 12201.0, 12066.0, 12090.0, 12090.0, 12858.0, 14215.5, 13777.5, 13522.5, 13489.5, 13075.5, 13075.5, 13075.5, 13075.5, 13075.5, 14068.5, 13140.0, 13605.0, 13605.0, 13605.0, 14757.0, 14757.0, 15699.0, 15699.0, 15958.5, 15958.5, 16458.0, 15993.0, 16195.5, 16360.5, 16845.0, 16936.5, 16936.5, 16990.5, 17014.5, 17004.0, 17517.0, 18066.0, 18066.0, 18066.0, 18066.0, 18066.0, 18370.5, 18648.0, 18411.0, 19267.5, 19267.5, 19267.5, 19950.0, 20682.0, 22518.0, 22518.0, 22696.5, 22696.5, 22696.5, 22696.5, 22315.5, 22315.5, 22000.5, 22000.5, 22000.5, 22000.5, 22500.0, 22500.0, 22500.0, 23868.0, 23868.0, 23868.0, 23868.0, 24753.0, 24753.0, 24753.0, 24753.0, 24753.0, 24753.0, 24753.0, 24753.0, 23371.5, 23142.0, 23142.0, 24708.0, 24708.0, 24708.0, 24732.0, 24132.0, 24132.0, 23770.5, 25111.5, 25111.5, 25111.5, 25111.5, 25111.5, 25203.0, 25620.0, 25620.0, 25620.0, 25620.0, 26856.0, 27537.0, 28240.5, 29532.0, 29532.0, 29532.0, 29532.0, 29532.0, 29532.0, 29029.5, 29458.5, 29458.5, 29458.5, 29458.5, 28977.0, 28776.0, 30855.0, 30855.0, 31068.0, 31068.0, 31068.0, 32169.0, 31474.5, 31114.5, 30886.5, 31747.5, 31747.5, 31747.5, 32790.0, 32728.5, 34482.0, 34482.0, 34482.0, 34482.0, 34482.0, 32904.0, 32821.5, 32821.5, 33261.0, 33285.0, 33285.0, 33285.0, 33285.0, 34995.0, 35314.5, 35113.5, 35445.0, 35445.0, 35445.0, 35445.0, 35265.0, 35265.0, 35247.0, 35005.5, 35005.5, 35005.5, 35272.5, 35272.5, 34638.0, 33919.5, 34326.0, 34326.0, 35574.0, 36103.5, 36679.5, 36679.5, 36679.5, 36679.5, 36679.5, 36679.5, 36249.0, 36304.5, 36820.5, 37686.0, 37686.0, 37686.0, 37686.0, 37686.0, 38160.0, 38160.0, 38688.0, 38688.0, 38688.0, 38688.0, 38688.0, 38883.0, 38337.0, 38337.0, 37344.0, 37344.0, 37344.0, 36816.0, 37333.5, 38212.5, 38212.5, 38212.5, 38212.5, 38212.5, 38212.5, 38212.5, 39585.0, 39126.0, 40149.0, 40149.0, 40149.0, 40590.0, 40590.0, 41602.5, 42126.0, 42289.5, 42289.5, 41574.0, 40843.5, 40843.5, 42391.5, 42391.5, 42391.5, 42391.5, 42358.5, 42358.5, 42358.5, 42300.0, 41316.0, 41316.0, 41316.0, 41316.0, 41635.5, 41635.5, 42690.0, 41880.0, 40942.5, 40942.5, 40942.5, 40210.5, 40210.5, 41055.0, 41055.0, 41055.0, 41055.0, 41055.0, 41055.0, 41055.0, 40902.0, 40902.0, 40404.0, 40404.0, 40404.0, 40404.0, 39364.5, 39364.5, 39364.5, 39364.5, 39364.5, 39364.5, 39364.5, 40174.5, 40174.5, 40174.5, 39747.0, 39747.0, 39747.0, 39747.0, 39387.0, 39061.5, 39061.5, 39061.5, 39061.5, 39061.5, 39024.0, 39355.5, 39325.5, 39603.0, 39091.5], "dd": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -756.0, -252.0, -252.0, -252.0, -252.0, -253.5, -253.5, -444.0, -1242.0, -1242.0, -1242.0, -1242.0, -1977.0, -1630.5, -1602.0, -1140.0, -1140.0, -1140.0, -1140.0, -958.5, -792.0, -385.5, -385.5, -385.5, -385.5, -385.5, 0.0, 0.0, 0.0, 0.0, -211.5, -211.5, -58.5, -171.0, -435.0, -435.0, -958.5, -10.5, -10.5, -10.5, -10.5, -10.5, 0.0, 0.0, -280.5, -280.5, -280.5, 0.0, 0.0, -243.0, -115.5, 0.0, 0.0, 0.0, 0.0, -198.0, 0.0, 0.0, -373.5, -373.5, 0.0, 0.0, 0.0, -198.0, -862.5, -274.5, -274.5, -81.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -630.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -607.5, -607.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -135.0, -111.0, -111.0, 0.0, 0.0, -438.0, -693.0, -726.0, -1140.0, -1140.0, -1140.0, -1140.0, -1140.0, -147.0, -1075.5, -610.5, -610.5, -610.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -465.0, -262.5, -97.5, 0.0, 0.0, 0.0, 0.0, 0.0, -10.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -237.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -381.0, -381.0, -696.0, -696.0, -696.0, -696.0, -196.5, -196.5, -196.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1381.5, -1611.0, -1611.0, -45.0, -45.0, -45.0, -21.0, -621.0, -621.0, -982.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -502.5, -73.5, -73.5, -73.5, -73.5, -555.0, -756.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -694.5, -1054.5, -1282.5, -421.5, -421.5, -421.5, 0.0, -61.5, 0.0, 0.0, 0.0, 0.0, 0.0, -1578.0, -1660.5, -1660.5, -1221.0, -1197.0, -1197.0, -1197.0, -1197.0, 0.0, 0.0, -201.0, 0.0, 0.0, 0.0, 0.0, -180.0, -180.0, -198.0, -439.5, -439.5, -439.5, -172.5, -172.5, -807.0, -1525.5, -1119.0, -1119.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -430.5, -375.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -546.0, -546.0, -1539.0, -1539.0, -1539.0, -2067.0, -1549.5, -670.5, -670.5, -670.5, -670.5, -670.5, -670.5, -670.5, 0.0, -459.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -715.5, -1446.0, -1446.0, 0.0, 0.0, 0.0, 0.0, -33.0, -33.0, -33.0, -91.5, -1075.5, -1075.5, -1075.5, -1075.5, -756.0, -756.0, 0.0, -810.0, -1747.5, -1747.5, -1747.5, -2479.5, -2479.5, -1635.0, -1635.0, -1635.0, -1635.0, -1635.0, -1635.0, -1635.0, -1788.0, -1788.0, -2286.0, -2286.0, -2286.0, -2286.0, -3325.5, -3325.5, -3325.5, -3325.5, -3325.5, -3325.5, -3325.5, -2515.5, -2515.5, -2515.5, -2943.0, -2943.0, -2943.0, -2943.0, -3303.0, -3628.5, -3628.5, -3628.5, -3628.5, -3628.5, -3666.0, -3334.5, -3364.5, -3087.0, -3598.5], "capital": 30000.0, "maxdd": 3666.0, "maxddpct": 5.043334709038382}, {"name": "JOINED", "equity": [-831.0, -831.0, -378.0, -378.0, -378.0, -378.0, 335.5, -492.5, 3.5, -196.5, -196.5, -196.5, -85.0, 227.0, -50.5, -692.5, -608.5, -608.5, -608.5, -1874.5, -1694.0, -1563.5, -983.5, -1281.5, -1281.5, -1281.5, -817.0, -530.5, 438.0, 613.0, 613.0, 613.0, 613.0, 1246.0, 1446.5, 1754.0, 2440.0, 2111.5, 2111.5, 2264.5, 2050.0, 1924.0, 2034.0, 1627.0, 2557.0, 2557.0, 2557.0, 2028.0, 2018.0, 3355.0, 3330.0, 3193.5, 3193.5, 3193.5, 3392.0, 4358.0, 4507.0, 4764.5, 7409.5, 7409.5, 7409.5, 8128.0, 6812.0, 7663.5, 8248.5, 7977.0, 7977.0, 9351.0, 10244.0, 10643.5, 10529.5, 9785.0, 10489.0, 10489.0, 10682.5, 11028.5, 12142.5, 11094.5, 11384.5, 12958.0, 12958.0, 12958.0, 12200.5, 13267.5, 13926.5, 13926.5, 15468.5, 15468.5, 15468.5, 14926.0, 14368.0, 13293.5, 13264.5, 14926.5, 14926.5, 14926.5, 15161.5, 17278.5, 17500.5, 17428.5, 17452.5, 17452.5, 18220.5, 19578.0, 19169.0, 18560.0, 18487.0, 17879.0, 17879.0, 17879.0, 17789.0, 18029.0, 19278.0, 17953.5, 19051.5, 19051.5, 19051.5, 20103.5, 19966.5, 21469.5, 22556.5, 22042.0, 22042.0, 22541.5, 22130.5, 22333.0, 22564.0, 23048.5, 23206.0, 23206.0, 23260.0, 23284.0, 23192.5, 23789.5, 24338.5, 24466.5, 24466.5, 24466.5, 24027.5, 24332.0, 24868.5, 24902.0, 26295.5, 26295.5, 26295.5, 26978.0, 28295.0, 30315.0, 31380.0, 31712.5, 31712.5, 31712.5, 31378.5, 31516.0, 32941.0, 32986.0, 32951.0, 32951.0, 32951.0, 33712.5, 34084.5, 34168.5, 35169.5, 35970.5, 35970.5, 35970.5, 36855.5, 37107.5, 37295.5, 38059.5, 38917.0, 38917.0, 38917.0, 38784.0, 36788.0, 36796.5, 36924.5, 40522.5, 40522.5, 40522.5, 40546.5, 38366.5, 37854.0, 37113.5, 39423.0, 39423.0, 39423.0, 39853.0, 40005.5, 40099.0, 40560.0, 41058.0, 41058.0, 41058.0, 43241.0, 44298.0, 45648.5, 46990.5, 47000.5, 47000.5, 47000.5, 47410.0, 47673.0, 48641.5, 50092.5, 49943.5, 49943.5, 49943.5, 49678.0, 49922.0, 53189.0, 54155.5, 54842.5, 54842.5, 54842.5, 55806.0, 55057.5, 55347.5, 55575.5, 58110.5, 58110.5, 58110.5, 60820.0, 60026.5, 62464.0, 62404.0, 62658.0, 62658.0, 62658.0, 61080.0, 61028.5, 62449.5, 61470.0, 61608.0, 61608.0, 61608.0, 62149.0, 64257.0, 64554.5, 64430.0, 65236.5, 65236.5, 65236.5, 65236.5, 64584.5, 65405.5, 65179.5, 65134.0, 65134.0, 65134.0, 65401.0, 65343.5, 65794.0, 64898.5, 65692.0, 65692.0, 66940.0, 67256.5, 68456.5, 68319.5, 67606.5, 67726.5, 67726.5, 67726.5, 66500.0, 66759.5, 67615.5, 68770.0, 69179.5, 69179.5, 69179.5, 69710.0, 70574.0, 71517.0, 72351.0, 72489.0, 72489.0, 72489.0, 72636.0, 73222.0, 72970.0, 73059.5, 72469.5, 72469.5, 72469.5, 71941.5, 72751.0, 74493.5, 74687.5, 75137.5, 75137.5, 75137.5, 74949.0, 74999.5, 74142.5, 74211.5, 76449.5, 76449.5, 76449.5, 76733.5, 76877.5, 78108.0, 79117.5, 79467.0, 79467.0, 78412.5, 78303.0, 78887.0, 80108.5, 80984.0, 81544.0, 81544.0, 81511.0, 81677.0, 82939.0, 83026.5, 83419.5, 84003.5, 84003.5, 83866.5, 84888.5, 85915.5, 86508.0, 86537.0, 85885.5, 85885.5, 85885.5, 85653.0, 86341.5, 86721.5, 86268.0, 86462.0, 86462.0, 86462.0, 87372.0, 87735.0, 88014.0, 87774.0, 87017.0, 87017.0, 87017.0, 87317.0, 86276.5, 83378.5, 85163.5, 85486.0, 85486.0, 85486.0, 85486.0, 86632.0, 86968.0, 87719.0, 87291.5, 87291.5, 87291.5, 87637.5, 87825.0, 87984.5, 87483.5, 87804.5, 87804.5, 87804.5, 87967.0, 89127.5, 89491.0, 90403.5, 89892.0], "dd": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -828.0, -332.0, -532.0, -532.0, -532.0, -420.5, -108.5, -386.0, -1028.0, -944.0, -944.0, -944.0, -2210.0, -2029.5, -1899.0, -1319.0, -1617.0, -1617.0, -1617.0, -1152.5, -866.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -328.5, -328.5, -175.5, -390.0, -516.0, -406.0, -813.0, 0.0, 0.0, 0.0, -529.0, -539.0, 0.0, -25.0, -161.5, -161.5, -161.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1316.0, -464.5, 0.0, -271.5, -271.5, 0.0, 0.0, 0.0, -114.0, -858.5, -154.5, -154.5, 0.0, 0.0, 0.0, -1048.0, -758.0, 0.0, 0.0, 0.0, -757.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -542.5, -1100.5, -2175.0, -2204.0, -542.0, -542.0, -542.0, -307.0, 0.0, 0.0, -72.0, -48.0, -48.0, 0.0, 0.0, -409.0, -1018.0, -1091.0, -1699.0, -1699.0, -1699.0, -1789.0, -1549.0, -300.0, -1624.5, -526.5, -526.5, -526.5, 0.0, -137.0, 0.0, 0.0, -514.5, -514.5, -15.0, -426.0, -223.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -91.5, 0.0, 0.0, 0.0, 0.0, 0.0, -439.0, -134.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -334.0, -196.5, 0.0, 0.0, -35.0, -35.0, -35.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -133.0, -2129.0, -2120.5, -1992.5, 0.0, 0.0, 0.0, 0.0, -2180.0, -2692.5, -3433.0, -1123.5, -1123.5, -1123.5, -693.5, -541.0, -447.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -149.0, -149.0, -149.0, -414.5, -170.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -748.5, -458.5, -230.5, 0.0, 0.0, 0.0, 0.0, -793.5, 0.0, -60.0, 0.0, 0.0, 0.0, -1578.0, -1629.5, -208.5, -1188.0, -1050.0, -1050.0, -1050.0, -509.0, 0.0, 0.0, -124.5, 0.0, 0.0, 0.0, 0.0, -652.0, 0.0, -226.0, -271.5, -271.5, -271.5, -4.5, -62.0, 0.0, -895.5, -102.0, -102.0, 0.0, 0.0, 0.0, -137.0, -850.0, -730.0, -730.0, -730.0, -1956.5, -1697.0, -841.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -252.0, -162.5, -752.5, -752.5, -752.5, -1280.5, -471.0, 0.0, 0.0, 0.0, 0.0, 0.0, -188.5, -138.0, -995.0, -926.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1054.5, -1164.0, -580.0, 0.0, 0.0, 0.0, 0.0, -33.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -137.0, 0.0, 0.0, 0.0, 0.0, -651.5, -651.5, -651.5, -884.0, -195.5, 0.0, -453.5, -259.5, -259.5, -259.5, 0.0, 0.0, 0.0, -240.0, -997.0, -997.0, -997.0, -697.0, -1737.5, -4635.5, -2850.5, -2528.0, -2528.0, -2528.0, -2528.0, -1382.0, -1046.0, -295.0, -722.5, -722.5, -722.5, -376.5, -189.0, -29.5, -530.5, -209.5, -209.5, -209.5, -47.0, 0.0, 0.0, 0.0, -511.5], "capital": 30000.0, "maxdd": 4635.5, "maxddpct": 3.927923805650177}], "months": ["2025-08", "2025-09", "2025-10", "2025-11", "2025-12", "2026-01", "2026-02", "2026-03", "2026-04", "2026-05", "2026-06", "2026-07", "2026-08"], "monthly": {"Halyard": [-111.0, 1696.0, 2839.5, 938.0, 910.0, 5830.0, 3335.5, 11860.0, 3681.0, 4146.5, 5455.0, 5541.0, 4679.0], "QuantFlow V3": [-85.5, 424.5, 5725.5, 6793.5, 4659.0, 6351.0, 1752.0, 7108.5, 1191.0, 3424.5, 5014.5, -2994.0, -273.0], "JOINED": [-196.5, 2120.5, 8565.0, 7731.5, 5569.0, 12181.0, 5087.5, 18968.5, 4872.0, 7571.0, 10469.5, 2547.0, 4406.0]}, "monthNames": ["Halyard", "QuantFlow V3", "JOINED"]};
+
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const SC = () => [css("--s1"), css("--s2"), css("--s3")];
+const fmtUsd = v => (v < 0 ? "-$" : "$") + Math.round(Math.abs(v)).toLocaleString();
+const fmtK = v => (v < 0 ? "-$" : "$") + (Math.abs(v) >= 1000
+  ? (Math.abs(v) / 1000).toFixed(Math.abs(v) % 1000 === 0 ? 0 : 1) + "k"
+  : Math.round(Math.abs(v)));
+const SVGNS = "http://www.w3.org/2000/svg";
+
+function el(tag, attrs, parent) {
+  const n = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(n);
+  return n;
+}
+
+/* "nice" axis bounds with a tick step that lands on 1/2/5 × 10^n */
+function ticks(lo, hi, want) {
+  const span = (hi - lo) || 1;
+  const raw = span / want;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= raw) || 10 * mag;
+  const start = Math.floor(lo / step) * step, end = Math.ceil(hi / step) * step;
+  const out = [];
+  for (let v = start; v <= end + step / 2; v += step) out.push(Math.abs(v) < step / 1e6 ? 0 : v);
+  return { out, lo: start, hi: end };
+}
+
+function monthTicks(dates) {
+  const marks = [];
+  let last = "";
+  dates.forEach((d, i) => {
+    const m = d.slice(0, 7);
+    if (m !== last) { marks.push({ i, label: d }); last = m; }
+  });
+  return marks;
+}
+
+const MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const monLabel = (d, withYear) =>
+  MON[+d.slice(5, 7) - 1] + (withYear || d.slice(5, 7) === "01" ? " ’" + d.slice(2, 4) : "");
+
+/* Gridlines stay on round numbers; the domain hugs the data so the plot isn't
+   mostly empty axis. Both are returned — they are not the same range. */
+function scale(lo, hi, want) {
+  const T = ticks(lo, hi, want);
+  const span = (hi - lo) || 1;
+  const dLo = Math.max(T.lo, lo - span * 0.05);
+  const dHi = Math.min(T.hi, hi + span * 0.07);
+  return { ticks: T.out.filter(v => v >= dLo - 1e-9 && v <= dHi + 1e-9), lo: dLo, hi: dHi };
+}
+
+/* ------------------------------------------------------------------ equity */
+function drawEquity() {
+  const host = document.getElementById("c-equity");
+  const tip = document.getElementById("tip-equity");
+  host.innerHTML = "";
+  const W = host.clientWidth || 900;
+  const narrow = W < 620;
+  const H = narrow ? 300 : 380;
+  const P = { t: 14, r: narrow ? 14 : 104, b: 30, l: 58 };
+  const iw = W - P.l - P.r, ih = H - P.t - P.b;
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img",
+    "aria-label": "Cumulative net profit for each strategy and the joined book" }, host);
+
+  const all = D.series.flatMap(s => s.equity);
+  const T = scale(Math.min(...all), Math.max(...all), 5);
+  const x = i => P.l + (iw * i) / (D.dates.length - 1);
+  const y = v => P.t + ih - ((v - T.lo) / (T.hi - T.lo)) * ih;
+
+  T.ticks.forEach(v => {
+    el("line", { x1: P.l, x2: P.l + iw, y1: y(v), y2: y(v),
+      stroke: v === 0 ? css("--rule-strong") : css("--grid"), "stroke-width": 1 }, svg);
+    const t = el("text", { x: P.l - 10, y: y(v) + 4, "text-anchor": "end", "font-size": 11,
+      fill: css("--ink-3") }, svg);
+    t.textContent = fmtK(v);
+  });
+
+  let lastX = -1e9;
+  monthTicks(D.dates).forEach((m, k, arr) => {
+    if (narrow && k % 3 !== 0) return;
+    if (!narrow && arr.length > 14 && k % 2 !== 0) return;
+    if (x(m.i) - lastX < 40) return;   /* a short first month must not collide */
+    lastX = x(m.i);
+    const t = el("text", { x: x(m.i), y: H - 10, "text-anchor": "middle", "font-size": 11,
+      fill: css("--ink-3") }, svg);
+    t.textContent = monLabel(m.label);
+  });
+
+  const colors = SC();
+  D.series.forEach((s, si) => {
+    const d = s.equity.map((v, i) => (i ? "L" : "M") + x(i).toFixed(1) + " " + y(v).toFixed(1)).join(" ");
+    el("path", { d, fill: "none", stroke: colors[si], "stroke-width": 2,
+      "stroke-linejoin": "round", "stroke-linecap": "round" }, svg);
+    if (!narrow) {
+      const yy = y(s.equity[s.equity.length - 1]);
+      el("circle", { cx: x(D.dates.length - 1) + 12, cy: yy - 4, r: 3.5, fill: colors[si] }, svg);
+      const t1 = el("text", { x: x(D.dates.length - 1) + 21, y: yy - 0.5, "font-size": 11.5,
+        fill: css("--ink"), "font-weight": 500 }, svg);
+      t1.textContent = s.name;
+      const t2 = el("text", { x: x(D.dates.length - 1) + 21, y: yy + 14, "font-size": 11.5,
+        fill: css("--ink-3") }, svg);
+      t2.textContent = fmtK(s.equity[s.equity.length - 1]);
+    }
+  });
+
+  const cross = el("line", { y1: P.t, y2: P.t + ih, stroke: css("--rule-strong"),
+    "stroke-width": 1, opacity: 0 }, svg);
+  const dots = D.series.map((s, si) => el("circle", { r: 4, fill: colors[si], stroke: css("--panel"),
+    "stroke-width": 2, opacity: 0 }, svg));
+
+  const hit = el("rect", { x: P.l, y: P.t, width: iw, height: ih, fill: "transparent",
+    style: "cursor:crosshair" }, svg);
+  const move = ev => {
+    const r = svg.getBoundingClientRect();
+    const px = ((ev.touches ? ev.touches[0].clientX : ev.clientX) - r.left) * (W / r.width);
+    let i = Math.round(((px - P.l) / iw) * (D.dates.length - 1));
+    i = Math.max(0, Math.min(D.dates.length - 1, i));
+    cross.setAttribute("x1", x(i)); cross.setAttribute("x2", x(i)); cross.setAttribute("opacity", 1);
+    D.series.forEach((s, si) => {
+      dots[si].setAttribute("cx", x(i)); dots[si].setAttribute("cy", y(s.equity[i]));
+      dots[si].setAttribute("opacity", 1);
+    });
+    tip.innerHTML = `<div class="t-date">${D.dates[i]}</div>` + D.series.map((s, si) =>
+      `<div class="t-row"><b><i style="background:${colors[si]}"></i>${s.name}</b>
+       <var>${fmtUsd(s.equity[i])}</var></div>`).join("");
+    tip.classList.add("on");
+    const left = (x(i) / W) * host.clientWidth;
+    tip.style.left = Math.min(host.clientWidth - 180, Math.max(0, left + 16)) + 18 + "px";
+    tip.style.top = "44px";
+  };
+  const leave = () => {
+    cross.setAttribute("opacity", 0);
+    dots.forEach(d => d.setAttribute("opacity", 0));
+    tip.classList.remove("on");
+  };
+  hit.addEventListener("mousemove", move);
+  hit.addEventListener("mouseleave", leave);
+  hit.addEventListener("touchmove", move, { passive: true });
+  hit.addEventListener("touchend", leave);
+
+  document.getElementById("lg-eq").innerHTML = D.series.map((s, si) =>
+    `<span><i style="background:${colors[si]}"></i>${s.name}</span>`).join("");
+}
+
+/* ------------------------------------------------------------- underwater */
+function drawDD() {
+  const host = document.getElementById("c-dd");
+  host.innerHTML = "";
+  const colors = SC();
+  /* One scale for all three panels — small multiples only compare if they share it. */
+  const T = scale(Math.min(...D.series.flatMap(s => s.dd)), 0, 2);
+  D.series.forEach((s, si) => {
+    const box = document.createElement("div");
+    box.className = "chartbox";
+    box.innerHTML = `<div class="chart-head">
+        <span class="chart-title"><span style="display:inline-block;width:10px;height:10px;border-radius:3px;
+          background:${colors[si]};margin-right:8px;vertical-align:-1px"></span>${s.name}</span>
+        <span class="chart-note">worst ${fmtUsd(-s.maxdd)} · ${s.maxddpct.toFixed(1)}% of ${fmtUsd(s.capital)}</span>
+      </div><div class="slot"></div>`;
+    host.appendChild(box);
+    const slot = box.querySelector(".slot");
+    const W = slot.clientWidth || 900, H = 118;
+    const P = { t: 8, r: 8, b: 22, l: 58 };
+    const iw = W - P.l - P.r, ih = H - P.t - P.b;
+    const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img",
+      "aria-label": `${s.name} drawdown` }, slot);
+    const x = i => P.l + (iw * i) / (s.dd.length - 1);
+    const y = v => P.t + ih - ((v - T.lo) / (T.hi - T.lo)) * ih;
+
+    T.ticks.forEach(v => {
+      el("line", { x1: P.l, x2: P.l + iw, y1: y(v), y2: y(v),
+        stroke: v === 0 ? css("--rule-strong") : css("--grid"), "stroke-width": 1 }, svg);
+      const t = el("text", { x: P.l - 10, y: y(v) + 4, "text-anchor": "end", "font-size": 10.5,
+        fill: css("--ink-3") }, svg);
+      t.textContent = fmtK(v);
+    });
+    let lastX = -1e9;
+    monthTicks(D.dates).forEach((m, k, arr) => {
+      if (W < 620 ? k % 3 : (arr.length > 14 && k % 2)) return;
+      if (x(m.i) - lastX < 40) return;
+      lastX = x(m.i);
+      const t = el("text", { x: x(m.i), y: H - 6, "text-anchor": "middle", "font-size": 10.5,
+        fill: css("--ink-3") }, svg);
+      t.textContent = monLabel(m.label);
+    });
+
+    const line = s.dd.map((v, i) => (i ? "L" : "M") + x(i).toFixed(1) + " " + y(v).toFixed(1)).join(" ");
+    el("path", { d: `${line} L${x(s.dd.length - 1).toFixed(1)} ${y(0)} L${x(0).toFixed(1)} ${y(0)} Z`,
+      fill: colors[si], opacity: .16 }, svg);
+    el("path", { d: line, fill: "none", stroke: colors[si], "stroke-width": 2,
+      "stroke-linejoin": "round" }, svg);
+  });
+}
+
+/* ---------------------------------------------------------------- monthly */
+function drawMonthly() {
+  const host = document.getElementById("c-monthly");
+  const tip = document.getElementById("tip-monthly");
+  host.innerHTML = "";
+  const names = D.monthNames.slice(0, 2);
+  const colors = SC();
+  const W = host.clientWidth || 900, H = 260;
+  const P = { t: 12, r: 10, b: 30, l: 58 };
+  const iw = W - P.l - P.r, ih = H - P.t - P.b;
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img",
+    "aria-label": "Monthly net profit by strategy" }, host);
+
+  const all = names.flatMap(n => D.monthly[n]);
+  const T = scale(Math.min(...all), Math.max(...all), 4);
+  const y = v => P.t + ih - ((v - T.lo) / (T.hi - T.lo)) * ih;
+  const bandW = iw / D.months.length;
+  const barW = Math.max(5, (bandW - 12) / 2 - 1);
+
+  T.ticks.forEach(v => {
+    el("line", { x1: P.l, x2: P.l + iw, y1: y(v), y2: y(v),
+      stroke: v === 0 ? css("--rule-strong") : css("--grid"), "stroke-width": 1 }, svg);
+    const t = el("text", { x: P.l - 10, y: y(v) + 4, "text-anchor": "end", "font-size": 11,
+      fill: css("--ink-3") }, svg);
+    t.textContent = fmtK(v);
+  });
+
+  /* rounded only on the data end, square on the baseline */
+  const barPath = (bx, v) => {
+    const y0 = y(0), y1 = y(v), h = Math.abs(y1 - y0);
+    const r = Math.min(4, barW / 2, h);
+    if (h < .5) return `M${bx} ${y0} h${barW}`;
+    return v >= 0
+      ? `M${bx} ${y0} V${y0 - h + r} a${r} ${r} 0 0 1 ${r} ${-r} h${barW - 2 * r} a${r} ${r} 0 0 1 ${r} ${r} V${y0} Z`
+      : `M${bx} ${y0} V${y0 + h - r} a${r} ${r} 0 0 0 ${r} ${r} h${barW - 2 * r} a${r} ${r} 0 0 0 ${r} ${-r} V${y0} Z`;
+  };
+
+  D.months.forEach((m, mi) => {
+    const bx0 = P.l + bandW * mi + 6;
+    names.forEach((n, ni) => {
+      el("path", { d: barPath(bx0 + ni * (barW + 2), D.monthly[n][mi]), fill: colors[ni] }, svg);
+    });
+    const t = el("text", { x: P.l + bandW * mi + bandW / 2, y: H - 9, "text-anchor": "middle",
+      "font-size": 11, fill: css("--ink-3") }, svg);
+    t.textContent = monLabel(m + "-01", mi === 0);
+
+    const hit = el("rect", { x: P.l + bandW * mi, y: P.t, width: bandW, height: ih,
+      fill: "transparent" }, svg);
+    hit.addEventListener("mouseenter", () => {
+      tip.innerHTML = `<div class="t-date">${m}</div>` + D.monthNames.map((n, ni) =>
+        `<div class="t-row"><b><i style="background:${ni < 2 ? colors[ni] : colors[2]}"></i>${n}</b>
+         <var${D.monthly[n][mi] < 0 ? ' class="neg" style="color:var(--neg)"' : ""}>${fmtUsd(D.monthly[n][mi])}</var></div>`).join("");
+      tip.classList.add("on");
+      const left = ((P.l + bandW * mi + bandW / 2) / W) * host.clientWidth;
+      tip.style.left = Math.min(host.clientWidth - 180, Math.max(0, left - 84)) + 18 + "px";
+      tip.style.top = "40px";
+    });
+    hit.addEventListener("mouseleave", () => tip.classList.remove("on"));
+  });
+
+  document.getElementById("lg-mo").innerHTML = names.map((n, ni) =>
+    `<span><i style="background:${colors[ni]}"></i>${n}</span>`).join("")
+    + `<span style="color:var(--ink-3)">Joined totals in the table below</span>`;
+}
+
+function drawAll() { drawEquity(); drawDD(); drawMonthly(); }
+drawAll();
+let rt;
+addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(drawAll, 140); });
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", drawAll);
+new MutationObserver(drawAll).observe(document.documentElement, { attributes: true,
+  attributeFilter: ["data-theme"] });
+</script>
