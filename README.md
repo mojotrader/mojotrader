@@ -193,7 +193,15 @@ far range edge and the targets are the hardcoded extensions, as in the original.
   - *On fill — market + bracket*: nothing leaves until TradingView's simulated limit fills, then a
     market order chases it with the bracket attached.
   - Halyard is unaffected either way — it is a market order at the 15m close, so its arm and its
-    fill are the same instant (`sendFill = not armLimits or halLive`).
+    fill are the same instant. `sendFill` gates this: `not armLimits or posSrc == "HAL"`, where
+    `posSrc` is latched to `"HAL"`/`"ORB"`/`"IB"` **at the entry block itself**, the exact bar
+    `strategy.entry` is called — not read from that setup's current open/closed state. It used to
+    read `halLive` (`halTrDir != 0`) directly, which was a real bug: `strategy.position_size` (and
+    so `buyNow`/`sellNow`) only reflects a fill a bar *after* the engine books it, and if a Halyard
+    trade's stop or target was hit on that very next bar — a fast whipsaw right after the break,
+    entirely possible on a 1–3 minute chart — `halTrDir` was already zeroed by the time the webhook
+    section read it, so the trade's entry alert was silently swallowed even though the trade had
+    genuinely opened. `posSrc` survives that race because it isn't re-read from current state.
   - **Pulling a working order**: an armed setup that expires unfilled (the 10:30 hand-over, the
     cutoff, a double-break, the seat lost, EOD) sends `Word that pulls a working order` — `close`
     (default), `cancel`, or nothing. Only ever sent while the account is **flat**, so it can never
