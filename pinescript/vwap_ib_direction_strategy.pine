@@ -1,0 +1,354 @@
+//@version=6
+// VWAP + IB DIRECTION - a single setup, replacing the old ORB/IB fib-pullback engine and Halyard entirely.
+//
+// THE IDEA
+//   The 09:30-10:30 ET Initial Balance (IB) range is still tracked, but it is no longer traded as a breakout.
+//   Instead, WHICH EXTREME OF THE RANGE PRINTED FIRST tells you the day's order-flow bias (low first = the
+//   range was built by a dip-then-rally, bullish; high first = rally-then-dip, bearish) - and that bias is only
+//   accepted if price agrees with it against the anchored VWAP at the moment the IB closes. From there the
+//   setup hunts for a pullback CANDLE (not a price level) in the direction of that bias, using VWAP as the
+//   line price has to be on the right side of to even be "armed".
+//
+// THE BIAS (set ONCE, at 10:30, held for the rest of the day)
+//   IB low printed before its high AND price is above VWAP  -> LONG bias.
+//   IB high printed before its low AND price is below VWAP  -> SHORT bias.
+//   Anything else (no clean sequence, or price disagrees with VWAP) -> no bias, no trade today.
+//   The IB range does NOT need to break for this - direction comes purely from structure + VWAP.
+//
+// ARMED / DISARMED (a toggle, independent of the fixed bias above)
+//   LONG bias is "armed" only while price is above VWAP; if price crosses below VWAP it disarms - no entry can
+//   fire - until price crosses back above. SHORT bias mirrors this on the other side. Every time the setup
+//   re-arms it starts hunting again from scratch for the entry trigger below.
+//
+// ENTRY TRIGGER (fires once per arming episode)
+//   Armed long: the FIRST red candle that closes above VWAP.
+//   Armed short: the FIRST green candle that closes below VWAP.
+//   Once that first candle appears (whether or not the trade actually goes on to fire - see the momentum
+//   filter below), that arming episode's trigger is used up; a second red/green candle in the same episode
+//   does nothing. A fresh arm/disarm/re-arm cycle is what resets the hunt.
+//
+// MOMENTUM CONFIRMATION (rolling, checked on every trigger candle)
+//   Price now vs. price ~60 minutes ago must be up at least 0.1% for a long, down at least 0.1% for a short.
+//   Tracked with a small rolling (time, price) array rather than a fixed bar count, so it is correct on any
+//   chart timeframe rather than assuming how many bars make an hour.
+//
+// RISK (points, not ticks, not R-multiples - absolute price distance from the entry)
+//   Long:  80 pt stop / 40 pt target (0.5R).
+//   Short: 80 pt stop / 50 pt target (0.625R).
+//   Entry is a MARKET order at the trigger candle's close - there is no price level to rest a limit at ahead
+//   of time the way the old fib-pullback entries had, since the trigger IS the candle closing a certain way.
+//
+// GOVERNANCE
+//   One position at a time. Max 4 trades/day. Max 2 LOSSES/day (a tighter, separate cap - two stop-outs ends
+//   the day even with trade slots left). No new entries after 15:30 ET. Flatten everything at 15:55 ET.
+strategy("VWAP + IB Direction", overlay = true, pyramiding = 1,
+     max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500,
+     initial_capital = 150000, margin_long = 0, margin_short = 0,
+     default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = true,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
+
+// ---------------------------------------------------------------- Mode: strategy or indicator
+gMode    = "Mode"
+runMode  = input.string("Strategy - place orders", "Run as", options = ["Strategy - place orders", "Indicator - drawings & alerts only"], group = gMode,
+     tooltip = "STRATEGY: entries, exits, EOD flatten and the PickMyTrade webhook. INDICATOR: none of those, so no trades and an empty Strategy Tester, but the bias, VWAP, IB range, R/R box and alerts still work.")
+ordersOn = runMode == "Strategy - place orders"
+
+// ---------------------------------------------------------------- Trade days
+gDay     = "Trade days"
+tMon = input.bool(true, "Monday",    group = gDay)
+tTue = input.bool(true, "Tuesday",   group = gDay)
+tWed = input.bool(true, "Wednesday", group = gDay)
+tThu = input.bool(true, "Thursday",  group = gDay)
+tFri = input.bool(true, "Friday",    group = gDay)
+
+// ---------------------------------------------------------------- Risk (points) and size
+gRisk = "Risk - points from entry"
+qtyContracts = input.int(1, "Contracts", minval = 1, group = gRisk)
+longSlPts    = input.float(80, "Long stop (pts)",   minval = 0.25, step = 0.25, group = gRisk)
+longTpPts    = input.float(40, "Long target (pts)", minval = 0.25, step = 0.25, group = gRisk)
+shortSlPts   = input.float(80, "Short stop (pts)",   minval = 0.25, step = 0.25, group = gRisk)
+shortTpPts   = input.float(50, "Short target (pts)", minval = 0.25, step = 0.25, group = gRisk)
+ptVal        = input.float(2.0, "$ per point per contract", group = gRisk, tooltip = "MNQ=2, NQ=20, MES=5, ES=50. Used for the R/R box's $ figures only - sizing itself is the fixed contract count above.")
+
+// ---------------------------------------------------------------- Momentum filter (rolling 60 minutes)
+gMom = "Momentum filter"
+momLookMin = input.int(60, "Lookback (minutes)", minval = 1, group = gMom)
+momMinPct  = input.float(0.1, "Min move required (%)", minval = 0, step = 0.01, group = gMom,
+     tooltip = "At the trigger candle, price now vs. price momLookMin minutes ago must be up at least this % for a long, down at least this % for a short. Tracked with a rolling (time, price) array, so it is exact on any chart timeframe rather than assuming a bar count per hour.")
+
+// ---------------------------------------------------------------- Anchored VWAP (09:30-16:00 ET)
+gVW = "Anchored VWAP (09:30-16:00 ET)"
+vwapSrc = input.string("hlc3", "VWAP source", options = ["hlc3", "hl2", "close", "ohlc4"], group = gVW)
+showVwap = input.bool(true, "Plot VWAP", group = gVW)
+vwapCol  = input.color(color.yellow, "VWAP color", group = gVW)
+
+// ---------------------------------------------------------------- Automation (PickMyTrade webhook -> Tradovate)
+grpA = "Automation - PickMyTrade"
+autoOn   = input.bool(false, "Enable webhook alerts", group = grpA,
+     tooltip = "Create ONE alert with condition 'alert() function calls only' and paste PickMyTrade's webhook URL. Every entry here is a market order (the trigger is a candle closing, not a price level), so there is only one transmission path - no at-arm resting limits.")
+pmtToken = input.string("", "PickMyTrade token", group = grpA)
+pmtAcct  = input.string("", "Tradovate account id", group = grpA)
+pmtSym   = input.string("MNQ1!", "Broker symbol", group = grpA)
+pmtDebug = input.bool(true, "Show the last webhook payload on the chart", group = grpA)
+
+// ---------------------------------------------------------------- Alerts (manual trading)
+grpBA = "Alerts (manual)"
+brkAlerts = input.bool(true, "Alert on entry", group = grpBA, tooltip = "Fires the moment a trade would be taken, with direction, stop and target, so you can place it yourself. Create ONE alert with condition 'alert() function calls only'.")
+
+// ---------------------------------------------------------------- Risk/Reward tool
+grpRR = "Risk / Reward tool"
+showRR   = input.bool(true, "Show risk/reward box", group = grpRR)
+showRRText = input.bool(true, "Write the numbers on the box", group = grpRR)
+showInfo = input.bool(false, "Show rules panel", group = grpRR)
+keepBox  = input.int(0, "Keep boxes for the last N trades (0 = all)", 0, 250, group = grpRR)
+
+// ================================================================ HARDCODED CONFIG
+tz      = "America/New_York"
+sess    = "0930-1600"
+ibSess  = "0930-1030"
+huntStartMin = 10*60 + 30   // 10:30 - IB window closes, bias is set, hunting begins
+noNewMin     = 15*60 + 30   // 15:30 - no new entries after this
+flatMin      = 15*60 + 55   // 15:55 - flatten everything
+
+// ================================================================ Session / VWAP / IB range
+inSess     = not na(time(timeframe.period, sess, tz))
+newSession = inSess and not inSess[1]
+tod        = hour(time, tz) * 60 + minute(time, tz)
+flatten    = tod >= flatMin
+huntWin    = tod >= huntStartMin and tod < noNewMin
+dow        = dayofweek(time, tz)
+dayOK      = (dow == dayofweek.monday and tMon) or (dow == dayofweek.tuesday and tTue) or (dow == dayofweek.wednesday and tWed) or (dow == dayofweek.thursday and tThu) or (dow == dayofweek.friday and tFri)
+
+// ---- anchored VWAP: sum(price*volume)/sum(volume), reset at newSession, accumulated while inSess ----
+f_vwapSrc(string s) => s == "hl2" ? hl2 : s == "close" ? close : s == "ohlc4" ? ohlc4 : hlc3
+var float vwapPV = 0.0
+var float vwapV  = 0.0
+if newSession
+    vwapPV := 0.0
+    vwapV  := 0.0
+if inSess
+    vwapVol = nz(volume, 1.0)
+    vwapPV += f_vwapSrc(vwapSrc) * vwapVol
+    vwapV  += vwapVol
+sessVwap = inSess and vwapV > 0 ? vwapPV / vwapV : na
+
+// ---- IB range: high/low and which extreme printed first ----
+ib_inR = not na(time(timeframe.period, ibSess, tz))
+ib_rDone = not ib_inR and ib_inR[1]
+var float ib_rH = na
+var float ib_rL = na
+var int   ib_rHbar = na
+var int   ib_rLbar = na
+if newSession
+    ib_rH := na
+    ib_rL := na
+if ib_inR
+    if na(ib_rH) or high > ib_rH
+        ib_rH := high
+        ib_rHbar := bar_index
+    if na(ib_rL) or low < ib_rL
+        ib_rL := low
+        ib_rLbar := bar_index
+
+// ================================================================ Bias, arming, trigger
+var int  biasDir = 0   // 0 none, 1 long, -1 short - latched once at IB close, held the rest of the session
+if newSession
+    biasDir := 0
+if ib_rDone and not na(ib_rH) and not na(ib_rL) and not na(sessVwap)
+    ibLowFirst = ib_rLbar < ib_rHbar
+    if ibLowFirst and close > sessVwap
+        biasDir := 1
+    else if (not ibLowFirst) and close < sessVwap
+        biasDir := -1
+
+var bool wasArmed     = false
+var bool triggerSpent = false
+if newSession
+    wasArmed := false
+    triggerSpent := false
+
+// ---- open-position / daily-governance state ----
+var int vDir    = 0    // 0 flat, 1 long, -1 short - this strategy's own current position
+var int vTrades = 0    // trades taken today
+var int vLosses = 0    // stop-outs today
+var int vEntBar = na
+if newSession
+    vDir    := 0
+    vTrades := 0
+    vLosses := 0
+    vEntBar := na
+
+// ---- rolling 60-minute momentum window: (time, close) samples, oldest trimmed once a newer one is old enough ----
+var array<int>   momT = array.new_int(0)
+var array<float> momP = array.new_float(0)
+momWinMs = momLookMin * 60 * 1000
+if newSession
+    array.clear(momT)
+    array.clear(momP)
+
+entered = false
+entDir  = 0
+var float vEnt = na
+var float vSL  = na
+var float vTP  = na
+
+if barstate.isconfirmed
+    array.push(momT, time)
+    array.push(momP, close)
+    while array.size(momT) > 1 and array.get(momT, 1) <= time - momWinMs
+        array.shift(momT)
+        array.shift(momP)
+    priceAgo = array.size(momP) > 0 ? array.get(momP, 0) : na
+    haveFullWindow = array.size(momT) > 0 and (time - array.get(momT, 0)) >= momWinMs
+    momPct = (haveFullWindow and not na(priceAgo) and priceAgo > 0) ? (close - priceAgo) / priceAgo * 100.0 : na
+    momLongOK  = not na(momPct) and momPct >= momMinPct
+    momShortOK = not na(momPct) and momPct <= -momMinPct
+
+    armedNow = (biasDir == 1 and close > sessVwap) or (biasDir == -1 and close < sessVwap)
+    if armedNow and not wasArmed
+        triggerSpent := false   // a fresh arming episode - hunt for the first counter-color candle again
+    wasArmed := armedNow
+
+    if armedNow and not triggerSpent
+        redCandle   = close < open
+        greenCandle = close > open
+        longTrig  = biasDir == 1  and redCandle
+        shortTrig = biasDir == -1 and greenCandle
+        if longTrig or shortTrig
+            triggerSpent := true
+
+            canTrade = vDir == 0 and (not ordersOn or strategy.position_size == 0) and huntWin and dayOK and vTrades < 4 and vLosses < 2
+            if longTrig and canTrade and momLongOK
+                entryPx = close
+                sl = entryPx - longSlPts
+                tp = entryPx + longTpPts
+                vDir    := 1
+                vEnt    := entryPx
+                vSL     := sl
+                vTP     := tp
+                vEntBar := bar_index
+                vTrades += 1
+                entered := true
+                entDir  := 1
+                if ordersOn
+                    strategy.entry("VL", strategy.long, qty = qtyContracts)
+                    strategy.exit("VLx", from_entry = "VL", stop = sl, limit = tp)
+            if shortTrig and canTrade and momShortOK
+                entryPx = close
+                sl = entryPx + shortSlPts
+                tp = entryPx - shortTpPts
+                vDir    := -1
+                vEnt    := entryPx
+                vSL     := sl
+                vTP     := tp
+                vEntBar := bar_index
+                vTrades += 1
+                entered := true
+                entDir  := -1
+                if ordersOn
+                    strategy.entry("VS", strategy.short, qty = qtyContracts)
+                    strategy.exit("VSx", from_entry = "VS", stop = sl, limit = tp)
+
+    // ---- track stop/target hits on the open position (governance bookkeeping only - strategy.exit places the real bracket) ----
+    if vDir != 0 and bar_index > vEntBar
+        stopHit = vDir == 1 ? low <= vSL : high >= vSL
+        tpHit   = vDir == 1 ? high >= vTP : low <= vTP
+        if stopHit or tpHit
+            if stopHit
+                vLosses += 1
+            vDir := 0
+
+// ================================================================ EOD flatten (15:55 ET)
+if ordersOn and flatten
+    strategy.close("VL", comment = "EOD flat")
+    strategy.close("VS", comment = "EOD flat")
+if flatten and vDir != 0
+    vDir := 0
+
+// ================================================================ PickMyTrade webhook (market orders only - no at-arm resting limits, the trigger IS the candle closing)
+posNow   = strategy.position_size
+posPrev  = posNow[1]
+buyNow   = ordersOn and autoOn and posNow > 0 and posPrev <= 0
+sellNow  = ordersOn and autoOn and posNow < 0 and posPrev >= 0
+closeNow = ordersOn and autoOn and posNow == 0 and posPrev != 0
+
+f_pmtEntry(string act, float slp, float tpp) =>
+    '{"token":"' + pmtToken + '","account_id":"' + pmtAcct + '","symbol":"' + pmtSym + '","action":"' + act +
+     '","order_type":"market","quantity":"' + str.tostring(qtyContracts) + '","sl":"' + str.tostring(slp, format.mintick) +
+     '","tp":"' + str.tostring(tpp, format.mintick) + '","pyramid":false,"update_sl":false,"update_tp":false,' +
+     '"same_direction_ignore":false,"reverse_order_close":true}'
+
+f_pmtClose() =>
+    '{"token":"' + pmtToken + '","account_id":"' + pmtAcct + '","symbol":"' + pmtSym +
+     '","action":"close","order_type":"market","quantity":"' + str.tostring(qtyContracts) + '"}'
+
+var string pmtLast = ""
+if buyNow
+    payload = f_pmtEntry("buy", vSL, vTP)
+    pmtLast := payload
+    alert(payload, alert.freq_once_per_bar)
+if sellNow
+    payload = f_pmtEntry("sell", vSL, vTP)
+    pmtLast := payload
+    alert(payload, alert.freq_once_per_bar)
+if closeNow
+    payload = f_pmtClose()
+    pmtLast := payload
+    alert(payload, alert.freq_once_per_bar)
+
+if pmtDebug and barstate.islast
+    label.new(bar_index, high, "Last webhook payload:\n" + (pmtLast == "" ? "(none yet)" : pmtLast),
+         xloc.bar_index, yloc.abovebar, color = color.new(color.black, 20), style = label.style_label_down,
+         textcolor = color.white, size = size.small)
+
+// ================================================================ Manual alert (trade the setup by hand)
+if brkAlerts and entered
+    dirTxt = entDir == 1 ? "LONG" : "SHORT"
+    alert("VWAP/IB " + dirTxt + " entry " + str.tostring(vEnt, format.mintick) +
+         " | stop " + str.tostring(vSL, format.mintick) + " | target " + str.tostring(vTP, format.mintick),
+         alert.freq_once_per_bar)
+
+// ================================================================ Risk/Reward box
+var array<box>   rrBoxes = array.new_box(0)
+var array<label> rrLbls  = array.new_label(0)
+
+if entered and showRR
+    rrTop = entDir == 1 ? vTP : vSL
+    rrBot = entDir == 1 ? vSL : vTP
+    rrCol = entDir == 1 ? color.green : color.red
+    b = box.new(bar_index, rrTop, bar_index + 20, rrBot, border_color = color.new(color.gray, 60), bgcolor = color.new(rrCol, 85))
+    array.push(rrBoxes, b)
+    if showRRText
+        l = label.new(bar_index, entDir == 1 ? vTP : vSL,
+             "SL " + str.tostring(vSL, format.mintick) + "\nTP " + str.tostring(vTP, format.mintick),
+             style = entDir == 1 ? label.style_label_down : label.style_label_up,
+             color = color.new(color.black, 100), textcolor = color.gray, size = size.small)
+        array.push(rrLbls, l)
+    if keepBox > 0
+        while array.size(rrBoxes) > keepBox
+            box.delete(array.shift(rrBoxes))
+        while array.size(rrLbls) > keepBox
+            label.delete(array.shift(rrLbls))
+
+// ================================================================ Info panel
+var table infoT = table.new(position.top_right, 2, 6, bgcolor = color.new(color.black, 20), border_width = 1)
+if showInfo and barstate.islast
+    table.cell(infoT, 0, 0, "Mode",          text_color = color.white)
+    table.cell(infoT, 1, 0, ordersOn ? "Strategy" : "Indicator", text_color = color.white)
+    table.cell(infoT, 0, 1, "Bias",          text_color = color.white)
+    table.cell(infoT, 1, 1, biasDir == 1 ? "LONG" : biasDir == -1 ? "SHORT" : "none",
+         text_color = biasDir == 1 ? color.lime : biasDir == -1 ? color.red : color.gray)
+    table.cell(infoT, 0, 2, "Armed",         text_color = color.white)
+    table.cell(infoT, 1, 2, wasArmed ? "yes" : "no", text_color = color.white)
+    table.cell(infoT, 0, 3, "Position",      text_color = color.white)
+    table.cell(infoT, 1, 3, vDir == 1 ? "LONG" : vDir == -1 ? "SHORT" : "flat", text_color = color.white)
+    table.cell(infoT, 0, 4, "Trades today",  text_color = color.white)
+    table.cell(infoT, 1, 4, str.tostring(vTrades) + " / 4", text_color = color.white)
+    table.cell(infoT, 0, 5, "Losses today",  text_color = color.white)
+    table.cell(infoT, 1, 5, str.tostring(vLosses) + " / 2", text_color = color.white)
+
+// ================================================================ Plots
+plot(showVwap ? sessVwap : na, "Anchored VWAP", color = vwapCol, linewidth = 2)
+plot(inSess and not na(ib_rH) ? ib_rH : na, "IB High", color = color.new(color.blue, 40), style = plot.style_stepline)
+plot(inSess and not na(ib_rL) ? ib_rL : na, "IB Low",  color = color.new(color.blue, 40), style = plot.style_stepline)
+bgcolor(inSess and biasDir == 1 ? color.new(color.green, 92) : inSess and biasDir == -1 ? color.new(color.red, 92) : na, title = "Bias tint")
