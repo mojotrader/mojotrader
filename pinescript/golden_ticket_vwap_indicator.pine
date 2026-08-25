@@ -123,13 +123,11 @@ showPerfDash   = input.bool(true,  "Show Legacy Performance Dashboard", group = 
 
 // =================================================================== DASHBOARD CUSTOMIZATION
 gDash = "Dashboard Customization"
-posOpts = ["Upper Left", "Upper Center", "Upper Right", "Middle Left", "Middle Center", "Middle Right", "Bottom Left", "Bottom Center", "Bottom Right"]
-statusPosS = input.string("Upper Right",  "Status Dashboard Position",      options = posOpts, group = gDash)
-perfPosS   = input.string("Bottom Center","Performance Dashboard Position", options = posOpts, group = gDash,
+statusPosS = input.string("Upper Right",  "Status Dashboard Position",      options = ["Upper Left", "Upper Center", "Upper Right", "Middle Left", "Middle Center", "Middle Right", "Bottom Left", "Bottom Center", "Bottom Right"], group = gDash)
+perfPosS   = input.string("Bottom Center","Performance Dashboard Position", options = ["Upper Left", "Upper Center", "Upper Right", "Middle Left", "Middle Center", "Middle Right", "Bottom Left", "Bottom Center", "Bottom Right"], group = gDash,
      tooltip = "Kept separate from the status dashboard so the two panels never overlap.")
-sizeOpts = ["Tiny", "Small", "Normal", "Large"]
-statusSizeS = input.string("Normal", "Status Dashboard Size",      options = sizeOpts, group = gDash)
-perfSizeS   = input.string("Normal", "Performance Dashboard Size", options = sizeOpts, group = gDash)
+statusSizeS = input.string("Normal", "Status Dashboard Size",      options = ["Tiny", "Small", "Normal", "Large"], group = gDash)
+perfSizeS   = input.string("Normal", "Performance Dashboard Size", options = ["Tiny", "Small", "Normal", "Large"], group = gDash)
 headerColor     = input.color(#ffd600, "Header Color", group = gDash)
 headerTextColor = input.color(#131722, "Header Text Color", group = gDash)
 bgColor         = input.color(#000000, "Background Color", group = gDash)
