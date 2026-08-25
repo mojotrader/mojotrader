@@ -426,7 +426,10 @@ chartMs = timeframe.in_seconds(timeframe.period) * 1000
 // call is a pass-through of the chart's own already-confirmed bar, so the missing guard never mattered there
 // - which is exactly why "works on 15m, breaks on everything else" was the symptom.
 f_hal15Snap() =>
-    barstate.isconfirmed ? [high, low, close, time] : [float(na), float(na), float(na), int(na)]
+    if barstate.isconfirmed
+        [high, low, close, time]
+    else
+        [float(na), float(na), float(na), int(na)]
 
 [hi15, lo15, cl15, t15] = request.security(syminfo.tickerid, "15", f_hal15Snap(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
 
