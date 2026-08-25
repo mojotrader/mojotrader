@@ -195,6 +195,14 @@ brkAlerts = input.bool(true, "Alert when a range breaks (Halyard / ORB / IB)", g
      tooltip = "Fires a notification the moment a range breaks, with the direction and the planned entry/stop/target so you can place the trade yourself. Create ONE alert on this strategy with condition 'alert() function calls only'.")
 
 // ---------------------------------------------------------------- Risk/Reward tool
+// ---------------------------------------------------------------- Anchored VWAP (09:30-16:00 ET)
+// Purely visual - a volume-weighted average anchored to the RTH session open and reset every day, run to the
+// session close. Does not feed any entry, filter or sizing logic in this file; it is a reference line only.
+grpVW     = "Anchored VWAP (09:30-16:00 ET)"
+showVwap  = input.bool(true, "Show anchored VWAP", group = grpVW)
+vwapSrc   = input.string("hlc3", "VWAP source", options = ["hlc3", "hl2", "close", "ohlc4"], group = grpVW)
+vwapCol   = input.color(color.yellow, "VWAP color", group = grpVW)
+
 grpRR     = "Risk / Reward tool"
 showRR    = input.bool(true, "Show risk/reward box at the break", group = grpRR)
 showRR2   = input.bool(true, "  ... and a second box for the average-down unit (ORB / IB)", group = grpRR,
@@ -306,6 +314,19 @@ else if inSess
     dLow  := math.min(dLow, low)
 tod     = hour(time, tz) * 60 + minute(time, tz)
 flatten = tod >= (flatH*60 + flatM)
+
+// ---- anchored VWAP: sum(price*volume)/sum(volume), reset at newSession, accumulated while inSess ----
+f_vwapSrc(string s) => s == "hl2" ? hl2 : s == "close" ? close : s == "ohlc4" ? ohlc4 : hlc3
+var float vwapPV = 0.0
+var float vwapV  = 0.0
+if newSession
+    vwapPV := 0.0
+    vwapV  := 0.0
+if inSess
+    vwapVol = nz(volume, 1.0)                             // tick charts and cash indices can report no volume
+    vwapPV += f_vwapSrc(vwapSrc) * vwapVol
+    vwapV  += vwapVol
+sessVwap = inSess and vwapV > 0 ? vwapPV / vwapV : na
 
 // ---- daily loss limit: a flat $ stop for the whole session, floating P&L included ----
 var float dayStartEq = na
@@ -1911,6 +1932,8 @@ plot(runIB and not na(ib_rH) ? ib_rH : na, "IB High", color = color.new(color.te
 plot(runIB and not na(ib_rL) ? ib_rL : na, "IB Low",  color = color.new(color.teal, 45), style = plot.style_linebr)
 plot(runIB and ib_dir != 0 and not na(ib_e1) ? ib_e1 : na, "IB Entry", color = color.new(color.aqua, 0), style = plot.style_linebr)
 plot(runIB and ib_dir != 0 and not na(ib_zstop) ? ib_zstop : na, "IB Stop", color = color.new(color.red, 25), style = plot.style_linebr)
+// Anchored VWAP - 09:30 to 16:00 ET, reset daily
+plot(showVwap ? sessVwap : na, "Anchored VWAP (09:30-16:00)", color = vwapCol, style = plot.style_linebr, linewidth = 2)
 // Halyard's 15-minute range, drawn from the engine's own candles
 plot(runHAL and not na(halRH) ? halRH : na, "Halyard range high", color = color.new(color.fuchsia, 0),  style = plot.style_linebr)
 plot(runHAL and not na(halRL) ? halRL : na, "Halyard range low",  color = color.new(color.fuchsia, 45), style = plot.style_linebr)
