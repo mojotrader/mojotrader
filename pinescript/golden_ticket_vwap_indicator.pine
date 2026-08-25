@@ -1,14 +1,25 @@
 //@version=6
 // Golden Ticket VWAP (Indicator) — recreation.
 //
-// PROVENANCE: TradingView access is blocked from this environment, so the original closed/protected
-// "VWAP GOLDEN TICKET" script (by mogodfrey) could not be fetched or decompiled. This file is a faithful
-// recreation built from (a) the full input panel supplied by the user (every group/label/default below
-// matches those screenshots) and (b) the publicly indexed description of the script: a 1-hour NQ momentum
-// filter combined with a session VWAP pullback entry, RSI extreme-reset and VWAP-slope quality filters,
-// fixed point stop/target risk management, daily trade/loss/win controls, session windows, and a
-// "QuantCrawler Ghost" webhook bridge to Tradovate. Treat the trading logic as a best-effort reconstruction,
-// not a byte-for-byte copy of the original closed-source code.
+// PROVENANCE: the original "VWAP GOLDEN TICKET" script (by mogodfrey) is closed/protected on TradingView,
+// and TradingView, YouTube and quantcrawler.com are all unreachable from this build environment, so it
+// could not be fetched or decompiled. This file is a reconstruction from two sources:
+//   (a) the full input panel supplied by the user - every group, label, option and default below matches
+//       those screenshots exactly; this is the authoritative source for the settings surface.
+//   (b) the script's publicly indexed description, corroborated across several independent searches:
+//       5-minute MNQ chart; session VWAP + 1-hour NQ momentum filter (NQ used ONLY as a momentum filter -
+//       entries/stops/targets come from the charted instrument); trend-pullback continuation entries;
+//       minimum VWAP-slope filter; RSI Extreme Reset filter; separate long/short point stops and targets
+//       (documented defaults 80/40 long, 80/50 short, min slope 2.5 pts - all matching the panel);
+//       one position at a time; max daily trades; daily loss lockout; no-trade window 09:30-10:30 ET;
+//       no new entries after 15:30 ET.
+// The concept traces to Matteo Conti's "Golden Ticket" VWAP talk; that video was not reachable either, so
+// no rule here is taken from it.
+// Treat the trading LOGIC as a best-effort reconstruction, not a byte-for-byte copy. In particular the
+// exact entry trigger is inferred (see the pullback-and-resume note below) - the published description
+// states the setup but not the precise candle condition.
+// NOTE: the description mentions an automatic close at 15:55 ET; the supplied panel instead flattens at
+// 16:40, so the panel value is used here.
 //
 // WHY AN INDICATOR (not a strategy()): the panel exposes its own "Contracts for Backtest & Performance",
 // a rolling backtest window, and a self-drawn "Legacy Performance Dashboard" — i.e. it keeps its own trade
@@ -176,8 +187,36 @@ distOK       = not distActive or distPts <= maxVwapDistAtr * atrVal
 rsiBlockLong  = rsiActive and wasOB and rsiVal >= rsiLongReset
 rsiBlockShort = rsiActive and wasOS and rsiVal <= rsiShortReset
 
-longSignal  = enableLongs  and trendUp   and ta.crossover(close, gtVwap)  and slopeOKLong  and distOK and not rsiBlockLong
-shortSignal = enableShorts and trendDown and ta.crossunder(close, gtVwap) and slopeOKShort and distOK and not rsiBlockShort
+// ---- PULLBACK-AND-RESUME entry trigger -------------------------------------------------------
+// NOT a plain VWAP crossover. The documented setup is a trend CONTINUATION trade: in an uptrend price
+// holds ABOVE VWAP, pulls back DOWN to touch it, then a bullish reaction candle closes back above it.
+// Two-stage state machine so the touch and the reaction may be the same bar or several bars apart:
+//   ARM  : price trades into VWAP (long: low <= VWAP) while the 1H trend agrees.
+//   FIRE : a reaction candle closes back on the trend side of VWAP (long: close > VWAP and close > open).
+// Arming is cleared when the pullback fails (a full close through VWAP), the trend flips, or a new day.
+// (A crossover-only trigger would also make the "Maximum Distance From VWAP (ATR)" filter a no-op,
+//  since distance-to-VWAP is ~0 by definition on a cross bar.)
+newDay = barstate.isfirst or dayofmonth(time, tz) != dayofmonth(time[1], tz)
+
+var bool armLong  = false
+var bool armShort = false
+if newDay
+    armLong  := false
+    armShort := false
+if trendUp and low <= gtVwap
+    armLong := true
+if trendDown and high >= gtVwap
+    armShort := true
+if close < gtVwap or not trendUp
+    armLong := false
+if close > gtVwap or not trendDown
+    armShort := false
+
+longReact  = close > gtVwap and close > open
+shortReact = close < gtVwap and close < open
+
+longSignal  = enableLongs  and trendUp   and armLong  and longReact  and slopeOKLong  and distOK and not rsiBlockLong
+shortSignal = enableShorts and trendDown and armShort and shortReact and slopeOKShort and distOK and not rsiBlockShort
 
 // =================================================================== SESSIONS / TIME
 tod = hour(time, tz) * 60 + minute(time, tz)
@@ -210,7 +249,7 @@ var int   totalLosses = 0
 var float grossProfit = 0.0
 var float grossLoss   = 0.0
 
-newDay = barstate.isfirst or dayofmonth(time, tz) != dayofmonth(time[1], tz)
+// (newDay is computed above, with the pullback state machine)
 if newDay
     tradesToday       := 0
     londonTradesToday := 0

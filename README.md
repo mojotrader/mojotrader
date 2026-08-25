@@ -15,10 +15,20 @@ Entries/exits are also broadcast as JSON `alert()` payloads for a
 "QuantCrawler Ghost" style Tradovate webhook bridge, with a dry-run toggle and
 an independent webhook contract count.
 
-The original script is closed/protected on TradingView (and TradingView was
-unreachable from the build environment), so this is a best-effort
-reconstruction from the published input panel and public description — not a
-decompiled copy. See the file's header comment for details.
+**Entry** is a trend *continuation* pullback, not a plain VWAP cross: in an
+uptrend price holds above VWAP, pulls back to touch it, then a bullish
+reaction candle closing back above VWAP triggers the long (mirrored for
+shorts). Implemented as an arm/fire state machine so the touch and the
+reaction can be the same bar or several bars apart; arming is cleared if the
+pullback closes through VWAP, the 1H trend flips, or the day rolls.
+
+The original script is closed/protected on TradingView, and TradingView,
+YouTube and quantcrawler.com are all blocked from the build environment, so
+this is a best-effort reconstruction from the supplied input panel plus the
+script's publicly indexed description — not a decompiled copy. The settings
+surface matches the panel exactly; the precise entry candle condition is
+inferred, since the public description states the setup but not the exact
+trigger. See the file's header comment for full provenance.
 
 ### `pinescript/bms_market_structure.pine`
 BMS Market Structure — a ZigZag that plots confirmed swing points and labels them
