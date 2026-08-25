@@ -4,6 +4,22 @@ Day-trading research and indicators for the index futures **NQ** (Nasdaq-100) an
 
 ## Indicators
 
+### `pinescript/golden_ticket_vwap_indicator.pine`
+Golden Ticket VWAP — a recreation of the "VWAP GOLDEN TICKET" prop-firm strategy
+concept: a session VWAP pullback entry gated by a 1-hour trend-symbol momentum
+filter (default `CME_MINI:NQ1!`), VWAP-slope and RSI-extreme-reset quality
+filters, fixed-point stop/target risk management, daily trade/loss/win
+lockouts, configurable session windows, a rolling backtest window, and its own
+self-computed "Legacy Performance Dashboard" (it does not use `strategy()`).
+Entries/exits are also broadcast as JSON `alert()` payloads for a
+"QuantCrawler Ghost" style Tradovate webhook bridge, with a dry-run toggle and
+an independent webhook contract count.
+
+The original script is closed/protected on TradingView (and TradingView was
+unreachable from the build environment), so this is a best-effort
+reconstruction from the published input panel and public description — not a
+decompiled copy. See the file's header comment for details.
+
 ### `pinescript/bms_market_structure.pine`
 BMS Market Structure — a ZigZag that plots confirmed swing points and labels them
 `HH / HL / LH / LL`.

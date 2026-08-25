@@ -1,0 +1,414 @@
+//@version=6
+// Golden Ticket VWAP (Indicator) — recreation.
+//
+// PROVENANCE: TradingView access is blocked from this environment, so the original closed/protected
+// "VWAP GOLDEN TICKET" script (by mogodfrey) could not be fetched or decompiled. This file is a faithful
+// recreation built from (a) the full input panel supplied by the user (every group/label/default below
+// matches those screenshots) and (b) the publicly indexed description of the script: a 1-hour NQ momentum
+// filter combined with a session VWAP pullback entry, RSI extreme-reset and VWAP-slope quality filters,
+// fixed point stop/target risk management, daily trade/loss/win controls, session windows, and a
+// "QuantCrawler Ghost" webhook bridge to Tradovate. Treat the trading logic as a best-effort reconstruction,
+// not a byte-for-byte copy of the original closed-source code.
+//
+// WHY AN INDICATOR (not a strategy()): the panel exposes its own "Contracts for Backtest & Performance",
+// a rolling backtest window, and a self-drawn "Legacy Performance Dashboard" — i.e. it keeps its own trade
+// simulation/stat bookkeeping rather than relying on TradingView's native Strategy Tester. That also lets it
+// emit its own webhook JSON straight to a live bridge ("Ghost") independent of strategy.* order state.
+indicator("Golden Ticket VWAP", overlay = true, max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500)
+
+// =================================================================== SETUP
+gSetup     = "Setup"
+trendSym   = input.symbol("CME_MINI:NQ1!", "1-Hour Trend Symbol", group = gSetup,
+     tooltip = "Higher-timeframe symbol used ONLY as a momentum filter. Entries, stops and targets are always calculated from the instrument on the chart.")
+minHrMove  = input.float(0.1, "Minimum 1-Hour Move (%)", minval = 0, step = 0.05, group = gSetup,
+     tooltip = "The 1-hour trend symbol's last closed hourly bar must have moved at least this % (open to close) to count as an established UP/DOWN trend.")
+enableLongs  = input.bool(true, "Enable Longs",  group = gSetup)
+enableShorts = input.bool(true, "Enable Shorts", group = gSetup)
+filterMode = input.string("Standard", "Trade Filter Mode", options = ["Standard", "Strict", "Loose"], group = gSetup,
+     tooltip = "Standard: obey each quality-filter toggle below. Strict: force VWAP-slope + distance + RSI-reset filters ON and require 1.5x the minimum 1-hour move. Loose: ignore the RSI-reset and distance filters (VWAP-slope + trend direction still apply).")
+
+// =================================================================== QUALITY FILTERS
+gQual = "Quality Filters"
+useMinSlope   = input.bool(true, "Use Minimum VWAP Slope", group = gQual,
+     tooltip = "Requires the session VWAP itself to be trending (not flat) before allowing an entry.")
+minVwapChg15  = input.float(2.5, "Minimum 15m VWAP Change (points)", minval = 0, step = 0.5, group = gQual)
+useMaxDist    = input.bool(false, "Use Maximum Distance From VWAP", group = gQual,
+     tooltip = "Blocks entries when price is too far extended from VWAP (in ATRs) to avoid chasing.")
+distAtrLen    = input.int(7, "Distance ATR Length", minval = 1, group = gQual)
+maxVwapDistAtr= input.float(1.05, "Maximum VWAP Distance (ATR)", minval = 0.1, step = 0.05, group = gQual)
+useRsiReset   = input.bool(true, "Use RSI Extreme Reset Filter", group = gQual,
+     tooltip = "If RSI touched an extreme in the lookback window, blocks the trade until RSI resets back through the reset level (avoids buying/selling into a blow-off move).")
+rsiLen        = input.int(14, "RSI Length", minval = 1, group = gQual)
+rsiOB         = input.float(63.5, "RSI Overbought", group = gQual)
+rsiOS         = input.float(31, "RSI Oversold", group = gQual)
+rsiLookback   = input.int(3, "RSI Extreme Lookback Bars", minval = 1, group = gQual)
+rsiLongReset  = input.float(63, "RSI Long Reset Below", group = gQual)
+rsiShortReset = input.float(35, "RSI Short Reset Above", group = gQual)
+
+// =================================================================== RISK MANAGEMENT
+gRisk = "Risk Management"
+longStopPts  = input.float(80, "Long Stop (points)",   minval = 0, group = gRisk)
+longTgtPts   = input.float(40, "Long Target (points)", minval = 0, group = gRisk)
+shortStopPts = input.float(80, "Short Stop (points)",  minval = 0, group = gRisk)
+shortTgtPts  = input.float(50, "Short Target (points)",minval = 0, group = gRisk)
+maxTradesDay = input.int(5, "Maximum Trades Per Day", minval = 0, group = gRisk)
+useMaxLondon = input.bool(true, "Use Maximum London Trades", group = gRisk,
+     tooltip = "Caps entries taken while the Overnight / London session is active, separate from the overall daily cap.")
+maxLondonTrades = input.int(4, "Maximum London Trades", minval = 0, group = gRisk)
+useLockWins  = input.bool(true, "Lock Out After Daily Wins", group = gRisk,
+     tooltip = "Stop trading for the day once this many winners have been booked (protect the day's gains).")
+maxWinsLock  = input.int(4, "Maximum Wins Before Lockout", minval = 1, group = gRisk)
+maxLossesDay = input.int(2, "Maximum Losses Per Day", minval = 0, group = gRisk,
+     tooltip = "0 disables the daily-loss lockout.")
+lossLockMode = input.string("Consecutive", "Daily Loss Lockout Mode", options = ["Consecutive", "Total"], group = gRisk,
+     tooltip = "Consecutive: only back-to-back losses count toward the cap (a win resets the streak). Total: every loss counts.")
+tieBreak     = input.string("Stop First", "If Stop and Target Touch Same Bar", options = ["Stop First", "Target First"], group = gRisk,
+     tooltip = "Which level is assumed to fill first when a single bar's range touches both the stop and the target.")
+useBE        = input.bool(false, "Use Break-Even Management", group = gRisk)
+beMovePct    = input.float(85, "Move Stop at % Toward Target", minval = 1, maxval = 100, group = gRisk)
+beDest       = input.string("Break Even", "Break-Even Stop Destination", options = ["Break Even", "Break Even Plus"], group = gRisk)
+beOffsetTk   = input.int(1, "Break-Even+ Offset (ticks)", minval = 0, group = gRisk)
+
+// =================================================================== COSTS & EFFICIENCY
+gCost = "Costs & Efficiency"
+btContracts = input.int(1, "Contracts for Backtest & Performance", minval = 1, group = gCost,
+     tooltip = "Contract count used ONLY by this indicator's own trade simulation and performance dashboard (not a live order size).")
+ptValue     = input.float(2, "Dollar Value Per Point / Contract", minval = 0, group = gCost)
+rtCost      = input.float(0.95, "Estimated Round-Trip Cost / Contract ($)", minval = 0, group = gCost,
+     tooltip = "Commissions + estimated slippage per contract, charged once per completed simulated trade.")
+
+// =================================================================== TRADING HOURS
+gHrs = "Trading Hours"
+tz          = input.string("America/New_York", "Time Zone", group = gHrs)
+useAsia     = input.bool(false, "Enable Asia Session", group = gHrs)
+asiaSess    = input.session("1800-0000", "Asia Session", group = gHrs)
+useLondon   = input.bool(true, "Enable Overnight / London Session", group = gHrs)
+londonSess  = input.session("2130-0900", "Overnight / London Session", group = gHrs)
+useNyAM     = input.bool(true, "Enable New York AM Session", group = gHrs)
+nyAmSess    = input.session("1000-1200", "New York AM Session", group = gHrs)
+useNyPM     = input.bool(true, "Enable New York PM Session", group = gHrs)
+nyPmSess    = input.session("1200-1400", "New York PM Session", group = gHrs)
+blockOpen   = input.bool(true, "Block 9:30-10:30 AM", group = gHrs)
+useFlatPre  = input.bool(true, "Flatten Before New York Open", group = gHrs,
+     tooltip = "Force-closes any open simulated trade and blocks new entries between the pre-open flatten time and 09:30.")
+preFlatH    = input.int(9,  "Pre-Open Flatten Hour",   0, 23, group = gHrs)
+preFlatM    = input.int(15, "Pre-Open Flatten Minute", 0, 59, group = gHrs)
+lastEntryH  = input.int(15, "Last Entry Hour",   0, 23, group = gHrs)
+lastEntryM  = input.int(30, "Last Entry Minute", 0, 59, group = gHrs)
+flatH       = input.int(16, "Flatten Hour",   0, 23, group = gHrs)
+flatM       = input.int(40, "Flatten Minute", 0, 59, group = gHrs)
+
+// =================================================================== BACKTESTING WINDOW
+gBT = "Backtesting Window"
+useRollWin  = input.bool(true, "Use Rolling Backtest Window", group = gBT)
+btDays      = input.int(365, "Number of Backtest Days", minval = 1, group = gBT)
+
+// =================================================================== QUANTCRAWLER GHOST
+gGhost = "QuantCrawler Ghost"
+webhookQtyOn   = input.bool(true, "Webhook Controls Contracts", group = gGhost,
+     tooltip = "ON: live orders sent to Ghost use 'Webhook Contracts' below, independent of the backtest contract count. OFF: Ghost uses the same contract count as the backtest/performance dashboard.")
+webhookQty     = input.int(1, "Webhook Contracts", minval = 1, group = gGhost)
+ghostDryRun    = input.bool(false, "Ghost Dry-Run Mode", group = gGhost,
+     tooltip = "Tags every webhook payload dryRun:true so Ghost logs the signal without placing a live order.")
+sendBEToGhost  = input.bool(true, "Send Break-Even Command to Ghost (Tradovate)", group = gGhost)
+
+// =================================================================== DISPLAY
+gDisp = "Display"
+showMarkers  = input.bool(true, "Show Entry/Exit Markers", group = gDisp)
+showRects    = input.bool(true, "Show Stop/Target Rectangles", group = gDisp)
+rectTransp   = input.int(80, "Rectangle Transparency", minval = 0, maxval = 100, group = gDisp)
+shadeBlocked = input.bool(true, "Shade Blocked Times", group = gDisp)
+showStatusDash = input.bool(false, "Show Current Status Dashboard", group = gDisp)
+showPerfDash   = input.bool(true,  "Show Legacy Performance Dashboard", group = gDisp)
+
+// =================================================================== DASHBOARD CUSTOMIZATION
+gDash = "Dashboard Customization"
+posOpts = ["Upper Left", "Upper Center", "Upper Right", "Middle Left", "Middle Center", "Middle Right", "Bottom Left", "Bottom Center", "Bottom Right"]
+statusPosS = input.string("Upper Right",  "Status Dashboard Position",      options = posOpts, group = gDash)
+perfPosS   = input.string("Bottom Center","Performance Dashboard Position", options = posOpts, group = gDash,
+     tooltip = "Kept separate from the status dashboard so the two panels never overlap.")
+sizeOpts = ["Tiny", "Small", "Normal", "Large"]
+statusSizeS = input.string("Normal", "Status Dashboard Size",      options = sizeOpts, group = gDash)
+perfSizeS   = input.string("Normal", "Performance Dashboard Size", options = sizeOpts, group = gDash)
+headerColor     = input.color(#ffd600, "Header Color", group = gDash)
+headerTextColor = input.color(#131722, "Header Text Color", group = gDash)
+bgColor         = input.color(#000000, "Background Color", group = gDash)
+textColor       = input.color(#ffffff, "Text Color", group = gDash)
+positiveColor   = input.color(#29b6f6, "Positive Color", group = gDash)
+negativeColor   = input.color(#ef5350, "Negative Color", group = gDash)
+warningColor    = input.color(#ff9800, "Warning Color", group = gDash)
+
+// =================================================================== HELPERS
+f_tpos(string s) =>
+    s == "Upper Left" ? position.top_left : s == "Upper Center" ? position.top_center : s == "Upper Right" ? position.top_right :
+     s == "Middle Left" ? position.middle_left : s == "Middle Center" ? position.middle_center : s == "Middle Right" ? position.middle_right :
+     s == "Bottom Left" ? position.bottom_left : s == "Bottom Center" ? position.bottom_center : position.bottom_right
+
+f_tsize(string s) =>
+    s == "Tiny" ? size.tiny : s == "Small" ? size.small : s == "Large" ? size.large : size.normal
+
+// =================================================================== CORE SERIES
+gtVwap = ta.vwap(hlc3)
+atrVal = ta.atr(distAtrLen)
+rsiVal = ta.rsi(close, rsiLen)
+wasOB  = ta.highest(rsiVal, rsiLookback) >= rsiOB
+wasOS  = ta.lowest(rsiVal, rsiLookback) <= rsiOS
+
+tfSec      = timeframe.in_seconds(timeframe.period)
+barsPer15m = tfSec > 0 ? math.max(1, math.round(900 / tfSec)) : 3
+vwapSlope  = gtVwap - gtVwap[barsPer15m]
+distPts    = math.abs(close - gtVwap)
+
+htf_o = request.security(trendSym, "60", open,  gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+htf_c = request.security(trendSym, "60", close, gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+hourMovePct = htf_o != 0 ? (htf_c - htf_o) / htf_o * 100.0 : 0.0
+
+// =================================================================== FILTER MODE RESOLUTION
+slopeActive = filterMode == "Strict" ? true : filterMode == "Loose" ? false : useMinSlope
+distActive  = filterMode == "Strict" ? true : filterMode == "Loose" ? false : useMaxDist
+rsiActive   = filterMode == "Strict" ? true : filterMode == "Loose" ? false : useRsiReset
+trendThresh = filterMode == "Strict" ? minHrMove * 1.5 : minHrMove
+
+trendUp   = hourMovePct >= trendThresh
+trendDown = hourMovePct <= -trendThresh
+
+slopeOKLong  = not slopeActive or vwapSlope >= minVwapChg15
+slopeOKShort = not slopeActive or -vwapSlope >= minVwapChg15
+distOK       = not distActive or distPts <= maxVwapDistAtr * atrVal
+rsiBlockLong  = rsiActive and wasOB and rsiVal >= rsiLongReset
+rsiBlockShort = rsiActive and wasOS and rsiVal <= rsiShortReset
+
+longSignal  = enableLongs  and trendUp   and ta.crossover(close, gtVwap)  and slopeOKLong  and distOK and not rsiBlockLong
+shortSignal = enableShorts and trendDown and ta.crossunder(close, gtVwap) and slopeOKShort and distOK and not rsiBlockShort
+
+// =================================================================== SESSIONS / TIME
+tod = hour(time, tz) * 60 + minute(time, tz)
+inAsia   = not na(time(timeframe.period, asiaSess,   tz))
+inLondon = not na(time(timeframe.period, londonSess, tz))
+inNyAM   = not na(time(timeframe.period, nyAmSess,   tz))
+inNyPM   = not na(time(timeframe.period, nyPmSess,   tz))
+activeSession = (useAsia and inAsia) or (useLondon and inLondon) or (useNyAM and inNyAM) or (useNyPM and inNyPM)
+
+inBlockOpen  = blockOpen and not na(time(timeframe.period, "0930-1030", tz))
+preOpenActive = useFlatPre and tod >= (preFlatH * 60 + preFlatM) and tod < (9 * 60 + 30)
+blockedWindow = inBlockOpen or preOpenActive
+lastEntryOK   = tod <= (lastEntryH * 60 + lastEntryM)
+flattenNow    = tod >= (flatH * 60 + flatM)
+flattenTrigger = flattenNow or preOpenActive
+
+inBacktestWindow = not useRollWin or (time >= timenow - btDays * 86400000)
+
+// =================================================================== DAILY COUNTERS
+var int   tradesToday       = 0
+var int   londonTradesToday = 0
+var int   winsToday         = 0
+var int   lossesToday       = 0
+var int   consecLossesToday = 0
+var float netPnlToday       = 0.0
+var float netPnlTotal       = 0.0
+var int   totalTrades = 0
+var int   totalWins   = 0
+var int   totalLosses = 0
+var float grossProfit = 0.0
+var float grossLoss   = 0.0
+
+newDay = barstate.isfirst or dayofmonth(time, tz) != dayofmonth(time[1], tz)
+if newDay
+    tradesToday       := 0
+    londonTradesToday := 0
+    winsToday         := 0
+    lossesToday        := 0
+    consecLossesToday := 0
+    netPnlToday        := 0.0
+
+dailyLockout = (useLockWins and winsToday >= maxWinsLock) or
+     (maxLossesDay > 0 and (lossLockMode == "Consecutive" ? consecLossesToday >= maxLossesDay : lossesToday >= maxLossesDay))
+
+// =================================================================== SIMULATED POSITION
+var int   simDir   = 0     // 0 flat, 1 long, -1 short
+var float simEntry = na
+var float simStop  = na
+var float simTP    = na
+var bool  simBE    = false
+var box   riskBox  = na
+var box   rewardBox= na
+var int   entryBar = na
+
+f_ghost(string action, float qty, float stop, float target) =>
+    '{"source":"golden_ticket_vwap","dryRun":' + (ghostDryRun ? "true" : "false") +
+     ',"symbol":"' + syminfo.ticker + '","action":"' + action + '","quantity":' + str.tostring(qty) +
+     ',"stop":' + str.tostring(math.round_to_mintick(stop)) +
+     ',"target":' + str.tostring(math.round_to_mintick(target)) + '}'
+
+f_ghostBE(float newStop) =>
+    '{"source":"golden_ticket_vwap","dryRun":' + (ghostDryRun ? "true" : "false") +
+     ',"symbol":"' + syminfo.ticker + '","action":"update_stop","stop":' + str.tostring(math.round_to_mintick(newStop)) + '}'
+
+entryAllowed = activeSession and not blockedWindow and lastEntryOK and not flattenNow and inBacktestWindow and
+     simDir == 0 and not dailyLockout and tradesToday < maxTradesDay and
+     (not useMaxLondon or not inLondon or londonTradesToday < maxLondonTrades)
+
+var bool evLongEntry  = false
+var bool evShortEntry = false
+var bool evExit       = false
+evLongEntry  := false
+evShortEntry := false
+evExit       := false
+
+if entryAllowed and longSignal
+    simDir   := 1
+    simEntry := close
+    simStop  := close - longStopPts
+    simTP    := close + longTgtPts
+    simBE    := false
+    entryBar := bar_index
+    tradesToday := tradesToday + 1
+    if inLondon
+        londonTradesToday := londonTradesToday + 1
+    qtyWeb = webhookQtyOn ? webhookQty : btContracts
+    alert(f_ghost("buy", qtyWeb, simStop, simTP), alert.freq_once_per_bar)
+    evLongEntry := true
+    if showRects
+        riskBox   := box.new(bar_index, simStop, bar_index, simEntry, border_color = negativeColor, bgcolor = color.new(negativeColor, rectTransp))
+        rewardBox := box.new(bar_index, simEntry, bar_index, simTP,   border_color = positiveColor, bgcolor = color.new(positiveColor, rectTransp))
+else if entryAllowed and shortSignal
+    simDir   := -1
+    simEntry := close
+    simStop  := close + shortStopPts
+    simTP    := close - shortTgtPts
+    simBE    := false
+    entryBar := bar_index
+    tradesToday := tradesToday + 1
+    if inLondon
+        londonTradesToday := londonTradesToday + 1
+    qtyWeb = webhookQtyOn ? webhookQty : btContracts
+    alert(f_ghost("sell", qtyWeb, simStop, simTP), alert.freq_once_per_bar)
+    evShortEntry := true
+    if showRects
+        riskBox   := box.new(bar_index, simEntry, bar_index, simStop, border_color = negativeColor, bgcolor = color.new(negativeColor, rectTransp))
+        rewardBox := box.new(bar_index, simTP,    bar_index, simEntry,border_color = positiveColor, bgcolor = color.new(positiveColor, rectTransp))
+
+// entry fills at this bar's close, so break-even/exit checks must not evaluate this same bar's
+// high/low (that range already happened at/before the fill) - start on the bar after entry.
+postEntryBar = simDir != 0 and not na(entryBar) and bar_index > entryBar
+
+// break-even management
+if useBE and postEntryBar and not simBE
+    tgtDist  = simDir == 1 ? longTgtPts : shortTgtPts
+    progress = simDir == 1 ? (high - simEntry) : (simEntry - low)
+    if progress >= tgtDist * (beMovePct / 100.0)
+        newStop = beDest == "Break Even" ? simEntry :
+             (simDir == 1 ? simEntry + beOffsetTk * syminfo.mintick : simEntry - beOffsetTk * syminfo.mintick)
+        simStop := simDir == 1 ? math.max(simStop, newStop) : math.min(simStop, newStop)
+        simBE   := true
+        if sendBEToGhost
+            alert(f_ghostBE(simStop), alert.freq_once_per_bar)
+
+// exit management (manual bracket so the same-bar tie-break setting is explicit)
+if simDir != 0
+    if showRects and not na(riskBox)
+        box.set_right(riskBox, bar_index)
+        box.set_right(rewardBox, bar_index)
+if postEntryBar
+    hitStop = simDir == 1 ? low <= simStop : high >= simStop
+    hitTgt  = simDir == 1 ? high >= simTP  : low <= simTP
+    exitNow = false
+    float exitPx = na
+    if hitStop and hitTgt
+        exitPx := tieBreak == "Stop First" ? simStop : simTP
+        exitNow := true
+    else if hitStop
+        exitPx := simStop
+        exitNow := true
+    else if hitTgt
+        exitPx := simTP
+        exitNow := true
+    if not exitNow and flattenTrigger
+        exitPx := close
+        exitNow := true
+    if exitNow
+        pnlPts = simDir == 1 ? (exitPx - simEntry) : (simEntry - exitPx)
+        pnlUsd = pnlPts * ptValue * btContracts - rtCost * btContracts
+        netPnlToday := netPnlToday + pnlUsd
+        netPnlTotal := netPnlTotal + pnlUsd
+        totalTrades := totalTrades + 1
+        if pnlUsd > 0
+            totalWins   := totalWins + 1
+            winsToday   := winsToday + 1
+            consecLossesToday := 0
+            grossProfit := grossProfit + pnlUsd
+        else if pnlUsd < 0
+            totalLosses := totalLosses + 1
+            lossesToday := lossesToday + 1
+            consecLossesToday := consecLossesToday + 1
+            grossLoss   := grossLoss + (-pnlUsd)
+        alert(f_ghost("close", 0, 0.0, 0.0), alert.freq_once_per_bar)
+        evExit := true
+        simDir   := 0
+        simEntry := na
+
+// =================================================================== VISUALS
+plot(gtVwap, "Session VWAP", color = color.new(#787b86, 0), linewidth = 2)
+bgcolor(shadeBlocked and (blockedWindow or not activeSession) ? color.new(warningColor, 90) : na, title = "Blocked/Inactive shading")
+
+plotshape(showMarkers and evLongEntry,  title = "Long Entry",  style = shape.triangleup,   location = location.belowbar, color = positiveColor, size = size.small)
+plotshape(showMarkers and evShortEntry, title = "Short Entry", style = shape.triangledown, location = location.abovebar, color = negativeColor, size = size.small)
+plotshape(showMarkers and evExit,       title = "Exit",        style = shape.xcross,        location = location.absolute, color = textColor, size = size.tiny)
+
+// =================================================================== STATUS DASHBOARD
+if showStatusDash and barstate.islast
+    st = table.new(f_tpos(statusPosS), 2, 13, bgcolor = bgColor, border_color = color.new(textColor, 70), border_width = 1)
+    sz = f_tsize(statusSizeS)
+    table.cell(st, 0, 0, "GOLDEN TICKET VWAP", text_color = headerTextColor, bgcolor = headerColor, text_size = sz, text_halign = text.align_left)
+    table.cell(st, 1, 0, "STATUS",             text_color = headerTextColor, bgcolor = headerColor, text_size = sz, text_halign = text.align_right)
+    table.cell(st, 0, 1, "Trend (1H)",  text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_left)
+    table.cell(st, 1, 1, trendUp ? "UP" : trendDown ? "DOWN" : "FLAT", text_color = trendUp ? positiveColor : trendDown ? negativeColor : textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_right)
+    table.cell(st, 0, 2, "1H Move %",   text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_left)
+    table.cell(st, 1, 2, str.tostring(hourMovePct, "#.##") + "%", text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_right)
+    table.cell(st, 0, 3, "VWAP Slope (15m)", text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_left)
+    table.cell(st, 1, 3, str.tostring(vwapSlope, "#.##"), text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_right)
+    table.cell(st, 0, 4, "RSI",         text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_left)
+    table.cell(st, 1, 4, str.tostring(rsiVal, "#.#"), text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_right)
+    table.cell(st, 0, 5, "Distance (ATR)", text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_left)
+    table.cell(st, 1, 5, str.tostring(atrVal > 0 ? distPts / atrVal : 0.0, "#.##"), text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_right)
+    table.cell(st, 0, 6, "Session Active", text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_left)
+    table.cell(st, 1, 6, activeSession ? "YES" : "NO", text_color = activeSession ? positiveColor : negativeColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_right)
+    table.cell(st, 0, 7, "Blocked Window", text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_left)
+    table.cell(st, 1, 7, blockedWindow ? "YES" : "NO", text_color = blockedWindow ? warningColor : textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_right)
+    table.cell(st, 0, 8, "Trades Today", text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_left)
+    table.cell(st, 1, 8, str.tostring(tradesToday) + " / " + str.tostring(maxTradesDay), text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_right)
+    table.cell(st, 0, 9, "London Trades", text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_left)
+    table.cell(st, 1, 9, str.tostring(londonTradesToday) + " / " + str.tostring(maxLondonTrades), text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_right)
+    table.cell(st, 0, 10, "Wins / Losses Today", text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_left)
+    table.cell(st, 1, 10, str.tostring(winsToday) + " / " + str.tostring(lossesToday), text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_right)
+    table.cell(st, 0, 11, "Lockout", text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_left)
+    table.cell(st, 1, 11, dailyLockout ? "ACTIVE" : "OFF", text_color = dailyLockout ? warningColor : positiveColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_right)
+    table.cell(st, 0, 12, "Position", text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_left)
+    table.cell(st, 1, 12, simDir == 1 ? "LONG" : simDir == -1 ? "SHORT" : "FLAT", text_color = simDir == 1 ? positiveColor : simDir == -1 ? negativeColor : textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_right)
+
+// =================================================================== LEGACY PERFORMANCE DASHBOARD
+if showPerfDash and barstate.islast
+    winRate = totalTrades > 0 ? (totalWins / totalTrades) * 100.0 : 0.0
+    profitFactor = grossLoss > 0 ? grossProfit / grossLoss : na
+    avgWin  = totalWins   > 0 ? grossProfit / totalWins   : 0.0
+    avgLoss = totalLosses > 0 ? grossLoss   / totalLosses : 0.0
+    pf = table.new(f_tpos(perfPosS), 2, 9, bgcolor = bgColor, border_color = color.new(textColor, 70), border_width = 1)
+    pz = f_tsize(perfSizeS)
+    table.cell(pf, 0, 0, "PERFORMANCE (Legacy)", text_color = headerTextColor, bgcolor = headerColor, text_size = pz, text_halign = text.align_left)
+    table.cell(pf, 1, 0, "",                      text_color = headerTextColor, bgcolor = headerColor, text_size = pz, text_halign = text.align_right)
+    table.cell(pf, 0, 1, "Net P&L (Total)", text_color = textColor, bgcolor = bgColor, text_size = pz, text_halign = text.align_left)
+    table.cell(pf, 1, 1, "$" + str.tostring(netPnlTotal, "#.##"), text_color = netPnlTotal >= 0 ? positiveColor : negativeColor, bgcolor = bgColor, text_size = pz, text_halign = text.align_right)
+    table.cell(pf, 0, 2, "Net P&L (Today)", text_color = textColor, bgcolor = bgColor, text_size = pz, text_halign = text.align_left)
+    table.cell(pf, 1, 2, "$" + str.tostring(netPnlToday, "#.##"), text_color = netPnlToday >= 0 ? positiveColor : negativeColor, bgcolor = bgColor, text_size = pz, text_halign = text.align_right)
+    table.cell(pf, 0, 3, "Total Trades", text_color = textColor, bgcolor = bgColor, text_size = pz, text_halign = text.align_left)
+    table.cell(pf, 1, 3, str.tostring(totalTrades), text_color = textColor, bgcolor = bgColor, text_size = pz, text_halign = text.align_right)
+    table.cell(pf, 0, 4, "Win Rate", text_color = textColor, bgcolor = bgColor, text_size = pz, text_halign = text.align_left)
+    table.cell(pf, 1, 4, str.tostring(winRate, "#.#") + "%", text_color = textColor, bgcolor = bgColor, text_size = pz, text_halign = text.align_right)
+    table.cell(pf, 0, 5, "Profit Factor", text_color = textColor, bgcolor = bgColor, text_size = pz, text_halign = text.align_left)
+    table.cell(pf, 1, 5, na(profitFactor) ? "n/a" : str.tostring(profitFactor, "#.##"), text_color = textColor, bgcolor = bgColor, text_size = pz, text_halign = text.align_right)
+    table.cell(pf, 0, 6, "Wins / Losses", text_color = textColor, bgcolor = bgColor, text_size = pz, text_halign = text.align_left)
+    table.cell(pf, 1, 6, str.tostring(totalWins) + " / " + str.tostring(totalLosses), text_color = textColor, bgcolor = bgColor, text_size = pz, text_halign = text.align_right)
+    table.cell(pf, 0, 7, "Avg Win / Avg Loss", text_color = textColor, bgcolor = bgColor, text_size = pz, text_halign = text.align_left)
+    table.cell(pf, 1, 7, "$" + str.tostring(avgWin, "#.##") + " / $" + str.tostring(avgLoss, "#.##"), text_color = textColor, bgcolor = bgColor, text_size = pz, text_halign = text.align_right)
+    table.cell(pf, 0, 8, "Round-Trip Cost/Contract", text_color = textColor, bgcolor = bgColor, text_size = pz, text_halign = text.align_left)
+    table.cell(pf, 1, 8, "$" + str.tostring(rtCost, "#.##"), text_color = textColor, bgcolor = bgColor, text_size = pz, text_halign = text.align_right)
