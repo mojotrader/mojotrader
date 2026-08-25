@@ -11,12 +11,16 @@
 //   unaffected by the chart timeframe, and the Strategy Tester shows the three of them together.
 //
 // THE 15-MINUTE ENGINE (Halyard), in short
-//   Every chart bar is put in a 15-minute bucket (UTC-aligned, which is where TradingView's own 15m bars sit).
-//   The LAST chart bar of a bucket closes that 15m bar, so on a 1m chart the 09:44 bar closes the 09:30-09:45
-//   candle - with process_orders_on_close = true the entry fills at that bar's close, i.e. at the 15m close
-//   price itself. A bucket that ends inside a data gap is caught up on the first bar of the next bucket.
-//   REQUIREMENT: use a chart timeframe that divides into 15 - 1, 3, 5 or 15 minutes. On anything larger the
-//   "15m" bar degrades to the chart bar and Halyard's levels stop matching a real 15m chart.
+//   Halyard's range, break and fills are read off TradingView's OWN 15-minute series (request.security), not a
+//   hand-rolled aggregate of chart bars - so it works correctly on ANY chart timeframe from the finest
+//   resolution up to 15 minutes, whether or not that timeframe divides evenly into 15 (1m, 2m, 3m, 5m, 10m,
+//   13m, 15m, ... all work identically). A 15-minute bar is detected the moment TradingView's own series
+//   reports a new one has started, at which point the JUST-COMPLETED bar's high/low/close/open-time are read
+//   with process_orders_on_close = true meaning the entry fills at that bar's close, i.e. at the 15m close
+//   price itself.
+//   REQUIREMENT: the chart timeframe must be 15 minutes or FASTER. On anything slower (30m, 1h, 4h, Daily) a
+//   single chart bar can span multiple 15-minute periods and this script cannot see inside it - the strategy
+//   throws a runtime error naming this rather than silently running on incomplete data.
 //
 // HOW THE THREE SETUPS SHARE ONE POSITION
 //   Pine nets every order into ONE position: an opposite-side entry would REVERSE another setup's trade, not
@@ -394,56 +398,38 @@ f_halSessionKey(t) =>
     year(s, tz) * 10000 + month(s, tz) * 100 + dayofmonth(s, tz)
 
 // ---------------------------------------------------------------- the 15-minute bar builder
-// Buckets are aligned to the epoch, i.e. to :00/:15/:30/:45 UTC, which is exactly where TradingView's own 15m
-// bars sit for these instruments (the CME reopen at 18:00 ET is on a 15-minute boundary in UTC too).
-halTfMs  = 15 * 60 * 1000
-chartMs  = timeframe.in_seconds(timeframe.period) * 1000
-halBkt   = math.floor(time / halTfMs)
+// REQUIRES a chart timeframe of 15 minutes or faster (seconds charts included); it cannot see inside a chart
+// bar slower than that, so a 30m/1h/4h/Daily chart would miss 15m closes entirely. Fail loudly rather than
+// silently running on bad data.
+if runHAL and timeframe.in_seconds(timeframe.period) > 900
+    runtime.error("Halyard needs a chart timeframe of 15 minutes or faster (any TF up to 15m works - 1m, 2m, 3m, 5m, 10m, 15m, ...). Switch the chart, or turn Run HALYARD off.")
+chartMs = timeframe.in_seconds(timeframe.period) * 1000
 
-var int   halAggBkt  = na
-var float halAggH    = na
-var float halAggL    = na
-var float halAggC    = na
-var int   halAggT    = na
-var bool  halBktDone = false
+// TradingView's OWN 15-minute series, pulled directly rather than hand-aggregated from chart bars. This is
+// what makes Halyard work on ANY chart timeframe up to 15m - 1m, 2m, 3m, 5m, 10m, 13m, whatever - not just
+// the four (1/3/5/15) that happen to divide evenly into 15. A hand-rolled aggregator keyed off chart-bar
+// boundaries only lands exactly on the 15-minute grid when the chart TF divides it evenly; on anything else
+// (2m, 10m, 20m...) it drifts, closes the "15m candle" late by up to one chart bar, and its aggregated H/L/C
+// cover a slightly-too-wide window - which is silent, not a crash: halIsRangeBar's exact-minute match below
+// then never fires, so Halyard just never trades. request.security's 15m series is computed by TradingView
+// off the true 15-minute grid, correct on any sub-15m chart by construction, gaps and session boundaries
+// included - nothing here needs to hand-manage a data gap or a holiday early close.
+//
+// With lookahead_off (non-repainting), the value read on THIS chart bar reflects the LAST bar's numbers
+// throughout the whole time the CURRENT 15m period is still forming, and switches over to that period's own
+// completed numbers on the first chart bar time crosses into the NEXT 15m period. So t15 CHANGING is exactly
+// "a 15m bar just closed", and the values to use for it are THIS bar's own read - no [1] shift needed, since
+// this is already the first bar where the newly-completed period's numbers are visible.
+[hi15, lo15, cl15, t15] = request.security(syminfo.tickerid, "15", [high, low, close, time], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
 
-// set on the chart bar that CLOSES a 15-minute candle, together with that candle's H/L/C and open time
-halNewBar = false
-float hal15H = na
-float hal15L = na
-float hal15C = na
-int   hal15T = na
-
-// (1) CATCH-UP. A bucket whose last bar never arrived (a data gap, a halt, a session end) is closed here, on
-//     the first bar of the next bucket, out of the aggregate as it stood. The aggregate still holds the
-//     previous bar's values because it is rolled in step 2, below this.
-if not na(halAggBkt) and halBkt != halAggBkt and not halBktDone
-    halNewBar := true
-    hal15H := halAggH
-    hal15L := halAggL
-    hal15C := halAggC
-    hal15T := halAggT
-// (2) ROLL the aggregate: start a new one on a new bucket, otherwise extend it.
-if na(halAggBkt) or halBkt != halAggBkt
-    halAggBkt  := halBkt
-    halAggH    := high
-    halAggL    := low
-    halAggT    := time
-    halBktDone := false
-else
-    halAggH := math.max(halAggH, high)
-    halAggL := math.min(halAggL, low)
-halAggC := close
-// (3) PROJECTED CLOSE - the normal path. This chart bar is the last one of its bucket when the NEXT bar's time
-//     falls in a different bucket, so the 15m candle closes here, at this bar's close. barstate.isconfirmed
-//     keeps a forming bar from firing the break early.
-if not halBktDone and barstate.isconfirmed and math.floor((time + chartMs) / halTfMs) != halBkt
-    halBktDone := true
-    halNewBar  := true
-    hal15H := halAggH
-    hal15L := halAggL
-    hal15C := halAggC
-    hal15T := halAggT
+// set on the chart bar that CLOSES a 15-minute candle, together with that candle's H/L/C and open time.
+// barstate.isconfirmed keeps this from flickering true on every intrabar tick of a still-forming live chart
+// bar - it only latches once, on that bar's own final calculation.
+halNewBar = barstate.isconfirmed and t15 != t15[1] and not na(t15[1])
+float hal15H = halNewBar ? hi15 : na
+float hal15L = halNewBar ? lo15 : na
+float hal15C = halNewBar ? cl15 : na
+int   hal15T = halNewBar ? t15  : na
 
 // the previous two CLOSED 15m candles, kept for the (unread) Breakout Candle stop mode; shifted at the very
 // end of this engine so that during the entry logic they are still the bars BEFORE the breakout candle.
@@ -1804,7 +1790,7 @@ if showInfo and barstate.islast
     info := table.new(position.top_right, 1, 19, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
     table.cell(info, 0, 0,  (ordersOn ? "" : "[INDICATOR - no orders]  ") + "HALYARD + BREAK-THEN-PULLBACK (ORB + IB)",
          text_color = ordersOn ? color.aqua : color.orange, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 1,  "HALYARD: 15m candles built from chart bars - any chart TF",  text_color = color.fuchsia, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 1,  "HALYARD: TradingView's own 15m series - any chart TF up to 15m",  text_color = color.fuchsia, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 2,  "  range = the 00:00 EST / 01:00 EDT 15m candle",             text_color = color.silver,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 3,  "  first 15m CLOSE beyond it trades | stop = far edge | R:R " + str.tostring(halRR, "#.##"), text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 4,  "  one break per day | flat 13:30 / 14:30 ET",                text_color = color.silver,  text_size = size.small, text_halign = text.align_left)
