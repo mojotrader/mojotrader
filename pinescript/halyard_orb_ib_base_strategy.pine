@@ -415,12 +415,20 @@ chartMs = timeframe.in_seconds(timeframe.period) * 1000
 // off the true 15-minute grid, correct on any sub-15m chart by construction, gaps and session boundaries
 // included - nothing here needs to hand-manage a data gap or a holiday early close.
 //
-// With lookahead_off (non-repainting), the value read on THIS chart bar reflects the LAST bar's numbers
-// throughout the whole time the CURRENT 15m period is still forming, and switches over to that period's own
-// completed numbers on the first chart bar time crosses into the NEXT 15m period. So t15 CHANGING is exactly
-// "a 15m bar just closed", and the values to use for it are THIS bar's own read - no [1] shift needed, since
-// this is already the first bar where the newly-completed period's numbers are visible.
-[hi15, lo15, cl15, t15] = request.security(syminfo.tickerid, "15", [high, low, close, time], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+// THE EXPRESSION MUST BE GUARDED WITH barstate.isconfirmed, EVALUATED IN THE 15-MINUTE CONTEXT ITSELF. Bare
+// high/low/close/time requested with no guard is LIVE data - it updates on every chart bar to show the
+// STILL-FORMING 15m bar's current (incomplete) values, not the last COMPLETED one. gaps = barmerge.gaps_off
+// is what turns that into the behaviour this engine actually needs: the guarded expression returns na for
+// every bar of the 15m context that has not yet closed, and gaps_off HOLDS the last real (confirmed) value
+// through all of those na bars instead of showing na - so what is read on the calling chart bar is the last
+// COMPLETED 15m bar's numbers, unchanged, right up until the moment a new one closes and gaps_off finally has
+// a fresh value to hand over. On a 15-minute CHART this bug was invisible: a same-timeframe request.security
+// call is a pass-through of the chart's own already-confirmed bar, so the missing guard never mattered there
+// - which is exactly why "works on 15m, breaks on everything else" was the symptom.
+f_hal15Snap() =>
+    barstate.isconfirmed ? [high, low, close, time] : [float(na), float(na), float(na), int(na)]
+
+[hi15, lo15, cl15, t15] = request.security(syminfo.tickerid, "15", f_hal15Snap(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
 
 // set on the chart bar that CLOSES a 15-minute candle, together with that candle's H/L/C and open time.
 // barstate.isconfirmed keeps this from flickering true on every intrabar tick of a still-forming live chart
