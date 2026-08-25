@@ -346,6 +346,12 @@ f_tp(int d, float rH, float rL, float rg, float dHi, float dLo, string tpL, stri
 // chart that is a one-minute lag on a gate that only matters when a fill and a 15m close land on the same bar.
 var bool orbibLive = false
 
+// WHO OPENED THE CURRENT POSITION, latched at the moment each setup's own entry becomes real (halEntered /
+// or_firstFill / ib_firstFill) rather than read from that setup's CURRENT open/closed state. This is what the
+// webhook's sendFill gate below reads instead of halLive - see the note there for why halLive was the wrong
+// test.
+var string posSrc = ""
+
 // ================================================================ HALYARD ENGINE
 // Single-candle opening-range breakout with an optional loser-reversal, on 15-MINUTE candles that this engine
 // builds itself - so the chart can be 1m, 3m, 5m or 15m and the levels, the break and the fills are identical.
@@ -615,6 +621,7 @@ if halEnterL
     halBars15 := 0
     halEntered := true
     halEntDir  := 1
+    posSrc     := "HAL"
     if ordersOn
         strategy.entry("HAL-L", strategy.long, qty = q)
         strategy.exit("HAL-Lx", from_entry = "HAL-L", stop = sl, limit = tp)
@@ -636,6 +643,7 @@ if halEnterS
     halBars15 := 0
     halEntered := true
     halEntDir  := -1
+    posSrc     := "HAL"
     if ordersOn
         strategy.entry("HAL-S", strategy.short, qty = q)
         strategy.exit("HAL-Sx", from_entry = "HAL-S", stop = sl, limit = tp)
@@ -662,6 +670,7 @@ if halRevL
     halBars15 := 0
     halEntered := true
     halEntDir  := 1
+    posSrc     := "HAL"
     if ordersOn
         strategy.entry("HAL-RL", strategy.long, qty = q)
         strategy.exit("HAL-RLx", from_entry = "HAL-RL", stop = sl, limit = tp)
@@ -682,6 +691,7 @@ if halRevS
     halBars15 := 0
     halEntered := true
     halEntDir  := -1
+    posSrc     := "HAL"
     if ordersOn
         strategy.entry("HAL-RS", strategy.short, qty = q)
         strategy.exit("HAL-RSx", from_entry = "HAL-RS", stop = sl, limit = tp)
@@ -976,6 +986,8 @@ if or_placed and not or_closed
         if or_useAdd and not or_f2 and high >= or_e2
             or_f2 := true
 or_firstFill = (or_f1 or or_f2) and not (or_f1[1] or or_f2[1])
+if or_firstFill
+    posSrc := "ORB"
 if or_f1 or or_f2
     or_avgPx := or_f1 and or_f2 ? (or_e1 + or_e2) / 2 : or_f1 ? or_e1 : or_e2
 if or_firstFill
@@ -1228,6 +1240,8 @@ if ib_placed and not ib_closed
         if ib_useAdd and not ib_f2 and high >= ib_e2
             ib_f2 := true
 ib_firstFill = (ib_f1 or ib_f2) and not (ib_f1[1] or ib_f2[1])
+if ib_firstFill
+    posSrc := "IB"
 if ib_f1 or ib_f2
     ib_avgPx := ib_f1 and ib_f2 ? (ib_e1 + ib_e2) / 2 : ib_f1 ? ib_e1 : ib_e2
 if ib_firstFill
@@ -1474,9 +1488,20 @@ sellNow  = posNow < 0 and (posPrev >= 0 or posNow < posPrev)
 closeNow = posNow == 0 and posPrev != 0
 // In AT-ARM mode the ORB and IB entries are already resting at the broker, so their fills must NOT be chased
 // with a second order - the broker filled its own limit and the bracket went out with it. Halyard is different:
-// it is a market order at the 15m close, so its arm and its fill are the same event and it keeps this path.
-// halLive is the tell - the seat rules mean an ORB/IB fill can never happen while a Halyard trade is open.
-sendFill = not armLimits or halLive
+// it is a market order at the 15m close, so its arm and its fill are the same event and it needs this path to
+// ever reach the broker at all.
+//
+// THIS USED TO READ halLive (halTrDir != 0), and that was a real bug: halLive is the trade's CURRENT open/
+// closed state, but buyNow/sellNow only turn true a bar AFTER strategy.entry was called (strategy.position_size
+// lags a bar behind the engine that books the fill - see the note above autoStop). If a Halyard trade's stop or
+// target is hit on that very next bar - a fast whipsaw right after the break, entirely possible on a 1-3 minute
+// chart - halTrDir gets zeroed by the Halyard engine EARLIER in that same bar's script pass, before this line
+// runs, so halLive already read false by the time buyNow finally went true. Net effect: the trade opened AND
+// closed for real, but its entry alert was silently swallowed because it looked like "no Halyard trade is open
+// right now". posSrc is not this bar's current state - it is latched once, in the entry block itself, on
+// EXACTLY the bar strategy.entry was called, and only overwritten by the NEXT setup's own entry - so it still
+// correctly reads "HAL" a bar later even if the trade has since closed.
+sendFill = not armLimits or posSrc == "HAL"
 // the exact string that went out, kept for the on-chart readout below
 var string pmtLast = ""
 if autoOn and ordersOn and buyNow and sendFill
