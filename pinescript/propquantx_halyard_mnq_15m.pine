@@ -480,10 +480,20 @@ if enterShort
 // `breakoutMarked` latched on the first break — so the level test is written out
 // directly here, exactly as the reversal does it.
 //
+// THE CASE THIS EXISTS FOR — a wick stop-out with no close beyond the level:
+//   01:00  range candle sets ORB high 29259.75 / ORB low
+//   02:00  closes BELOW the ORB low -> short, stop on the ORB high
+//   02:30  candle WICKS through 29259.75 and fills the stop, then closes back
+//          INSIDE the range. No close above the ORB high, so the reversal never
+//          arms — correctly, it is gated on a CLOSE, not on the stop fill.
+//   03:15  closes BELOW the ORB low again -> re-entry short, same stop level
+// The stop was taken by a wick, the trend never confirmed against the trade, and
+// the setup re-presents itself. That is the day the first version gave up on.
+//
 // Under the shipped stop mode a long stops out ON the ORB LOW, so a re-entry
-// long is a full re-break of the range from below: price has to travel back
-// across the whole range and close above the ORB high again. That is the point —
-// it is a second breakout, not an average-down into the loser.
+// long is the mirror image: price has to travel back across the whole range and
+// close above the ORB high again. That is the point — it is a second breakout,
+// not an average-down into the loser.
 //
 // The stop goes back on the SAME structural level as the first trade (the far
 // ORB edge under ORB Edge + Buffer), so the second trade's risk per contract is
