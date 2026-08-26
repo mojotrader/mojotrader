@@ -1,0 +1,379 @@
+//@version=6
+// Golden Ticket VWAP — STRATEGY version (native Strategy Tester).
+//
+// Companion to golden_ticket_vwap_indicator.pine. Same filter stack, but two deliberate differences:
+//
+//   1) NATIVE strategy(): orders, P&L, win rate and drawdown come from TradingView's Strategy Tester
+//      instead of the indicator's hand-rolled trade simulation and "Legacy Performance Dashboard".
+//      Commission and slippage therefore belong in the Properties tab, NOT in the inputs below - Pine
+//      requires those to be compile-time constants in the strategy() call, so they cannot be inputs.
+//      "Dollar Value Per Point" is likewise dropped: the Strategy Tester takes it from the symbol.
+//
+//   2) DIRECTIONAL BIAS IS THE SLOPING VWAP. Price ABOVE a RISING VWAP -> look for longs; price BELOW
+//      a FALLING VWAP -> look for shorts. A flat VWAP arms nothing. The VWAP line on the chart is
+//      coloured by its own slope so the live bias is visible at a glance. This is a direction test;
+//      "Minimum VWAP Slope" in Quality Filters separately controls how STEEP the slope must be.
+//
+//   3) ENTRY IS AT VWAP, not at a confirmation candle. The indicator waits for a reaction candle and
+//      enters at ITS CLOSE - which is by definition already some distance past VWAP, so you pay up for
+//      the confirmation. Here a LIMIT rests ON the session VWAP itself while the setup is armed, so the
+//      pullback fills you AT the VWAP. Better entry price, and the stop/target are measured from VWAP.
+//      Trade-off: no confirmation candle, so you will be filled on pullbacks that keep going against
+//      you (the reaction candle is what used to filter those out). The 1H trend, VWAP-slope and RSI
+//      reset filters are what stand in for that confirmation now.
+//      Because VWAP moves every bar, the resting limit is re-priced to the current VWAP on each bar.
+//
+// PROVENANCE: reconstruction of the closed-source "VWAP GOLDEN TICKET" (mogodfrey) from the supplied
+// input panel plus its publicly indexed description - see the indicator file's header for full detail
+// and for which parts are inferred. The entry rule here is a deliberate USER-REQUESTED change and does
+// NOT match the original description.
+strategy("Golden Ticket VWAP Strategy", overlay = true, pyramiding = 0,
+     initial_capital = 50000, margin_long = 0, margin_short = 0,
+     default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0.95, slippage = 1,
+     max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500)
+
+// =================================================================== SETUP
+gSetup     = "Setup"
+trendSym   = input.symbol("CME_MINI:NQ1!", "1-Hour Trend Symbol", group = gSetup,
+     tooltip = "Higher-timeframe symbol used ONLY as a momentum filter. Entries, stops and targets are always calculated from the instrument on the chart.")
+minHrMove  = input.float(0.1, "Minimum 1-Hour Move (%)", minval = 0, step = 0.05, group = gSetup,
+     tooltip = "The 1-hour trend symbol's last closed hourly bar must have moved at least this % (open to close) to count as an established UP/DOWN trend.")
+enableLongs  = input.bool(true, "Enable Longs",  group = gSetup)
+enableShorts = input.bool(true, "Enable Shorts", group = gSetup)
+filterMode = input.string("Standard", "Trade Filter Mode", options = ["Standard", "Strict", "Loose"], group = gSetup,
+     tooltip = "Standard: obey each quality-filter toggle below. Strict: force VWAP-slope + distance + RSI-reset filters ON and require 1.5x the minimum 1-hour move. Loose: ignore the RSI-reset and distance filters (VWAP-slope + trend direction still apply).")
+contracts  = input.int(1, "Contracts", minval = 1, group = gSetup,
+     tooltip = "Order size. Commission and slippage are set in the Properties tab, not here.")
+
+// =================================================================== ENTRY (VWAP LIMIT)
+gEntry = "Entry"
+vwapOffsetTk = input.int(0, "VWAP Limit Offset (ticks)", group = gEntry,
+     tooltip = "Shifts the resting limit off the VWAP line. 0 = exactly on VWAP. POSITIVE = more conservative (long limit placed BELOW VWAP, short limit ABOVE), so price must pierce VWAP before you fill - fewer fills, better price. NEGATIVE = fills slightly before VWAP is reached.")
+requireTrendSide = input.bool(true, "Require Price On Correct Side Of VWAP", group = gEntry,
+     tooltip = "ON (recommended): only arm a long while price is ABOVE VWAP (and a short while BELOW). This is what makes it a genuine pullback-to-VWAP, keeps the order a true resting limit, and protects against being filled at VWAP right before price keeps falling - once a bar closes through, the setup disarms and the order is pulled. OFF: the limit keeps resting after price closes through VWAP, which turns the setup into a mean-reversion catch.")
+useVwapSlopeDir = input.bool(true, "Require VWAP Sloping In Trade Direction", group = gEntry,
+     tooltip = "ON: longs only while the VWAP line itself is RISING, shorts only while it is FALLING. Combined with the price-side rule above this is the core bias: price above a rising VWAP -> look long; price below a falling VWAP -> look short. A flat VWAP arms nothing. This is a pure direction test; the separate 'Minimum VWAP Slope' filter sets how STEEP that slope must be.")
+
+// =================================================================== QUALITY FILTERS
+gQual = "Quality Filters"
+useMinSlope   = input.bool(true, "Use Minimum VWAP Slope", group = gQual,
+     tooltip = "Requires the session VWAP itself to be trending (not flat) before allowing an entry.")
+minVwapChg15  = input.float(2.5, "Minimum 15m VWAP Change (points)", minval = 0, step = 0.5, group = gQual)
+useMaxDist    = input.bool(false, "Use Maximum Distance From VWAP", group = gQual,
+     tooltip = "With entries resting ON VWAP this no longer gates the fill price (that is always VWAP). It gates ARMING instead: if price is currently more than this many ATRs from VWAP, the pullback needed to reach VWAP is too big, so the setup is not armed.")
+distAtrLen    = input.int(7, "Distance ATR Length", minval = 1, group = gQual)
+maxVwapDistAtr= input.float(1.05, "Maximum VWAP Distance (ATR)", minval = 0.1, step = 0.05, group = gQual)
+useRsiReset   = input.bool(true, "Use RSI Extreme Reset Filter", group = gQual,
+     tooltip = "If RSI touched an extreme in the lookback window, blocks the trade until RSI resets back through the reset level (avoids buying/selling into a blow-off move).")
+rsiLen        = input.int(14, "RSI Length", minval = 1, group = gQual)
+rsiOB         = input.float(63.5, "RSI Overbought", group = gQual)
+rsiOS         = input.float(31, "RSI Oversold", group = gQual)
+rsiLookback   = input.int(3, "RSI Extreme Lookback Bars", minval = 1, group = gQual)
+rsiLongReset  = input.float(63, "RSI Long Reset Below", group = gQual)
+rsiShortReset = input.float(35, "RSI Short Reset Above", group = gQual)
+
+// =================================================================== RISK MANAGEMENT
+gRisk = "Risk Management"
+longStopPts  = input.float(80, "Long Stop (points)",   minval = 0, group = gRisk,
+     tooltip = "Measured from the actual fill price (the VWAP), not from the signal bar's close.")
+longTgtPts   = input.float(40, "Long Target (points)", minval = 0, group = gRisk)
+shortStopPts = input.float(80, "Short Stop (points)",  minval = 0, group = gRisk)
+shortTgtPts  = input.float(50, "Short Target (points)",minval = 0, group = gRisk)
+maxTradesDay = input.int(5, "Maximum Trades Per Day", minval = 0, group = gRisk)
+useMaxLondon = input.bool(true, "Use Maximum London Trades", group = gRisk,
+     tooltip = "Caps entries taken while the Overnight / London session is active, separate from the overall daily cap.")
+maxLondonTrades = input.int(4, "Maximum London Trades", minval = 0, group = gRisk)
+useLockWins  = input.bool(true, "Lock Out After Daily Wins", group = gRisk,
+     tooltip = "Stop trading for the day once this many winners have been booked (protect the day's gains).")
+maxWinsLock  = input.int(4, "Maximum Wins Before Lockout", minval = 1, group = gRisk)
+maxLossesDay = input.int(2, "Maximum Losses Per Day", minval = 0, group = gRisk,
+     tooltip = "0 disables the daily-loss lockout.")
+lossLockMode = input.string("Consecutive", "Daily Loss Lockout Mode", options = ["Consecutive", "Total"], group = gRisk,
+     tooltip = "Consecutive: only back-to-back losses count toward the cap (a win resets the streak). Total: every loss counts.")
+useBE        = input.bool(false, "Use Break-Even Management", group = gRisk)
+beMovePct    = input.float(85, "Move Stop at % Toward Target", minval = 1, maxval = 100, group = gRisk)
+beDest       = input.string("Break Even", "Break-Even Stop Destination", options = ["Break Even", "Break Even Plus"], group = gRisk)
+beOffsetTk   = input.int(1, "Break-Even+ Offset (ticks)", minval = 0, group = gRisk)
+
+// =================================================================== TRADING HOURS
+gHrs = "Trading Hours"
+tz          = input.string("America/New_York", "Time Zone", group = gHrs)
+useAsia     = input.bool(false, "Enable Asia Session", group = gHrs)
+asiaSess    = input.session("1800-0000", "Asia Session", group = gHrs)
+useLondon   = input.bool(true, "Enable Overnight / London Session", group = gHrs)
+londonSess  = input.session("2130-0900", "Overnight / London Session", group = gHrs)
+useNyAM     = input.bool(true, "Enable New York AM Session", group = gHrs)
+nyAmSess    = input.session("1000-1200", "New York AM Session", group = gHrs)
+useNyPM     = input.bool(true, "Enable New York PM Session", group = gHrs)
+nyPmSess    = input.session("1200-1400", "New York PM Session", group = gHrs)
+blockOpen   = input.bool(true, "Block 9:30-10:30 AM", group = gHrs)
+useFlatPre  = input.bool(true, "Flatten Before New York Open", group = gHrs,
+     tooltip = "Force-closes any open trade and blocks new entries between the pre-open flatten time and 09:30.")
+preFlatH    = input.int(9,  "Pre-Open Flatten Hour",   0, 23, group = gHrs)
+preFlatM    = input.int(15, "Pre-Open Flatten Minute", 0, 59, group = gHrs)
+lastEntryH  = input.int(15, "Last Entry Hour",   0, 23, group = gHrs)
+lastEntryM  = input.int(30, "Last Entry Minute", 0, 59, group = gHrs)
+flatH       = input.int(16, "Flatten Hour",   0, 23, group = gHrs)
+flatM       = input.int(40, "Flatten Minute", 0, 59, group = gHrs)
+
+// =================================================================== BACKTESTING WINDOW
+gBT = "Backtesting Window"
+useRollWin  = input.bool(true, "Use Rolling Backtest Window", group = gBT)
+btDays      = input.int(365, "Number of Backtest Days", minval = 1, group = gBT)
+
+// =================================================================== QUANTCRAWLER GHOST
+gGhost = "QuantCrawler Ghost"
+ghostOn        = input.bool(false, "Enable Ghost Webhook Alerts", group = gGhost,
+     tooltip = "Create ONE alert on this strategy with condition 'alert() function calls only'. VERIFY the JSON below matches QuantCrawler's Ghost schema before going live - the field names here are unverified.")
+webhookQtyOn   = input.bool(true, "Webhook Controls Contracts", group = gGhost)
+webhookQty     = input.int(1, "Webhook Contracts", minval = 1, group = gGhost)
+ghostDryRun    = input.bool(false, "Ghost Dry-Run Mode", group = gGhost,
+     tooltip = "Tags every webhook payload dryRun:true so Ghost logs the signal without placing a live order.")
+sendBEToGhost  = input.bool(true, "Send Break-Even Command to Ghost (Tradovate)", group = gGhost)
+
+// =================================================================== DISPLAY
+gDisp = "Display"
+showVwap     = input.bool(true, "Show VWAP", group = gDisp)
+showLimit    = input.bool(true, "Show Resting Limit Level", group = gDisp)
+shadeBlocked = input.bool(true, "Shade Blocked Times", group = gDisp)
+showStatusDash = input.bool(true, "Show Current Status Dashboard", group = gDisp)
+statusPosS = input.string("Upper Right", "Status Dashboard Position", options = ["Upper Left", "Upper Center", "Upper Right", "Middle Left", "Middle Center", "Middle Right", "Bottom Left", "Bottom Center", "Bottom Right"], group = gDisp)
+statusSizeS = input.string("Normal", "Status Dashboard Size", options = ["Tiny", "Small", "Normal", "Large"], group = gDisp)
+headerColor     = input.color(#ffd600, "Header Color", group = gDisp)
+headerTextColor = input.color(#131722, "Header Text Color", group = gDisp)
+bgColor         = input.color(#000000, "Background Color", group = gDisp)
+textColor       = input.color(#ffffff, "Text Color", group = gDisp)
+positiveColor   = input.color(#29b6f6, "Positive Color", group = gDisp)
+negativeColor   = input.color(#ef5350, "Negative Color", group = gDisp)
+warningColor    = input.color(#ff9800, "Warning Color", group = gDisp)
+
+// =================================================================== HELPERS
+f_tpos(string s) =>
+    s == "Upper Left" ? position.top_left : s == "Upper Center" ? position.top_center : s == "Upper Right" ? position.top_right :
+     s == "Middle Left" ? position.middle_left : s == "Middle Center" ? position.middle_center : s == "Middle Right" ? position.middle_right :
+     s == "Bottom Left" ? position.bottom_left : s == "Bottom Center" ? position.bottom_center : position.bottom_right
+
+f_tsize(string s) =>
+    s == "Tiny" ? size.tiny : s == "Small" ? size.small : s == "Large" ? size.large : size.normal
+
+// =================================================================== CORE SERIES
+gtVwap = ta.vwap(hlc3)
+atrVal = ta.atr(distAtrLen)
+rsiVal = ta.rsi(close, rsiLen)
+wasOB  = ta.highest(rsiVal, rsiLookback) >= rsiOB
+wasOS  = ta.lowest(rsiVal, rsiLookback) <= rsiOS
+
+tfSec      = timeframe.in_seconds(timeframe.period)
+barsPer15m = tfSec > 0 ? math.max(1, math.round(900 / tfSec)) : 3
+vwapSlope  = gtVwap - gtVwap[barsPer15m]
+distPts    = math.abs(close - gtVwap)
+
+htf_o = request.security(trendSym, "60", open,  gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+htf_c = request.security(trendSym, "60", close, gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+hourMovePct = htf_o != 0 ? (htf_c - htf_o) / htf_o * 100.0 : 0.0
+
+// =================================================================== FILTER MODE RESOLUTION
+slopeActive = filterMode == "Strict" ? true : filterMode == "Loose" ? false : useMinSlope
+distActive  = filterMode == "Strict" ? true : filterMode == "Loose" ? false : useMaxDist
+rsiActive   = filterMode == "Strict" ? true : filterMode == "Loose" ? false : useRsiReset
+trendThresh = filterMode == "Strict" ? minHrMove * 1.5 : minHrMove
+
+trendUp   = hourMovePct >= trendThresh
+trendDown = hourMovePct <= -trendThresh
+
+slopeOKLong  = not slopeActive or vwapSlope >= minVwapChg15
+slopeOKShort = not slopeActive or -vwapSlope >= minVwapChg15
+distOK       = not distActive or distPts <= maxVwapDistAtr * atrVal
+rsiBlockLong  = rsiActive and wasOB and rsiVal >= rsiLongReset
+rsiBlockShort = rsiActive and wasOS and rsiVal <= rsiShortReset
+
+// =================================================================== SESSIONS / TIME
+tod = hour(time, tz) * 60 + minute(time, tz)
+inAsia   = not na(time(timeframe.period, asiaSess,   tz))
+inLondon = not na(time(timeframe.period, londonSess, tz))
+inNyAM   = not na(time(timeframe.period, nyAmSess,   tz))
+inNyPM   = not na(time(timeframe.period, nyPmSess,   tz))
+activeSession = (useAsia and inAsia) or (useLondon and inLondon) or (useNyAM and inNyAM) or (useNyPM and inNyPM)
+
+inBlockOpen   = blockOpen and not na(time(timeframe.period, "0930-1030", tz))
+preOpenActive = useFlatPre and tod >= (preFlatH * 60 + preFlatM) and tod < (9 * 60 + 30)
+blockedWindow = inBlockOpen or preOpenActive
+lastEntryOK   = tod <= (lastEntryH * 60 + lastEntryM)
+flattenNow    = tod >= (flatH * 60 + flatM)
+flattenTrigger = flattenNow or preOpenActive
+
+inBacktestWindow = not useRollWin or (time >= timenow - btDays * 86400000)
+
+// =================================================================== DAILY COUNTERS
+newDay = barstate.isfirst or dayofmonth(time, tz) != dayofmonth(time[1], tz)
+
+var int tradesToday       = 0
+var int londonTradesToday = 0
+var int winsToday         = 0
+var int lossesToday       = 0
+var int consecLossesToday = 0
+
+if newDay
+    tradesToday       := 0
+    londonTradesToday := 0
+    winsToday         := 0
+    lossesToday       := 0
+    consecLossesToday := 0
+
+// tally wins/losses from the Strategy Tester's own closed-trade list
+if strategy.closedtrades > nz(strategy.closedtrades[1])
+    for i = nz(strategy.closedtrades[1]) to strategy.closedtrades - 1
+        p = strategy.closedtrades.profit(i)
+        if p > 0
+            winsToday := winsToday + 1
+            consecLossesToday := 0
+        else if p < 0
+            lossesToday := lossesToday + 1
+            consecLossesToday := consecLossesToday + 1
+
+dailyLockout = (useLockWins and winsToday >= maxWinsLock) or
+     (maxLossesDay > 0 and (lossLockMode == "Consecutive" ? consecLossesToday >= maxLossesDay : lossesToday >= maxLossesDay))
+
+// =================================================================== ARMING + VWAP LIMIT ENTRY
+// The setup is ARMED whenever the trend, quality filters, session and daily caps all allow a new trade.
+// While armed, a limit rests ON the VWAP (optionally offset). No confirmation candle is required - the
+// pullback touching VWAP IS the entry.
+tickOff = vwapOffsetTk * syminfo.mintick
+longLimit  = gtVwap - tickOff
+shortLimit = gtVwap + tickOff
+
+baseOK = activeSession and not blockedWindow and lastEntryOK and not flattenNow and inBacktestWindow and
+     strategy.position_size == 0 and not dailyLockout and tradesToday < maxTradesDay and
+     (not useMaxLondon or not inLondon or londonTradesToday < maxLondonTrades)
+
+// ---- CORE DIRECTIONAL BIAS: price side of VWAP + the slope of the VWAP line itself ----------
+// Price ABOVE a RISING vwap  -> look for longs.
+// Price BELOW a FALLING vwap -> look for shorts.
+// A flat VWAP (slope exactly 0) arms nothing in either direction. This is the direction test only;
+// "Minimum VWAP Slope" in Quality Filters separately sets how steep that slope has to be.
+vwapRising  = vwapSlope > 0
+vwapFalling = vwapSlope < 0
+
+// price must be on the correct side of VWAP for the pullback to still be ahead of us (and for the
+// limit to be a valid resting order rather than an instant fill)
+longSideOK  = not requireTrendSide or close > gtVwap
+shortSideOK = not requireTrendSide or close < gtVwap
+
+slopeDirLongOK  = not useVwapSlopeDir or vwapRising
+slopeDirShortOK = not useVwapSlopeDir or vwapFalling
+
+armLong  = baseOK and enableLongs  and trendUp   and longSideOK  and slopeDirLongOK  and slopeOKLong  and distOK and not rsiBlockLong
+armShort = baseOK and enableShorts and trendDown and shortSideOK and slopeDirShortOK and slopeOKShort and distOK and not rsiBlockShort
+
+// re-price the resting limit to the current VWAP on every bar it stays armed
+if armLong
+    strategy.entry("GT Long", strategy.long, qty = contracts, limit = longLimit)
+else
+    strategy.cancel("GT Long")
+
+if armShort
+    strategy.entry("GT Short", strategy.short, qty = contracts, limit = shortLimit)
+else
+    strategy.cancel("GT Short")
+
+// NOTE: a failed pullback that becomes a breakdown is handled by the arming rules above, not by a
+// separate cancel. Once a bar closes through VWAP, longSideOK (and usually slopeDirLongOK) go false,
+// armLong goes false, and the else-branch above pulls the resting order on that same bar.
+
+// =================================================================== EXITS
+var float curStop = na
+var float curTgt  = na
+var bool  beDone  = false
+
+justFilled = strategy.position_size != 0 and nz(strategy.position_size[1]) == 0
+if justFilled
+    avg = strategy.position_avg_price
+    if strategy.position_size > 0
+        curStop := avg - longStopPts
+        curTgt  := avg + longTgtPts
+    else
+        curStop := avg + shortStopPts
+        curTgt  := avg - shortTgtPts
+    beDone := false
+    tradesToday := tradesToday + 1
+    if inLondon
+        londonTradesToday := londonTradesToday + 1
+
+// break-even management, measured against the fill price
+if useBE and strategy.position_size != 0 and not beDone and not justFilled
+    avg      = strategy.position_avg_price
+    tgtDist  = strategy.position_size > 0 ? longTgtPts : shortTgtPts
+    progress = strategy.position_size > 0 ? (high - avg) : (avg - low)
+    if progress >= tgtDist * (beMovePct / 100.0)
+        newStop = beDest == "Break Even" ? avg :
+             (strategy.position_size > 0 ? avg + beOffsetTk * syminfo.mintick : avg - beOffsetTk * syminfo.mintick)
+        curStop := strategy.position_size > 0 ? math.max(curStop, newStop) : math.min(curStop, newStop)
+        beDone  := true
+        if ghostOn and sendBEToGhost
+            alert('{"source":"golden_ticket_vwap","dryRun":' + (ghostDryRun ? "true" : "false") +
+                 ',"symbol":"' + syminfo.ticker + '","action":"update_stop","stop":' +
+                 str.tostring(math.round_to_mintick(curStop)) + '}', alert.freq_once_per_bar)
+
+if strategy.position_size != 0 and not na(curStop)
+    strategy.exit("X Long",  from_entry = "GT Long",  stop = curStop, limit = curTgt)
+    strategy.exit("X Short", from_entry = "GT Short", stop = curStop, limit = curTgt)
+
+if flattenTrigger
+    strategy.close_all(comment = "Flatten")
+    strategy.cancel_all()
+
+// =================================================================== GHOST WEBHOOK
+f_ghost(string action, float qty, float stop, float target) =>
+    '{"source":"golden_ticket_vwap","dryRun":' + (ghostDryRun ? "true" : "false") +
+     ',"symbol":"' + syminfo.ticker + '","action":"' + action + '","quantity":' + str.tostring(qty) +
+     ',"stop":' + str.tostring(math.round_to_mintick(stop)) +
+     ',"target":' + str.tostring(math.round_to_mintick(target)) + '}'
+
+ghostQty = webhookQtyOn ? webhookQty : contracts
+if ghostOn and justFilled
+    alert(f_ghost(strategy.position_size > 0 ? "buy" : "sell", ghostQty, curStop, curTgt), alert.freq_once_per_bar)
+if ghostOn and strategy.position_size == 0 and nz(strategy.position_size[1]) != 0
+    alert(f_ghost("close", 0, 0.0, 0.0), alert.freq_once_per_bar)
+
+// =================================================================== VISUALS
+// VWAP is coloured by its own slope: rising = long-bias colour, falling = short-bias, flat = grey.
+vwapCol = vwapRising ? positiveColor : vwapFalling ? negativeColor : #787b86
+plot(showVwap ? gtVwap : na, "Session VWAP", color = vwapCol, linewidth = 2)
+plot(showLimit and armLong  ? longLimit  : na, "Long Limit @ VWAP",  color = positiveColor, style = plot.style_linebr, linewidth = 2)
+plot(showLimit and armShort ? shortLimit : na, "Short Limit @ VWAP", color = negativeColor, style = plot.style_linebr, linewidth = 2)
+plot(strategy.position_size != 0 ? curStop : na, "Stop",   color = color.new(negativeColor, 30), style = plot.style_linebr)
+plot(strategy.position_size != 0 ? curTgt  : na, "Target", color = color.new(positiveColor, 30), style = plot.style_linebr)
+bgcolor(shadeBlocked and (blockedWindow or not activeSession) ? color.new(warningColor, 90) : na, title = "Blocked/Inactive shading")
+
+// =================================================================== STATUS DASHBOARD
+if showStatusDash and barstate.islast
+    st = table.new(f_tpos(statusPosS), 2, 13, bgcolor = bgColor, border_color = color.new(textColor, 70), border_width = 1)
+    sz = f_tsize(statusSizeS)
+    table.cell(st, 0, 0, "GOLDEN TICKET VWAP", text_color = headerTextColor, bgcolor = headerColor, text_size = sz, text_halign = text.align_left)
+    table.cell(st, 1, 0, "STRATEGY",           text_color = headerTextColor, bgcolor = headerColor, text_size = sz, text_halign = text.align_right)
+    table.cell(st, 0, 1, "Trend (1H)", text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_left)
+    table.cell(st, 1, 1, trendUp ? "UP" : trendDown ? "DOWN" : "FLAT", text_color = trendUp ? positiveColor : trendDown ? negativeColor : textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_right)
+    table.cell(st, 0, 2, "1H Move %", text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_left)
+    table.cell(st, 1, 2, str.tostring(hourMovePct, "#.##") + "%", text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_right)
+    table.cell(st, 0, 3, "VWAP Slope (15m)", text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_left)
+    table.cell(st, 1, 3, (vwapRising ? "▲ " : vwapFalling ? "▼ " : "— ") + str.tostring(vwapSlope, "#.##"), text_color = vwapRising ? positiveColor : vwapFalling ? negativeColor : textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_right)
+    table.cell(st, 0, 4, "Bias", text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_left)
+    biasTxt = close > gtVwap and vwapRising ? "LONG (above rising VWAP)" : close < gtVwap and vwapFalling ? "SHORT (below falling VWAP)" : "NONE"
+    table.cell(st, 1, 4, biasTxt, text_color = close > gtVwap and vwapRising ? positiveColor : close < gtVwap and vwapFalling ? negativeColor : textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_right)
+    table.cell(st, 0, 5, "RSI", text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_left)
+    table.cell(st, 1, 5, str.tostring(rsiVal, "#.#"), text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_right)
+    table.cell(st, 0, 6, "Distance (ATR)", text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_left)
+    table.cell(st, 1, 6, str.tostring(atrVal > 0 ? distPts / atrVal : 0.0, "#.##"), text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_right)
+    table.cell(st, 0, 7, "Armed", text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_left)
+    table.cell(st, 1, 7, armLong ? "LONG @ " + str.tostring(math.round_to_mintick(longLimit)) : armShort ? "SHORT @ " + str.tostring(math.round_to_mintick(shortLimit)) : "NO", text_color = armLong ? positiveColor : armShort ? negativeColor : textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_right)
+    table.cell(st, 0, 8, "Session Active", text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_left)
+    table.cell(st, 1, 8, activeSession ? "YES" : "NO", text_color = activeSession ? positiveColor : negativeColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_right)
+    table.cell(st, 0, 9, "Trades Today", text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_left)
+    table.cell(st, 1, 9, str.tostring(tradesToday) + " / " + str.tostring(maxTradesDay), text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_right)
+    table.cell(st, 0, 10, "London Trades", text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_left)
+    table.cell(st, 1, 10, str.tostring(londonTradesToday) + " / " + str.tostring(maxLondonTrades), text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_right)
+    table.cell(st, 0, 11, "Wins / Losses Today", text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_left)
+    table.cell(st, 1, 11, str.tostring(winsToday) + " / " + str.tostring(lossesToday), text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_right)
+    table.cell(st, 0, 12, "Lockout", text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_left)
+    table.cell(st, 1, 12, dailyLockout ? "ACTIVE" : "OFF", text_color = dailyLockout ? warningColor : positiveColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_right)

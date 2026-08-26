@@ -4,6 +4,27 @@ Day-trading research and indicators for the index futures **NQ** (Nasdaq-100) an
 
 ## Indicators
 
+### `pinescript/golden_ticket_vwap_strategy.pine`
+Golden Ticket VWAP — **strategy** version, for the native Strategy Tester.
+Same filter stack as the indicator below, with two deliberate differences:
+
+- **Bias is the sloping VWAP.** Price *above a rising* VWAP → look long; price
+  *below a falling* VWAP → look short. A flat VWAP arms nothing. The VWAP line
+  is coloured by its own slope so the live bias is visible on the chart. This
+  is the direction test; `Minimum VWAP Slope` separately sets how steep it
+  must be.
+- **Entries rest ON the VWAP.** Rather than entering at the close of a
+  confirmation candle (already some distance past VWAP), a limit sits on the
+  VWAP itself and is re-priced every bar while armed, so the pullback fills
+  you *at* VWAP. Stops and targets are measured from that fill. Trade-off:
+  no confirmation candle, so pullbacks that keep running against you will
+  fill — the 1H trend, slope and RSI-reset filters stand in for that
+  confirmation. `VWAP Limit Offset (ticks)` shifts the limit off the line if
+  you want price to pierce VWAP before filling.
+
+Commission and slippage belong in the Properties tab (Pine requires those to
+be compile-time constants), not in the inputs.
+
 ### `pinescript/golden_ticket_vwap_indicator.pine`
 Golden Ticket VWAP — a recreation of the "VWAP GOLDEN TICKET" prop-firm strategy
 concept: a session VWAP pullback entry gated by a 1-hour trend-symbol momentum
