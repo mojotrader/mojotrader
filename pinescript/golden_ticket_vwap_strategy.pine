@@ -1,7 +1,8 @@
 //@version=6
 // Golden Ticket VWAP — STRATEGY version (native Strategy Tester).
 //
-// Companion to golden_ticket_vwap_indicator.pine. Same filter stack, but two deliberate differences:
+// Companion to golden_ticket_vwap_indicator.pine. This is a PURE VWAP-BOUNCE strategy: it plays the
+// bounce off VWAP in BOTH directions and takes no higher-timeframe bias. Deliberate differences:
 //
 //   1) NATIVE strategy(): orders, P&L, win rate and drawdown come from TradingView's Strategy Tester
 //      instead of the indicator's hand-rolled trade simulation and "Legacy Performance Dashboard".
@@ -9,18 +10,24 @@
 //      requires those to be compile-time constants in the strategy() call, so they cannot be inputs.
 //      "Dollar Value Per Point" is likewise dropped: the Strategy Tester takes it from the symbol.
 //
-//   2) DIRECTIONAL BIAS IS THE SLOPING VWAP. Price ABOVE a RISING VWAP -> look for longs; price BELOW
-//      a FALLING VWAP -> look for shorts. A flat VWAP arms nothing. The VWAP line on the chart is
-//      coloured by its own slope so the live bias is visible at a glance. This is a direction test;
-//      "Minimum VWAP Slope" in Quality Filters separately controls how STEEP the slope must be.
+//   2) NO HIGHER-TIMEFRAME BIAS. The 1-hour trend-symbol filter is OFF by default ("Use 1-Hour Trend
+//      Bias Filter"), so bounces are taken in both directions regardless of what NQ's hourly bar did.
+//      Turn it on only if you want counter-trend bounces suppressed.
 //
-//   3) ENTRY IS AT VWAP, not at a confirmation candle. The indicator waits for a reaction candle and
+//   3) DIRECTION COMES FROM THE VWAP ITSELF. Price ABOVE a RISING VWAP -> long the bounce; price BELOW
+//      a FALLING VWAP -> short the bounce. A flat VWAP arms nothing. The VWAP line on the chart is
+//      coloured by its own slope so the live bias is visible at a glance. This is a direction test;
+//      "Minimum VWAP Slope" in Quality Filters separately controls how STEEP the slope must be. To
+//      play bounces off a flat/chopping VWAP too, switch "Require VWAP Sloping In Trade Direction" off
+//      and direction then falls to price-side alone.
+//
+//   4) ENTRY IS AT VWAP, not at a confirmation candle. The indicator waits for a reaction candle and
 //      enters at ITS CLOSE - which is by definition already some distance past VWAP, so you pay up for
 //      the confirmation. Here a LIMIT rests ON the session VWAP itself while the setup is armed, so the
 //      pullback fills you AT the VWAP. Better entry price, and the stop/target are measured from VWAP.
-//      Trade-off: no confirmation candle, so you will be filled on pullbacks that keep going against
-//      you (the reaction candle is what used to filter those out). The 1H trend, VWAP-slope and RSI
-//      reset filters are what stand in for that confirmation now.
+//      Trade-off: no confirmation candle, so you will be filled on bounces that never bounce (price
+//      slices straight through). With the 1H bias now off as well, the VWAP-slope and RSI-reset filters
+//      are the only things standing in for that confirmation - keep at least one of them on.
 //      Because VWAP moves every bar, the resting limit is re-priced to the current VWAP on each bar.
 //
 // PROVENANCE: reconstruction of the closed-source "VWAP GOLDEN TICKET" (mogodfrey) from the supplied
@@ -35,8 +42,10 @@ strategy("Golden Ticket VWAP Strategy", overlay = true, pyramiding = 0,
 
 // =================================================================== SETUP
 gSetup     = "Setup"
+useHtfTrend = input.bool(false, "Use 1-Hour Trend Bias Filter", group = gSetup,
+     tooltip = "OFF (default): the higher-timeframe bias is IGNORED and VWAP bounces are played in BOTH directions - direction comes from the VWAP alone (which side price is on, and which way the line slopes). ON: additionally require the 1-hour trend symbol below to agree with the trade direction, which suppresses counter-trend bounces.")
 trendSym   = input.symbol("CME_MINI:NQ1!", "1-Hour Trend Symbol", group = gSetup,
-     tooltip = "Higher-timeframe symbol used ONLY as a momentum filter. Entries, stops and targets are always calculated from the instrument on the chart.")
+     tooltip = "Higher-timeframe symbol used ONLY as a momentum filter, and only when the bias filter above is ON. Entries, stops and targets are always calculated from the instrument on the chart.")
 minHrMove  = input.float(0.1, "Minimum 1-Hour Move (%)", minval = 0, step = 0.05, group = gSetup,
      tooltip = "The 1-hour trend symbol's last closed hourly bar must have moved at least this % (open to close) to count as an established UP/DOWN trend.")
 enableLongs  = input.bool(true, "Enable Longs",  group = gSetup)
@@ -182,6 +191,12 @@ trendThresh = filterMode == "Strict" ? minHrMove * 1.5 : minHrMove
 trendUp   = hourMovePct >= trendThresh
 trendDown = hourMovePct <= -trendThresh
 
+// The 1-hour trend-symbol bias is OFF by default: this plays VWAP bounces in BOTH directions and lets
+// the VWAP itself (which side price is on + which way the line slopes) decide direction. Turn it back
+// on to additionally require the higher-timeframe symbol to agree.
+trendOKLong  = not useHtfTrend or trendUp
+trendOKShort = not useHtfTrend or trendDown
+
 slopeOKLong  = not slopeActive or vwapSlope >= minVwapChg15
 slopeOKShort = not slopeActive or -vwapSlope >= minVwapChg15
 distOK       = not distActive or distPts <= maxVwapDistAtr * atrVal
@@ -263,8 +278,8 @@ shortSideOK = not requireTrendSide or close < gtVwap
 slopeDirLongOK  = not useVwapSlopeDir or vwapRising
 slopeDirShortOK = not useVwapSlopeDir or vwapFalling
 
-armLong  = baseOK and enableLongs  and trendUp   and longSideOK  and slopeDirLongOK  and slopeOKLong  and distOK and not rsiBlockLong
-armShort = baseOK and enableShorts and trendDown and shortSideOK and slopeDirShortOK and slopeOKShort and distOK and not rsiBlockShort
+armLong  = baseOK and enableLongs  and trendOKLong  and longSideOK  and slopeDirLongOK  and slopeOKLong  and distOK and not rsiBlockLong
+armShort = baseOK and enableShorts and trendOKShort and shortSideOK and slopeDirShortOK and slopeOKShort and distOK and not rsiBlockShort
 
 // re-price the resting limit to the current VWAP on every bar it stays armed
 if armLong
@@ -352,8 +367,9 @@ if showStatusDash and barstate.islast
     sz = f_tsize(statusSizeS)
     table.cell(st, 0, 0, "GOLDEN TICKET VWAP", text_color = headerTextColor, bgcolor = headerColor, text_size = sz, text_halign = text.align_left)
     table.cell(st, 1, 0, "STRATEGY",           text_color = headerTextColor, bgcolor = headerColor, text_size = sz, text_halign = text.align_right)
-    table.cell(st, 0, 1, "Trend (1H)", text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_left)
-    table.cell(st, 1, 1, trendUp ? "UP" : trendDown ? "DOWN" : "FLAT", text_color = trendUp ? positiveColor : trendDown ? negativeColor : textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_right)
+    table.cell(st, 0, 1, "Trend (1H) Bias", text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_left)
+    trendTxt = not useHtfTrend ? "IGNORED" : trendUp ? "UP" : trendDown ? "DOWN" : "FLAT"
+    table.cell(st, 1, 1, trendTxt, text_color = not useHtfTrend ? color.new(textColor, 55) : trendUp ? positiveColor : trendDown ? negativeColor : textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_right)
     table.cell(st, 0, 2, "1H Move %", text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_left)
     table.cell(st, 1, 2, str.tostring(hourMovePct, "#.##") + "%", text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_right)
     table.cell(st, 0, 3, "VWAP Slope (15m)", text_color = textColor, bgcolor = bgColor, text_size = sz, text_halign = text.align_left)

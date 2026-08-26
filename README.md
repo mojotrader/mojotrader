@@ -6,21 +6,28 @@ Day-trading research and indicators for the index futures **NQ** (Nasdaq-100) an
 
 ### `pinescript/golden_ticket_vwap_strategy.pine`
 Golden Ticket VWAP — **strategy** version, for the native Strategy Tester.
-Same filter stack as the indicator below, with two deliberate differences:
+A pure **VWAP-bounce** strategy: it plays the bounce off VWAP in *both*
+directions and takes no higher-timeframe bias.
 
-- **Bias is the sloping VWAP.** Price *above a rising* VWAP → look long; price
-  *below a falling* VWAP → look short. A flat VWAP arms nothing. The VWAP line
-  is coloured by its own slope so the live bias is visible on the chart. This
-  is the direction test; `Minimum VWAP Slope` separately sets how steep it
-  must be.
+- **No 1-hour bias.** The trend-symbol filter is off by default, so bounces
+  are taken regardless of what NQ's hourly bar did. Turn `Use 1-Hour Trend
+  Bias Filter` on to suppress counter-trend bounces.
+- **Direction comes from the VWAP itself.** Price *above a rising* VWAP →
+  long the bounce; *below a falling* VWAP → short it. A flat VWAP arms
+  nothing. The VWAP line is coloured by its own slope so the live bias is
+  visible on the chart. This is the direction test; `Minimum VWAP Slope`
+  separately sets how steep it must be. To trade bounces off a flat VWAP too,
+  switch `Require VWAP Sloping In Trade Direction` off — direction then falls
+  to price-side alone.
 - **Entries rest ON the VWAP.** Rather than entering at the close of a
   confirmation candle (already some distance past VWAP), a limit sits on the
   VWAP itself and is re-priced every bar while armed, so the pullback fills
   you *at* VWAP. Stops and targets are measured from that fill. Trade-off:
-  no confirmation candle, so pullbacks that keep running against you will
-  fill — the 1H trend, slope and RSI-reset filters stand in for that
-  confirmation. `VWAP Limit Offset (ticks)` shifts the limit off the line if
-  you want price to pierce VWAP before filling.
+  no confirmation candle, so bounces that never bounce (price slices straight
+  through) will still fill. With the 1H bias off, the slope and RSI-reset
+  filters are the only stand-ins for that confirmation — keep at least one
+  on. `VWAP Limit Offset (ticks)` shifts the limit off the line if you want
+  price to pierce VWAP before filling.
 
 Commission and slippage belong in the Properties tab (Pine requires those to
 be compile-time constants), not in the inputs.
