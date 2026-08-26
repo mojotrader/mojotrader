@@ -10,6 +10,15 @@
 // range, target is a multiple of that distance. Flat before the session rolls;
 // nothing is ever carried overnight.
 //
+// ENTRY MODEL (Entry Type) — the break ARMS the trade, it no longer buys it:
+//   Limit Pullback  (default) two limits rest INSIDE the range once the 15m
+//                   candle closes beyond it — unit 1 at 25% of the range back
+//                   from the broken edge, unit 2 averaging down at 50%. A break
+//                   that never retraces is a no-fill day. The $ risk budget is
+//                   SPLIT across the two units, and the shared target is re-cut
+//                   from the blended average whenever the second unit fills.
+//   Market on Close the original behaviour: one unit at the breakout close.
+//
 // AFTER A STOP-OUT the day gets ONE more fill, from whichever of the two second-
 // chance branches triggers first:
 //   Re-entry — SAME direction as the loser, on a fresh close back beyond the
@@ -23,7 +32,7 @@
 //
 // Timezone is hardcoded — do not change your chart's timezone expecting the
 // levels to move, they will not.
-strategy("PropQuantX Halyard MNQ 15min FREE", overlay = true, pyramiding = 0, process_orders_on_close = true, initial_capital = 150000, default_qty_type = strategy.fixed, default_qty_value = 1, slippage = 0, commission_type = strategy.commission.cash_per_contract, commission_value = 0, margin_long = 1, margin_short = 1, max_labels_count = 500, max_boxes_count = 500)
+strategy("PropQuantX Halyard MNQ 15min FREE", overlay = true, pyramiding = 2, process_orders_on_close = true, initial_capital = 150000, default_qty_type = strategy.fixed, default_qty_value = 1, slippage = 0, commission_type = strategy.commission.cash_per_contract, commission_value = 0, margin_long = 1, margin_short = 1, max_labels_count = 500, max_boxes_count = 500)
 
 // === Inputs ===
 grpPS = "Position Sizing"
@@ -38,10 +47,25 @@ maxContracts = input.int(1000, "Max Contracts", minval = 1, group = grpPS, toolt
 // is a trap.
 grpTM = "Trade Management"
 riskReward = input.float(0.8, "Risk:Reward (First Trade)", minval = 0.1, step = 0.01, group = grpTM)
-enableReentryTrade = input.bool(true, "Enable Re-entry After Loss", group = grpTM, tooltip = "Same direction as the losing first trade, on a fresh close back beyond the same ORB edge. Raises the day's fill cap to 2.")
+enableReentryTrade = input.bool(false, "Enable Re-entry After Loss", group = grpTM, tooltip = "Same direction as the losing first trade, on a fresh close back beyond the same ORB edge. Raises the day's SETUP cap to 2.")
 reentryRiskReward = input.float(0.8, "Risk:Reward (Re-entry Trade)", minval = 0.1, step = 0.01, group = grpTM, tooltip = "Only read while Enable Re-entry After Loss is on.")
-enableReverseTrade = input.bool(false, "Enable Reverse Trade", group = grpTM, tooltip = "Opposite direction to the losing first trade. Also raises the day's fill cap to 2.")
+enableReverseTrade = input.bool(false, "Enable Reverse Trade", group = grpTM, tooltip = "Opposite direction to the losing first trade. Also raises the day's SETUP cap to 2.")
 reverseRiskReward = input.float(1.0, "Risk:Reward (Reverse Trade)", minval = 0.1, step = 0.01, group = grpTM, tooltip = "Only read while Enable Reverse Trade is on.")
+
+// Entry model. The strategy shipped as a MARKET fill on the breakout bar's close;
+// Limit Pullback is the alternative under evaluation. Both are implemented once,
+// in the single PLACEMENT block far below — see the long note there.
+grpE = "Entry"
+entryMode = input.string("Limit Pullback", "Entry Type", options = ["Limit Pullback", "Market on Close"], group = grpE, tooltip = "Limit Pullback buys nothing at the break itself: limits rest INSIDE the range, and a break that never retraces is a no-fill day.")
+pb1Pct = input.float(25, "Unit 1 — Pullback % Into Range", minval = 1, maxval = 95, step = 1, group = grpE, tooltip = "Measured back from the edge that broke. 25 = a quarter of the range back inside it.")
+useAvgDown = input.bool(true, "Average Down With Unit 2", group = grpE, tooltip = "Rests a second same-side limit deeper in the range. The $ risk budget is SPLIT across the two units, not doubled.")
+pb2Pct = input.float(50, "Unit 2 — Pullback % Into Range", minval = 1, maxval = 95, step = 1, group = grpE, tooltip = "Only read while Average Down With Unit 2 is on. 50 = the range midpoint.")
+
+// Unit 2 at or above unit 1 is not an average-down: at equal depth both limits
+// sit on one price and just double the size, and shallower means unit 2 fills
+// FIRST and unit 1 becomes the add. Fail loudly rather than backtest that.
+if useAvgDown and entryMode == "Limit Pullback" and pb2Pct <= pb1Pct
+    runtime.error("Entry: Unit 2 pullback % must be DEEPER than Unit 1 — it is the average-down, so it has to sit further inside the range.")
 
 // Day filter — one direction setting per weekday. "Off" is a day that never trades.
 grpD = "Day Filter"
@@ -154,10 +178,12 @@ orbTf = "15"
 keepTradeBoxes = 20
 boxTransp = 70
 
-// The day's fill cap is DERIVED from the two second-chance switches rather than
-// being a third, disagreeable input. Either one on buys the day ONE extra fill —
+// The day's SETUP cap is DERIVED from the two second-chance switches rather than
+// being a third, disagreeable input. Either one on buys the day ONE extra setup —
 // not one each: whichever branch triggers first ends the day, so a stop-out is
-// followed by at most one more trade even with both ticked.
+// followed by at most one more setup even with both ticked.
+// A SETUP, not a fill: under Limit Pullback one setup rests two limit orders and
+// can fill twice (unit 1 plus the average-down). The cap counts breaks acted on.
 maxTradesPerDay = (enableReentryTrade or enableReverseTrade) ? 2 : 1
 
 // === Risk / Position sizing ===
@@ -167,8 +193,12 @@ calcQty(risk, entry, sl) =>
     riskPerContract = riskPerPoint * syminfo.pointvalue
     math.max(math.floor(risk / (riskPerContract > 0 ? riskPerContract : syminfo.mintick * syminfo.pointvalue)), 1)
 
-f_finalQty(_entry, _sl) =>
-    q = useRiskSizing ? calcQty(riskUSD, _entry, _sl) : qtyContracts
+// `_budget` is the $ risk THIS unit may spend, not the day's whole allowance:
+// the average-down splits riskUSD across the units it rests. With risk sizing
+// OFF the split does not apply — qtyContracts is a per-unit count, so two units
+// mean twice the contracts.
+f_finalQty(_entry, _sl, _budget) =>
+    q = useRiskSizing ? calcQty(_budget, _entry, _sl) : qtyContracts
     math.min(q, maxContracts)
 
 // === TP/SL P&L visualization (boxes + labels) ===
@@ -424,55 +454,47 @@ if bool(newDay)
     tradesToday := 0
     prevClosedTrades := strategy.closedtrades
 
-// Detect when a trade closes and determine whether it was a stop-out (loss) or TP (profit).
-// Guarded on tradeState == 1, so the SECOND trade closing cannot walk the state
+// Detect when a setup closes and whether it ended red or green.
+// SUMMED over every trade closed since the last check, not read off the last one:
+// an averaged-down setup closes TWO units, usually on the same bar, and unit 2
+// (filled deeper, so further from the target) can end red while the setup as a
+// whole ends green. The blended result is the one that decides the day.
+// Guarded on tradeState == 1, so a second setup closing cannot walk the state
 // backwards out of 3 — the day stays done however that trade ends.
 if strategy.closedtrades > prevClosedTrades
-    lastTradeIdx = strategy.closedtrades - 1
-    lastProfit = strategy.closedtrades.profit(lastTradeIdx)
+    float setupProfit = 0.0
+    for i = prevClosedTrades to strategy.closedtrades - 1
+        setupProfit += strategy.closedtrades.profit(i)
     if tradeState == 1
-        tradeState := lastProfit < 0 ? 2 : 3
+        tradeState := setupProfit < 0 ? 2 : 3
     prevClosedTrades := strategy.closedtrades
 
-// Whichever of the six entries fires records its three prices here and raises
-// the flag; the boxes and labels are then drawn ONCE, below. A Pine function
-// cannot assign to a global, so this is how six entry paths share one drawing
-// routine instead of repeating it six times.
-var float tradeEntryPx = na
-var float tradeStopPx = na
-var float tradeTargetPx = na
-enteredThisBar = false
+// === ARM — which setup fired, and on which side ===
+// The three setups decide DIRECTION, R:R and label ONLY. Not one of them sends an
+// order: the single PLACEMENT block below owns every order, which is why Market
+// on Close and Limit Pullback are written once each instead of six times.
+int armDir = 0                 // 1 = long setup armed this bar, -1 = short, 0 = none
+float armRR = riskReward       // the R:R multiple this setup targets
+string armTag = ""             // shows up in the Strategy Tester's List of Trades
 
 // --- First trade (take the FIRST breakout triangle, if it passes the filters) ---
 enterLong = breakoutUp and directionLongOK and tradeDayOK and tradesToday < maxTradesPerDay and strategy.position_size == 0 and tradeState == 0
 if enterLong
-    longSL = f_longStop(close)
-    longTP = f_longTP(close, longSL, riskReward)
-    qty = f_finalQty(close, longSL)
     firstTradeDir := 1
     tradeState := 1
     tradesToday += 1
-    tradeEntryPx := close
-    tradeStopPx := longSL
-    tradeTargetPx := longTP
-    enteredThisBar := true
-    strategy.entry("Long", strategy.long, qty = qty)
-    strategy.exit("Long TP/SL", from_entry = "Long", stop = longSL, limit = longTP)
+    armDir := 1
+    armRR := riskReward
+    armTag := "First"
 
 enterShort = breakoutDn and directionShortOK and tradeDayOK and filterShortOK and tradesToday < maxTradesPerDay and strategy.position_size == 0 and tradeState == 0
 if enterShort
-    shortSL = f_shortStop(close)
-    shortTP = f_shortTP(close, shortSL, riskReward)
-    qty = f_finalQty(close, shortSL)
     firstTradeDir := -1
     tradeState := 1
     tradesToday += 1
-    tradeEntryPx := close
-    tradeStopPx := shortSL
-    tradeTargetPx := shortTP
-    enteredThisBar := true
-    strategy.entry("Short", strategy.short, qty = qty)
-    strategy.exit("Short TP/SL", from_entry = "Short", stop = shortSL, limit = shortTP)
+    armDir := -1
+    armRR := riskReward
+    armTag := "First"
 
 // --- Re-entry trade (only if the FIRST trade closed at a LOSS) ---
 // SAME direction as the loser, on a fresh CLOSE back beyond the SAME ORB edge it
@@ -487,60 +509,38 @@ if enterShort
 //          INSIDE the range. No close above the ORB high, so the reversal never
 //          arms — correctly, it is gated on a CLOSE, not on the stop fill.
 //   03:15  closes BELOW the ORB low again -> re-entry short, same stop level
-// The stop was taken by a wick, the trend never confirmed against the trade, and
-// the setup re-presents itself. That is the day the first version gave up on.
+// A long is the mirror image. The stop was taken by a wick, the trend never
+// confirmed against the trade, and the setup re-presents itself.
 //
-// Under the shipped stop mode a long stops out ON the ORB LOW, so a re-entry
-// long is the mirror image: price has to travel back across the whole range and
-// close above the ORB high again. That is the point — it is a second breakout,
-// not an average-down into the loser.
+// SHIPS OFF while the pullback entry model is being measured — a second setup
+// per day would muddy the comparison against the market-entry baseline. Tick
+// "Enable Re-entry After Loss" to put it back.
 //
-// The stop goes back on the SAME structural level as the first trade (the far
-// ORB edge under ORB Edge + Buffer), so the second trade's risk per contract is
-// whatever the re-entry close sits at above that edge — wider than the first
-// trade's if the re-break closes further out, and then $ risk sizing hands back
-// FEWER contracts. Risk in dollars stays flat; only the contract count moves.
-//
-// NOT filtered, same rule as the reversal below: the entry filters apply to the
-// FIRST trade only. The per-day direction grid DOES still reach it via
-// directionLongOK / directionShortOK, but that can never veto a re-entry the way
-// it can veto a reversal — the direction is the same one the first trade already
-// passed on.
+// NOT filtered, same rule as the reversal: the entry filters apply to the FIRST
+// trade only. The per-day direction grid DOES still reach it via directionLongOK
+// / directionShortOK, but that can never veto a re-entry the way it can veto a
+// reversal — the direction is the one the first trade already passed on.
 reLong = enableReentryTrade and tradeState == 2 and firstTradeDir == 1 and directionLongOK and tradeDayOK and tradesToday < maxTradesPerDay and strategy.position_size == 0 and barstate.isconfirmed and levelsAvailable and close > orbHigh
 if reLong
-    reLongSL = f_longStop(close)
-    reLongTP = f_longTP(close, reLongSL, reentryRiskReward)
-    qty = f_finalQty(close, reLongSL)
     tradeState := 3
     tradesToday += 1
-    tradeEntryPx := close
-    tradeStopPx := reLongSL
-    tradeTargetPx := reLongTP
-    enteredThisBar := true
-    strategy.entry("ReLong", strategy.long, qty = qty)
-    strategy.exit("ReLong TP/SL", from_entry = "ReLong", stop = reLongSL, limit = reLongTP)
+    armDir := 1
+    armRR := reentryRiskReward
+    armTag := "Re-entry"
 
 reShort = enableReentryTrade and tradeState == 2 and firstTradeDir == -1 and directionShortOK and tradeDayOK and tradesToday < maxTradesPerDay and strategy.position_size == 0 and barstate.isconfirmed and levelsAvailable and close < orbLow
 if reShort
-    reShortSL = f_shortStop(close)
-    reShortTP = f_shortTP(close, reShortSL, reentryRiskReward)
-    qty = f_finalQty(close, reShortSL)
     tradeState := 3
     tradesToday += 1
-    tradeEntryPx := close
-    tradeStopPx := reShortSL
-    tradeTargetPx := reShortTP
-    enteredThisBar := true
-    strategy.entry("ReShort", strategy.short, qty = qty)
-    strategy.exit("ReShort TP/SL", from_entry = "ReShort", stop = reShortSL, limit = reShortTP)
+    armDir := -1
+    armRR := reentryRiskReward
+    armTag := "Re-entry"
 
 // --- Reversal trade (only if the FIRST trade closed at a LOSS) ---
-// OFF BY DEFAULT: Enable Reverse Trade ships unticked, so neither branch fires and
-// only the re-entry competes for the day's second fill until someone ticks it.
-// Ticking it also makes the Risk:Reward (Reverse Trade) input live — it is unread
-// until then.
+// OFF BY DEFAULT. Ticking it also makes the Risk:Reward (Reverse Trade) input
+// live — it is unread until then.
 // NOT filtered. The reversal is gated on the day-of-week, the direction and the
-// losing first trade only — the entry filters apply to the FIRST trade.
+// losing first trade only.
 //
 // Note the per-day direction grid DOES reach it, via directionLongOK /
 // directionShortOK: a weekday set to one side can never take the reversal, since
@@ -548,42 +548,171 @@ if reShort
 //
 // These sit BELOW the re-entry blocks but the order is cosmetic: a reversal and a
 // re-entry are triggered by closes on OPPOSITE sides of the range, so no single
-// bar can satisfy both. With both toggles on, the day's second fill simply goes
-// to whichever side the price closes beyond first.
+// bar can satisfy both. With both toggles on, the day's second setup simply goes
+// to whichever side price closes beyond first.
 revLong = enableReverseTrade and tradeState == 2 and firstTradeDir == -1 and directionLongOK and tradeDayOK and tradesToday < maxTradesPerDay and strategy.position_size == 0 and barstate.isconfirmed and levelsAvailable and close > orbHigh
 if revLong
-    revLongSL = f_longStop(close)
-    revLongTP = f_longTP(close, revLongSL, reverseRiskReward)
-    qty = f_finalQty(close, revLongSL)
     tradeState := 3
     tradesToday += 1
-    tradeEntryPx := close
-    tradeStopPx := revLongSL
-    tradeTargetPx := revLongTP
-    enteredThisBar := true
-    strategy.entry("RevLong", strategy.long, qty = qty)
-    strategy.exit("RevLong TP/SL", from_entry = "RevLong", stop = revLongSL, limit = revLongTP)
+    armDir := 1
+    armRR := reverseRiskReward
+    armTag := "Reversal"
 
 revShort = enableReverseTrade and tradeState == 2 and firstTradeDir == 1 and directionShortOK and tradeDayOK and tradesToday < maxTradesPerDay and strategy.position_size == 0 and barstate.isconfirmed and levelsAvailable and close < orbLow
 if revShort
-    revShortSL = f_shortStop(close)
-    revShortTP = f_shortTP(close, revShortSL, reverseRiskReward)
-    qty = f_finalQty(close, revShortSL)
     tradeState := 3
     tradesToday += 1
-    tradeEntryPx := close
-    tradeStopPx := revShortSL
-    tradeTargetPx := revShortTP
-    enteredThisBar := true
-    strategy.entry("RevShort", strategy.short, qty = qty)
-    strategy.exit("RevShort TP/SL", from_entry = "RevShort", stop = revShortSL, limit = revShortTP)
+    armDir := -1
+    armRR := reverseRiskReward
+    armTag := "Reversal"
 
-// === RISK / REWARD BOXES — one routine for all six entries ===
+// === The armed setup's working state ===
+// These outlive the arm bar because a resting limit can sit unfilled for hours,
+// and the exit refresh needs the stop and the R:R long after the break that set
+// them.
+var int pbDir = 0              // side that owns the resting orders / open units
+var float pbStop = na          // the ONE stop both units share
+var float pbRR = na            // R:R the setup was armed with
+var float pbE1 = na            // unit 1 limit (na in Market on Close)
+var float pbE2 = na            // unit 2 limit (na unless averaging down)
+var bool pbResting = false     // true while an unfilled limit is still working
+
+// === CANCEL — a resting limit must never outlive its setup ===
+// Runs BEFORE placement, deliberately: a re-entry can arm on the very bar the
+// first setup's close is detected, and cancelling after placement would kill the
+// orders it just sent. `armDir == 0` is belt and braces on top of that.
+//
+// Unfilled unit 2 is the one that matters. Leave it working after the setup has
+// closed and it opens a brand new position on a day whose trade is already over.
+if pbResting and armDir == 0 and (bool(newDay) or posJustClosed or (strategy.position_size == 0 and tradeState >= 2))
+    strategy.cancel("L1")
+    strategy.cancel("L2")
+    strategy.cancel("S1")
+    strategy.cancel("S2")
+    pbResting := false
+    pbE1 := na
+    pbE2 := na
+
+// === PLACEMENT — the only place orders are sent ===
+// Two entry models:
+//
+//   Market on Close — the original. ONE unit at the breakout bar's close, which
+//                     is also the fill price under process_orders_on_close.
+//
+//   Limit Pullback  — nothing is bought at the break. Two limits rest INSIDE the
+//                     range and the trade only exists if price comes back for it:
+//                     unit 1 at pb1Pct of the range back from the broken edge,
+//                     unit 2 (the average-down) at pb2Pct. A break that runs away
+//                     without retracing is a no-fill day — that is the trade-off
+//                     being measured, better fills against fewer of them.
+//
+// The percentages are measured from the EDGE THAT BROKE, so the number means the
+// same thing on both sides: how far back into the range price must retrace before
+// the limit is touched. Long -> orbHigh - pct * range. Short -> orbLow + pct.
+//
+// The stop is the SAME structural level in both models — the far ORB edge — so a
+// pullback fill sits CLOSER to it than a market fill does (0.75 x range at the 25%
+// line, against the full close-to-far-edge distance), the risk per contract is
+// smaller, and $ risk sizing hands back MORE contracts for the same dollars.
+//
+// CAVEAT for the two distance stop modes (Fixed Ticks / ATR): they measure from
+// the price handed to them, and at placement the fill price is not known yet, so
+// they measure from the BREAKOUT CLOSE while the real fill lands inside it. Both
+// are UNREAD in the shipped config (slType is ORB Edge + Buffer, a level), so
+// this only matters to someone who switches slType.
+if armDir != 0
+    stopPx = armDir == 1 ? f_longStop(close) : f_shortStop(close)
+    pbDir := armDir
+    pbStop := stopPx
+    pbRR := armRR
+    if entryMode == "Market on Close"
+        mktTP = armDir == 1 ? f_longTP(close, stopPx, armRR) : f_shortTP(close, stopPx, armRR)
+        mktQty = f_finalQty(close, stopPx, riskUSD)
+        pbE1 := na
+        pbE2 := na
+        if armDir == 1
+            strategy.entry("L1", strategy.long, qty = mktQty, comment = armTag)
+            strategy.exit("L1 TP/SL", from_entry = "L1", stop = stopPx, limit = mktTP)
+        else
+            strategy.entry("S1", strategy.short, qty = mktQty, comment = armTag)
+            strategy.exit("S1 TP/SL", from_entry = "S1", stop = stopPx, limit = mktTP)
+    else
+        e1 = armDir == 1 ? orbHigh - orbRange * pb1Pct / 100.0 : orbLow + orbRange * pb1Pct / 100.0
+        e2 = armDir == 1 ? orbHigh - orbRange * pb2Pct / 100.0 : orbLow + orbRange * pb2Pct / 100.0
+        // The $ budget is SPLIT across the units that actually rest, so a day
+        // where both fill risks riskUSD in total rather than twice it. The cost
+        // of holding a second unit in reserve is that a day where only unit 1
+        // fills risks HALF the budget — that is the honest accounting, and it is
+        // why the average-down is not free upside.
+        units = useAvgDown ? 2 : 1
+        bud = riskUSD / units
+        q1 = f_finalQty(e1, stopPx, bud)
+        q2 = f_finalQty(e2, stopPx, bud)
+        // Provisional target, cut off unit 1. The moment anything fills, the
+        // refresh block below re-cuts it from the REAL average, so unit 2 never
+        // sits there aiming at unit 1's number.
+        tp0 = armDir == 1 ? f_longTP(e1, stopPx, armRR) : f_shortTP(e1, stopPx, armRR)
+        pbE1 := e1
+        pbE2 := useAvgDown ? e2 : na
+        pbResting := true
+        if armDir == 1
+            strategy.entry("L1", strategy.long, qty = q1, limit = e1, comment = armTag)
+            strategy.exit("L1 TP/SL", from_entry = "L1", stop = stopPx, limit = tp0)
+            if useAvgDown
+                strategy.entry("L2", strategy.long, qty = q2, limit = e2, comment = armTag + " avg")
+                strategy.exit("L2 TP/SL", from_entry = "L2", stop = stopPx, limit = tp0)
+        else
+            strategy.entry("S1", strategy.short, qty = q1, limit = e1, comment = armTag)
+            strategy.exit("S1 TP/SL", from_entry = "S1", stop = stopPx, limit = tp0)
+            if useAvgDown
+                strategy.entry("S2", strategy.short, qty = q2, limit = e2, comment = armTag + " avg")
+                strategy.exit("S2 TP/SL", from_entry = "S2", stop = stopPx, limit = tp0)
+
+// === EXIT REFRESH — the blended target ===
+// Re-cut the target from strategy.position_avg_price on every bar a position is
+// open and re-issue both units' exits against it. This is what makes the
+// average-down coherent: when unit 2 fills, the average moves TOWARD the stop,
+// the risk per contract shrinks, and the shared target moves in with it, so the
+// whole position keeps working for the same R multiple instead of unit 2 chasing
+// a target cut for a fill it never got.
+//
+// Reading the emulator's OWN average rather than reconstructing it from the two
+// limit prices means partial fills, a bar that gaps through both levels at once,
+// and different contract counts per unit are all handled for free.
+//
+// The exits are also issued at placement, so a unit that fills mid-bar is covered
+// on that same bar. This block only keeps them current.
+float curTP = na
+if pbDir != 0 and strategy.position_size != 0 and not na(pbStop)
+    avgPx = strategy.position_avg_price
+    curTP := pbDir == 1 ? f_longTP(avgPx, pbStop, pbRR) : f_shortTP(avgPx, pbStop, pbRR)
+    strategy.exit("L1 TP/SL", from_entry = "L1", stop = pbStop, limit = curTP)
+    strategy.exit("L2 TP/SL", from_entry = "L2", stop = pbStop, limit = curTP)
+    strategy.exit("S1 TP/SL", from_entry = "S1", stop = pbStop, limit = curTP)
+    strategy.exit("S2 TP/SL", from_entry = "S2", stop = pbStop, limit = curTP)
+
+// === RISK / REWARD BOXES — one routine, both entry models ===
+// Drawn off the POSITION rather than off the signal, so the boxes show the trade
+// that actually exists: nothing is drawn for a break whose limits never fill, and
+// an average-down redraws against the new blended entry and its retargeted TP.
+// The left edge is the first open unit's own fill bar, so a redraw on the
+// average-down bar does not drag the box forward.
+var float tradeEntryPx = na
+var float tradeStopPx = na
+var float tradeTargetPx = na
+posSizeChanged = strategy.position_size != nz(strategy.position_size[1])
+vizRefresh = posSizeChanged and strategy.position_size != 0 and not na(curTP)
+vizLeft = strategy.opentrades > 0 ? strategy.opentrades.entry_bar_index(0) : bar_index
+if vizRefresh
+    tradeEntryPx := strategy.position_avg_price
+    tradeStopPx := pbStop
+    tradeTargetPx := curTP
+
 // A profit box entry->target, a risk box entry->stop, both starting 8 bars wide,
 // and three text-only price labels on transparent backgrounds so only the
 // numbers show against the boxes.
-if enteredThisBar and showPnLBoxes
-    // clear any still-active viz (should normally be na when flat)
+if vizRefresh and showPnLBoxes
+    // clear the previous draw — on an average-down this is the pre-blend pair
     if not na(curRiskBox)
         box.delete(curRiskBox)
     if not na(curProfitBox)
@@ -595,20 +724,31 @@ if enteredThisBar and showPnLBoxes
     if not na(curEntryLabel)
         label.delete(curEntryLabel)
 
-    curProfitBox := box.new(left = bar_index, top = math.max(tradeEntryPx, tradeTargetPx), right = bar_index + 8, bottom = math.min(tradeEntryPx, tradeTargetPx), bgcolor = color.new(profitBoxColor, boxTransp), border_width = 0)
-    curRiskBox := box.new(left = bar_index, top = math.max(tradeEntryPx, tradeStopPx), right = bar_index + 8, bottom = math.min(tradeEntryPx, tradeStopPx), bgcolor = color.new(lossBoxColor, boxTransp), border_width = 0)
+    curProfitBox := box.new(left = vizLeft, top = math.max(tradeEntryPx, tradeTargetPx), right = math.max(vizLeft + 8, bar_index), bottom = math.min(tradeEntryPx, tradeTargetPx), bgcolor = color.new(profitBoxColor, boxTransp), border_width = 0)
+    curRiskBox := box.new(left = vizLeft, top = math.max(tradeEntryPx, tradeStopPx), right = math.max(vizLeft + 8, bar_index), bottom = math.min(tradeEntryPx, tradeStopPx), bgcolor = color.new(lossBoxColor, boxTransp), border_width = 0)
 
     if showPnLLabels
-        curTPLabel := label.new(bar_index, tradeTargetPx, str.tostring(tradeTargetPx, "#.##"), style = label.style_label_right, color = color.new(profitBoxColor, 100), textcolor = profitBoxColor, size = size.small)
-        curEntryLabel := label.new(bar_index, tradeEntryPx, str.tostring(tradeEntryPx, "#.##"), style = label.style_label_right, color = color.new(color.white, 100), textcolor = color.white, size = size.small)
-        curSLLabel := label.new(bar_index, tradeStopPx, str.tostring(tradeStopPx, "#.##"), style = label.style_label_right, color = color.new(lossBoxColor, 100), textcolor = lossBoxColor, size = size.small)
+        curTPLabel := label.new(vizLeft, tradeTargetPx, str.tostring(tradeTargetPx, "#.##"), style = label.style_label_right, color = color.new(profitBoxColor, 100), textcolor = profitBoxColor, size = size.small)
+        curEntryLabel := label.new(vizLeft, tradeEntryPx, str.tostring(tradeEntryPx, "#.##"), style = label.style_label_right, color = color.new(color.white, 100), textcolor = color.white, size = size.small)
+        curSLLabel := label.new(vizLeft, tradeStopPx, str.tostring(tradeStopPx, "#.##"), style = label.style_label_right, color = color.new(lossBoxColor, 100), textcolor = lossBoxColor, size = size.small)
+
+// The resting limits, drawn only while they are actually working — without them a
+// Limit Pullback day shows a breakout triangle and then nothing at all until
+// price either comes back or the session ends.
+// Unit 1 is the shallower level, so it is always the first one price can reach:
+// an open position means it has filled, and its line ends there. Unit 2 keeps
+// working THROUGH an open position — that is the average-down — so its line runs
+// until the setup closes or the session cancels it.
+plot(pbResting and strategy.position_size == 0 ? pbE1 : na, title = "Unit 1 Limit", color = color.new(color.yellow, 20), style = plot.style_linebr, linewidth = 1)
+plot(pbResting ? pbE2 : na, title = "Unit 2 Limit (avg down)", color = color.new(color.orange, 20), style = plot.style_linebr, linewidth = 1)
 
 // The second-chance entries fire long after the day's breakout triangle is spent,
-// so they get their own marker — a hollow diamond on the entry bar, above for a
-// long and below for a short. Without it the only thing on the chart at that bar
-// is a box, and a re-entry looks identical to a first trade.
-plotshape(showBreakoutMarker and (reLong or revLong), title = "Second-Chance Long Entry", style = shape.diamond, location = location.abovebar, color = orbHighColor, size = size.tiny)
-plotshape(showBreakoutMarker and (reShort or revShort), title = "Second-Chance Short Entry", style = shape.diamond, location = location.belowbar, color = orbLowColor, size = size.tiny)
+// so they get their own marker — a diamond on the ARM bar, above for a long and
+// below for a short. Under Limit Pullback that marks where the setup armed, not
+// where it filled; the box is what shows a fill.
+plotshape(showBreakoutMarker and (reLong or revLong), title = "Second-Chance Long Setup", style = shape.diamond, location = location.abovebar, color = orbHighColor, size = size.tiny)
+plotshape(showBreakoutMarker and (reShort or revShort), title = "Second-Chance Short Setup", style = shape.diamond, location = location.belowbar, color = orbLowColor, size = size.tiny)
+
 
 // === DAY HIGHLIGHT ===
 // ORANGE = the day is Off. A faint GREEN / RED wash = the day is one-way, so the
@@ -641,5 +781,16 @@ if maxBarsInTrade > 0 and strategy.position_size != 0 and strategy.opentrades > 
 // instead leaves the morning's levels armed into the 18:00 ET Globex reopen,
 // which is a different session, and the trades that adds lose money.
 tfMs = timeframe.in_seconds(timeframe.period) * 1000
-if strategy.position_size != 0 and (f_sessionKey(time + tfMs) != sessionKey or bool(newDay))
-    strategy.close_all(comment = "day flat")
+sessionEnding = f_sessionKey(time + tfMs) != sessionKey or bool(newDay)
+if sessionEnding
+    if strategy.position_size != 0
+        strategy.close_all(comment = "day flat")
+    // A resting limit has to die on the SAME bar the session flattens. The cancel
+    // block up in the execution section catches the newDay bar, but that is one
+    // bar too late for an order that can fill during it — and a fill into the
+    // next session would be working off levels that no longer exist.
+    strategy.cancel("L1")
+    strategy.cancel("L2")
+    strategy.cancel("S1")
+    strategy.cancel("S2")
+    pbResting := false
