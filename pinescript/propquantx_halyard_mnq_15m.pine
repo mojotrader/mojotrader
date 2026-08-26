@@ -380,9 +380,9 @@ plotshape(showBreakoutMarker and breakoutDn, title = "Close Below ORB Low", styl
 // slBufferPts PAST it). The other two are distances from the entry price.
 //
 // The two window extremes are computed HERE, at global scope, on every bar —
-// NOT inside f_longStop/f_shortStop. Those are called from inside the six
-// `if enter*` blocks, and a ta.* call that only runs on the bars where an
-// entry fires does not see the continuous history it needs: it would return a
+// NOT inside f_longStop/f_shortStop. Those are called from inside the
+// PLACEMENT block, and a ta.* call that only runs on the bars where a setup
+// arms does not see the continuous history it needs: it would return a
 // value taken over whatever sparse set of bars happened to trigger, which on a
 // once-a-day strategy is days apart. `ta.lowest(low, n)` INCLUDES the current
 // bar, so the window ends at the breakout candle itself with no offset — and
@@ -441,8 +441,8 @@ directionShortOK = (tradeDirection == "Both" or tradeDirection == "Short") and (
 //     whichever lands first)
 // 3 = done for the day (first trade hit TP, or the second chance was taken)
 //
-// State 2 is the only state the extra trade can fire from, and both branches
-// leave state 3, so the day is capped at two fills no matter which one wins and
+// State 2 is the only state the extra setup can arm from, and both branches
+// leave state 3, so the day is capped at two SETUPS no matter which one wins and
 // a losing re-entry is never followed by a third attempt.
 var int tradeState = 0
 var int firstTradeDir = 0
