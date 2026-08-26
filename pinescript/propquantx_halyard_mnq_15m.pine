@@ -19,11 +19,12 @@
 //                   from the blended average whenever the second unit fills.
 //   Market on Close the original behaviour: one unit at the breakout close.
 //
-// AFTER A STOP-OUT the day gets ONE more fill, from whichever of the two second-
-// chance branches triggers first:
+// AFTER A STOP-OUT the day can get ONE more setup, from whichever of the two
+// second-chance branches triggers first. BOTH SHIP OFF while the pullback entry
+// model is being measured against a one-setup-per-day baseline:
 //   Re-entry — SAME direction as the loser, on a fresh close back beyond the
-//              SAME range edge the first trade broke. Ships ON.
-//   Reversal — OPPOSITE direction, on a close beyond the far edge. Ships OFF.
+//              SAME range edge the first trade broke.
+//   Reversal — OPPOSITE direction, on a close beyond the far edge.
 // They can never collide on one bar: a close cannot be above the ORB high and
 // below the ORB low at once. Whichever fires ends the day.
 //
