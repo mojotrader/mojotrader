@@ -90,6 +90,18 @@ or screen-share.
   PickMyTrade maps one token to one connected broker account, so it says both
   *who you are* and *which account to trade*. The webhook URL is identical for
   every user and carries no identity, which is why the token travels in the body.
+- **The alert dialog's Message box is not read by this script.** PickMyTrade's
+  setup guide has you paste their JSON template — token included — into the
+  Message field of the Create Alert dialog. That works for a script that doesn't
+  build its own message. This one does: with the condition set to *"alert()
+  function calls only"*, TradingView takes the message from the `alert()` call
+  and **ignores the dialog's Message box entirely**. A token typed there reaches
+  nobody, and if the script's own Token input was left blank, every payload goes
+  out as `"token":""` and is refused — silently, as far as TradingView is
+  concerned, because the alert fired successfully. The script now puts a red
+  warning on the chart when the webhook is on and the token is empty.
+- **The webhook URL is the opposite case** — it lives only in the alert dialog's
+  Notifications tab. The script neither needs nor can set it.
 - **`Tradovate account id` — optional, and a blank one used to be harmful.** It
   only matters when a token fans out to several accounts; on a single-account
   setup the token has already picked the account. The payload previously always

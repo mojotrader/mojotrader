@@ -1661,6 +1661,24 @@ f_pmtPreview() =>
     pxP = close
     f_pmt("buy", 1, pxP - 40 * syminfo.mintick, pxP + 40 * syminfo.mintick, false, pmtLmtWord, true, pxP)
 
+// ---------------------------------------------------------------- BLANK-TOKEN GUARD
+// THE ALERT DIALOG'S MESSAGE BOX IS NOT READ BY THIS SCRIPT, AND THAT TRIPS PEOPLE UP.
+// PickMyTrade's own setup guide has you paste their JSON template - token and all - into the Message field of
+// the Create Alert dialog. That works for a script that does not build its own message. This one does: with the
+// alert condition on "alert() function calls only", TradingView takes the message from the alert() call and
+// IGNORES the dialog's Message box entirely. So a token typed in there reaches nobody, and if the Token input
+// in this script was left empty, every payload leaves carrying "token":"" and PickMyTrade refuses the lot -
+// silently, from TradingView's point of view, because the alert fired successfully.
+// The webhook URL is the opposite case: only the dialog has it, this script neither needs nor can set it.
+// A blank token while the webhook is on is therefore always a misconfiguration, never a valid state. Say so
+// loudly on the chart rather than letting a day of orders vanish into a 4xx.
+var label pmtWarnLbl = na
+if autoOn and ordersOn and barstate.islast and str.length(pmtToken) == 0
+    if not na(pmtWarnLbl)
+        label.delete(pmtWarnLbl)
+    pmtWarnLbl := label.new(bar_index, high, "WEBHOOK TOKEN IS EMPTY\nEvery payload is going out as \"token\":\"\" and will be refused.\nThe token has to go in THIS script's inputs (Automation - PickMyTrade).\nA token pasted into the alert dialog's Message box is ignored:\nwith 'alert() function calls only', the alert() call supplies the message.\n(The webhook URL does belong in the alert dialog - that part is right.)",
+         xloc = xloc.bar_index, style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white, size = size.normal)
+
 var label pmtLbl = na
 if pmtDebug and barstate.islast and autoOn
     if not na(pmtLbl)
@@ -1901,8 +1919,9 @@ if showInfo and barstate.islast
     table.cell(info, 0, 17, modeTxt + (maxDayLoss > 0 ? "  | day stop $" + str.tostring(maxDayLoss, "#") + (dayHalt ? " - HIT" : "") : "") + (rmFixed ? "" : " (per entry, fixed capital)"), text_color = dayHalt ? color.red : color.yellow, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 18, autoOn ? (armLimits ? "Webhook: AT ARM - limits + bracket sent on the break" : "Webhook: ON FILL - market chase after the pullback") : "Webhook: off", text_color = autoOn ? color.lime : color.gray, text_size = size.small, text_halign = text.align_left)
     // The one line that tells you WHY a break alert did not arrive, and why that is deliberate.
-    table.cell(info, 0, 19, autoOn ? "  order_type " + pmtLmtWord + "/" + pmtMktWord + " | break alerts OFF (JSON channel)" : (brkLive ? "Break alerts: ON (manual)" : "Break alerts: off"),
-         text_color = autoOn ? color.lime : color.gray, text_size = size.small, text_halign = text.align_left)
+    tokenMissing = autoOn and str.length(pmtToken) == 0
+    table.cell(info, 0, 19, tokenMissing ? "  TOKEN EMPTY - payloads will be refused (put it in the inputs)" : autoOn ? "  order_type " + pmtLmtWord + "/" + pmtMktWord + " | break alerts OFF (JSON channel)" : (brkLive ? "Break alerts: ON (manual)" : "Break alerts: off"),
+         text_color = tokenMissing ? color.red : autoOn ? color.lime : color.gray, text_size = size.small, text_halign = text.align_left)
 
 // ---------------------------------------------------------------- Probability table (ORB / IB setups only)
 // Columns: N = sample size, Reach = how often that starting point is even reached, then the odds of price
