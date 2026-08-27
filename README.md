@@ -80,4 +80,19 @@ bracket did not.
 
 The debug label now also prints a **preview** of the entry payload before anything
 has fired, so the JSON can be pasted into a validator and checked against your
-PickMyTrade template without waiting for a setup to arm.
+PickMyTrade template without waiting for a setup to arm. The token is masked in
+that readout — it is a credential, and the label sits on a chart you may snapshot
+or screen-share.
+
+#### The two credential inputs are not the same kind of thing
+
+- **`PickMyTrade token` — required.** It is the whole of the authentication:
+  PickMyTrade maps one token to one connected broker account, so it says both
+  *who you are* and *which account to trade*. The webhook URL is identical for
+  every user and carries no identity, which is why the token travels in the body.
+- **`Tradovate account id` — optional, and a blank one used to be harmful.** It
+  only matters when a token fans out to several accounts; on a single-account
+  setup the token has already picked the account. The payload previously always
+  wrote `"account_id":""`, which asks the endpoint to route to an account whose
+  id is the empty string rather than meaning "unset". The key is now **omitted
+  entirely** while the input is blank.

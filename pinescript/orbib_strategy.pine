@@ -208,8 +208,10 @@ orbMinRngPct = input.float(0.40, "Min ORB range (% of price, 0 = off)", minval =
 grpA      = "Automation - PickMyTrade"
 autoOn    = input.bool(false, "Enable webhook alerts", group = grpA,
      tooltip = "Create ONE alert with condition 'alert() function calls only' and paste PickMyTrade's webhook URL. Alerts fire on the NET position; the seat rules keep the three setups from ever being open at once, so each alert maps to a single setup. Silent in Indicator mode.\n\nTURNING THIS ON FORCE-DISABLES THE MANUAL BREAK ALERTS, and it has to: one 'alert() function calls only' alert receives EVERY alert() call in the script, so a human-readable break message would be POSTed to PickMyTrade as plain text and bounced with 'unsupported media type' (HTTP 415). Run a second copy of the script if you want the manual alerts as well.")
-pmtToken  = input.string("", "PickMyTrade token", group = grpA)
-pmtAcct   = input.string("", "Tradovate account id", group = grpA)
+pmtToken  = input.string("", "PickMyTrade token", group = grpA,
+     tooltip = "REQUIRED. This is the entire authentication: PickMyTrade maps one token to one connected broker account, so it says both who you are and which account to trade. The webhook URL is the same for every user and carries no identity of its own, which is why the token has to travel in the message body. Blank = every order refused.\n\nIt is a credential. It is masked in the on-chart debug label, but treat a chart you screen-share or snapshot as public anyway.")
+pmtAcct   = input.string("", "Tradovate account id (optional)", group = grpA,
+     tooltip = "LEAVE BLANK unless your token fans out to more than one account. The token has already selected the account, so on an ordinary single-account setup this adds nothing - and an EMPTY one is worse than an absent one, because \"account_id\":\"\" asks the endpoint to route to an account whose id is the empty string. The key is omitted from the payload entirely while this is blank; fill it in only if PickMyTrade support tells you to, or if you are routing between several accounts on one token.")
 pmtSym    = input.string("MNQ1!", "Broker symbol", group = grpA)
 // THE WORDS. These were hardcoded as "market" / "limit", which PickMyTrade does not recognise - its documented
 // order_type values are MKT / LMT (and STOP / STOP LIMIT). An unrecognised order type is why the sl and tp
@@ -1454,6 +1456,19 @@ if dayHalt
 // the limit price and is only written on a limit order - a market order that carries a stray price field is a
 // rejection waiting to happen, and the key is simply left out rather than sent as 0.
 //
+// THE TWO CREDENTIAL FIELDS ARE NOT THE SAME KIND OF THING.
+//   token      - REQUIRED, and it is the whole of the authentication: PickMyTrade maps one token to one
+//                connected broker account, so the token is what says both "this is me" and "trade THIS
+//                account". There is nowhere else to put it - the endpoint URL is the same for everybody and
+//                the token is documented as belonging in the body, not the query string. Leave it blank and
+//                every order is refused.
+//   account_id - OPTIONAL, and an EMPTY one is worse than an absent one. It is for routing to a specific
+//                account when a token fans out to several; on an ordinary single-account setup the token has
+//                already picked the account and this key adds nothing. Sending "account_id":"" asks to route
+//                to an account whose id is the empty string, which the endpoint can read as a real (and
+//                missing) account rather than as "unset". The key is therefore OMITTED entirely while the
+//                input is blank, and only written once you actually put an id in it.
+//
 // EVERY NUMBER GOES THROUGH f_num OR f_qty, AND THAT IS LOAD-BEARING. str.tostring(na) renders the three
 // characters NaN, and TradingView decides the request's Content-Type by parsing the message: valid JSON is
 // POSTed as application/json, anything else as text/plain, which PickMyTrade rejects with 415 "unsupported
@@ -1481,7 +1496,9 @@ f_num(float v) => na(v) ? "0" : str.tostring(math.round_to_mintick(v), format.mi
 f_qty(float v) => na(v) or v <= 0 ? "0" : str.tostring(math.round(v), "#")
 
 f_pmt(string act, float q, float slp, float tpp, bool add, string otype, bool isLmt, float px) =>
-    '{"token":"' + pmtToken + '","account_id":"' + pmtAcct + '","symbol":"' + pmtSym +
+    '{"token":"' + pmtToken + '"' +
+      (pmtAcct != "" ? ',"account_id":"' + pmtAcct + '"' : "") +
+      ',"symbol":"' + pmtSym +
       '","data":"' + act + '","action":"' + act + '","quantity":' + f_qty(q) +
       ',"order_type":"' + otype + '"' +
       (isLmt ? ',"price":' + f_num(px) : "") +
@@ -1648,7 +1665,12 @@ var label pmtLbl = na
 if pmtDebug and barstate.islast and autoOn
     if not na(pmtLbl)
         label.delete(pmtLbl)
-    pmtTxt = str.length(pmtLast) > 0 ? "last webhook payload:\n" + pmtLast : "nothing sent yet - PREVIEW of the entry payload these settings would send:\n" + f_pmtPreview()
+    pmtRaw = str.length(pmtLast) > 0 ? "last webhook payload:\n" + pmtLast : "nothing sent yet - PREVIEW of the entry payload these settings would send:\n" + f_pmtPreview()
+    // THE TOKEN IS A CREDENTIAL AND THIS LABEL IS ON YOUR CHART. Anyone you send a snapshot to, or who
+    // watches you share a screen, can read whatever is printed here - and the token is the only thing
+    // standing between a stranger and your Tradovate account. It is masked in the readout; the alert itself
+    // still carries the real value, which is what PickMyTrade needs.
+    pmtTxt = str.length(pmtToken) > 0 ? str.replace_all(pmtRaw, pmtToken, "***MASKED***") : pmtRaw
     pmtLbl := label.new(bar_index, high, pmtTxt, xloc = xloc.bar_index, style = label.style_label_down, color = color.new(color.navy, 10), textcolor = color.white, size = size.small)
 
 // ---------------------------------------------------------------- Break alerts (fire once when each range breaks)
