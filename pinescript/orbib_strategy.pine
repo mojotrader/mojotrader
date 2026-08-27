@@ -10,42 +10,6 @@
 //   have traded on a 15m chart. Run this on 1m: ORB/IB get the resolution their limit fills need, Halyard is
 //   unaffected by the chart timeframe, and the Strategy Tester shows the three of them together.
 //
-// ============================================================================================================
-// WEBHOOK FIXES IN THIS REVISION - read this if you are here because entries were not reaching the broker.
-//
-//   1. "UNSUPPORTED MEDIA TYPE" (HTTP 415) WAS THE BREAK ALERTS, NOT THE JSON.
-//      TradingView picks the request's Content-Type from the alert TEXT: a message that parses as JSON is sent
-//      as application/json, and ANYTHING ELSE is sent as text/plain. PickMyTrade rejects text/plain with 415.
-//      One TradingView alert set to "alert() function calls only" receives EVERY alert() call in the script -
-//      you cannot route some calls to the webhook and others to your phone. So the human-readable
-//      "ORB BREAK LONG | broke 23456.25 | ..." messages from the Break alerts block were being POSTed to
-//      PickMyTrade as plain text and bounced with 415. They fire on the break bar - the same bar the at-arm
-//      entry is transmitted - which is exactly why the 415 looked like the entry failing.
-//      FIX: the manual break alerts are now force-disabled whenever the webhook is enabled (brkLive below).
-//      If you want both, run two copies of the script: one with the webhook on, one with break alerts on.
-//
-//   2. THE ENTRY'S order_type WAS A WORD THE BROKER DOES NOT USE.
-//      This file was sending "market" / "limit". PickMyTrade's documented order_type values are "MKT" / "LMT"
-//      (also "STOP" / "STOP LIMIT"). An unrecognised order type is why the sl and the tp arrived - they are
-//      plain numeric fields on the request - while the ENTRY leg they were supposed to bracket did not, leaving
-//      the stop and target sitting at Tradovate as orders of their own. A naked stop order on a FLAT account is
-//      an entry order, so when you then added a manual stop it opened its own trade. That is the broker doing
-//      what it was told, not a second bug.
-//      FIX: the two words are inputs now (Broker word for a MARKET / LIMIT order), defaulting to MKT / LMT.
-//      Copy whatever your own PickMyTrade dashboard template shows into them if it differs.
-//
-//   3. EVERY NUMBER IN THE PAYLOAD IS NOW NaN-PROOF, quantity INCLUDED.
-//      f_num already turned an unknown sl/tp into 0, but "quantity" went out through a bare str.tostring().
-//      str.tostring(na) renders the three characters NaN, which is not valid JSON - and an invalid payload is
-//      the OTHER way to earn a 415, because TradingView downgrades it to text/plain. Quantity now goes through
-//      f_qty (na -> 0, rounded to whole contracts) and prices through f_num with an explicit mintick format.
-//
-//   4. THE DEBUG LABEL NOW SHOWS A PREVIEW BEFORE ANYTHING HAS FIRED.
-//      Previously it said "no webhook payload sent yet" until a trade happened, so there was no way to check
-//      the JSON in advance. It now prints the exact entry payload the script WOULD send, so you can paste it
-//      into a JSON validator and compare it against your PickMyTrade template without waiting for a setup.
-// ============================================================================================================
-//
 // THE 15-MINUTE ENGINE (Halyard), in short
 //   Every chart bar is put in a 15-minute bucket (UTC-aligned, which is where TradingView's own 15m bars sit).
 //   The LAST chart bar of a bucket closes that 15m bar, so on a 1m chart the 09:44 bar closes the 09:30-09:45
@@ -71,9 +35,6 @@
 //   Halyard) and one label carrying contracts, $ risk, $ reward, the R multiple and the 1-contract numbers.
 //   The label opens to the LEFT of its anchor so it never sits over the newest bars or the price scale.
 //
-// AVERAGE-DOWN AT THE BROKER: the webhook sends the INCREMENT on an add, not the netted position, so the
-//   average-down stacks onto the open trade instead of forcing a flatten-and-reenter. See the webhook block.
-//
 // WHAT CHANGED vs THE TWO STANDALONE FILES
 //   - One strategy() call, so ONE set of properties: commission $0.5/contract and 1 tick slippage (the ORB/IB
 //     settings) now apply to Halyard too, which shipped with zero of both. Halyard's share of the curve will
@@ -98,7 +59,7 @@ strategy("ORBIB", overlay = true, pyramiding = 6,
 // so the boxes you see as an indicator are exactly the trades the strategy would have taken.
 gMode     = "Mode"
 runMode   = input.string("Strategy - place orders", "Run as", options = ["Strategy - place orders", "Indicator - drawings & alerts only"], group = gMode,
-     tooltip = "STRATEGY: the full engine - entries, exits, EOD flatten, daily-loss halt and the PickMyTrade webhook. INDICATOR: none of those, so no trades and an empty Strategy Tester, but every level, box, label, table and break alert still works.")
+     tooltip = "STRATEGY: the full engine - entries, exits, EOD flatten and the daily-loss halt. INDICATOR: none of those, so no trades and an empty Strategy Tester, but every level, box, label, table and break alert still works.")
 ordersOn  = runMode == "Strategy - place orders"
 
 // ---------------------------------------------------------------- Strategy toggles (isolate each for backtesting)
@@ -204,44 +165,10 @@ ibDepth   = input.float(100, "IB bias: max close depth into the range (%)", minv
 orbMinRngPct = input.float(0.40, "Min ORB range (% of price, 0 = off)", minval = 0, step = 0.05, group = gFilt,
      tooltip = "Skip ORB setups whose 15-min opening range is smaller than this % of price (range / range-low * 100). IB is NOT filtered. Set 0 to disable.")
 
-// ---------------------------------------------------------------- Automation (PickMyTrade webhook -> Tradovate)
-grpA      = "Automation - PickMyTrade"
-autoOn    = input.bool(false, "Enable webhook alerts", group = grpA,
-     tooltip = "Create ONE alert with condition 'alert() function calls only' and paste PickMyTrade's webhook URL. Alerts fire on the NET position; the seat rules keep the three setups from ever being open at once, so each alert maps to a single setup. Silent in Indicator mode.\n\nTURNING THIS ON FORCE-DISABLES THE MANUAL BREAK ALERTS, and it has to: one 'alert() function calls only' alert receives EVERY alert() call in the script, so a human-readable break message would be POSTed to PickMyTrade as plain text and bounced with 'unsupported media type' (HTTP 415). Run a second copy of the script if you want the manual alerts as well.")
-pmtToken  = input.string("", "PickMyTrade token", group = grpA,
-     tooltip = "REQUIRED. This is the entire authentication: PickMyTrade maps one token to one connected broker account, so it says both who you are and which account to trade. The webhook URL is the same for every user and carries no identity of its own, which is why the token has to travel in the message body. Blank = every order refused.\n\nIt is a credential. It is masked in the on-chart debug label, but treat a chart you screen-share or snapshot as public anyway.")
-pmtAcct   = input.string("", "Tradovate account id (optional)", group = grpA,
-     tooltip = "LEAVE BLANK unless your token fans out to more than one account. The token has already selected the account, so on an ordinary single-account setup this adds nothing - and an EMPTY one is worse than an absent one, because \"account_id\":\"\" asks the endpoint to route to an account whose id is the empty string. The key is omitted from the payload entirely while this is blank; fill it in only if PickMyTrade support tells you to, or if you are routing between several accounts on one token.")
-pmtSym    = input.string("MNQ1!", "Broker symbol", group = grpA)
-// THE WORDS. These were hardcoded as "market" / "limit", which PickMyTrade does not recognise - its documented
-// order_type values are MKT / LMT (and STOP / STOP LIMIT). An unrecognised order type is why the sl and tp
-// arrived at Tradovate while the ENTRY they were meant to bracket did not. They are inputs now: open your own
-// PickMyTrade dashboard, look at the JSON template it generates for your account, and copy its exact words in
-// here if they differ from the defaults.
-pmtMktWord = input.string("MKT", "Broker word for a MARKET order", group = grpA,
-     tooltip = "The exact string sent as \"order_type\" on a market order. PickMyTrade documents MKT. Copy the value out of your dashboard's JSON template if yours differs - it is case-sensitive at the far end.")
-pmtLmtWord = input.string("LMT", "Broker word for a LIMIT order", group = grpA,
-     tooltip = "The exact string sent as \"order_type\" on a resting limit order, i.e. every at-arm entry. PickMyTrade documents LMT. The limit price rides in the \"price\" field, which is only written when this order type is used.")
-pmtFlat    = input.string("close", "Word that FLATTENS a position", options = ["close", "exit"], group = grpA,
-     tooltip = "The value sent in the 'data' field to close an open position - when TradingView's own bracket closes the trade, and on the EOD backstop. PickMyTrade documents both spellings depending on template; 'close' is the usual one.")
-pmtWhen   = input.string("At arm - resting limit + bracket", "When to transmit", options = ["At arm - resting limit + bracket", "On fill - market + bracket"], group = grpA,
-     tooltip = "AT ARM (default): the moment a setup is armed - the range has broken and every filter has passed - the pullback limit, its stop and its target are transmitted, so the working order sits at the broker straight away and you can see the strategy's plan as live orders. On a SHALLOW setup the average-down limit goes out in the same breath; on a deeper one there is no second unit, so one order leaves. Nothing is sent when price actually reaches the level: the broker's own resting order is what fills.\n\nON FILL: the original behaviour - nothing leaves until TradingView's simulated limit fills, then a MARKET order with the bracket attached is sent to chase it.\n\nHALYARD is unaffected either way. It enters at the 15m close with a market order, so its arm and its fill are the same instant and it always uses the on-fill path.")
-pmtCxl    = input.string("close", "Word that pulls a working order", options = ["close", "cancel", "(send nothing)"], group = grpA,
-     tooltip = "AT-ARM MODE ONLY. When an armed setup expires without ever being filled - the IB range forms at 10:30, the cutoff passes, a double-break, the seat is lost, EOD - the resting order has to be pulled off the broker or it will fill tomorrow. This is the value sent in the 'data' field to do that; it is only ever sent while the account is FLAT, so it can never close a live trade belonging to another setup. 'close' is PickMyTrade's documented flatten-and-clear. Switch to 'cancel' if your PickMyTrade template uses that word for pending orders, or to '(send nothing)' if you would rather pull the order by hand.")
-pmtTypeSel = input.string("market", "Order type (on-fill mode)", options = ["market", "limit"], group = grpA,
-     tooltip = "The order type used by the ON-FILL path only - the chase order sent once TradingView's own limit has filled, and every Halyard entry. Whichever you pick, the string actually transmitted is the matching Broker word above. At-arm entries are always limits, since the whole point of them is a resting order at the pullback price.")
-armLimits = pmtWhen == "At arm - resting limit + bracket"
-pmtIsLmt  = pmtTypeSel == "limit"
-pmtType   = pmtIsLmt ? pmtLmtWord : pmtMktWord
-pmtDebug  = input.bool(true, "Show the last webhook payload on the chart", group = grpA,
-     tooltip = "Prints the exact JSON the script last transmitted, as a label on the most recent bar - and, before anything has fired, a PREVIEW of the entry payload it would send, so you can validate the shape without waiting for a setup. TradingView gives you no way to see an alert() message after it has fired, so this is how you check that sl and tp really are leaving with a price on them. Turn it off once you are satisfied.")
-
 // ---------------------------------------------------------------- Break alerts (manual trading)
 grpBA     = "Break alerts (manual)"
 brkAlerts = input.bool(true, "Alert when a range breaks (Halyard / ORB / IB)", group = grpBA,
-     tooltip = "Fires a notification the moment a range breaks, with the direction and the planned entry/stop/target so you can place the trade yourself. Create ONE alert on this strategy with condition 'alert() function calls only'.\n\nIGNORED WHILE THE WEBHOOK IS ON. These messages are human-readable text, not JSON, and one 'alert() function calls only' alert carries every alert() call in the script to the SAME webhook URL - so leaving both on posts plain text to PickMyTrade and earns an 'unsupported media type' (415) on every break.")
-// The hard gate. Read this instead of brkAlerts everywhere below.
-brkLive   = brkAlerts and not autoOn
+     tooltip = "Fires a notification the moment a range breaks, with the direction and the planned entry/stop/target so you can place the trade yourself. Create ONE alert on this strategy with condition 'alert() function calls only'.\n\nThese are the ONLY alerts this script emits, and they are plain readable text meant for a HUMAN - a phone push, an email, a Telegram message. Do not point them at a broker webhook: TradingView sends anything that is not valid JSON as text/plain, and an order endpoint answers that with 415 'unsupported media type'.")
 
 // ---------------------------------------------------------------- Risk/Reward tool
 grpRR     = "Risk / Reward tool"
@@ -1436,270 +1363,14 @@ if dayHalt
         strategy.cancel_all()
     halTrDir := 0
 
-
-// ---------------------------------------------------------------- Automation: PickMyTrade webhook (net position)
-// PickMyTrade's documented alert schema carries the buy/sell/close instruction in a field called "data".
-// Earlier versions of this file sent it as "action" only. Both are emitted here, with the same value: "data"
-// is the documented name, and "action" is kept so a setup that was already working on it keeps working. An
-// unrecognised extra key is ignored by the endpoint; a MISSING one is not.
-//
-// order_type CARRIES A BROKER WORD, NOT AN ENGLISH ONE. It used to be hardcoded "market" / "limit"; PickMyTrade
-// documents MKT / LMT (and STOP / STOP LIMIT). An order type it does not recognise is why the sl and the tp
-// showed up at Tradovate while the entry they were meant to bracket did not - the numeric bracket fields were
-// readable, the order the bracket belonged to was not. Both words are inputs now, defaulted to MKT / LMT.
-//
-// isLmt, NOT a string comparison, decides whether the "price" key is written. Comparing otype to the literal
-// "limit" was fine only as long as the word was hardcoded; the moment it became editable, a user typing LMT
-// would have silently dropped the limit price and turned every resting entry into a market order.
-//
-// sl and tp are ABSOLUTE PRICE LEVELS, not distances - 0 means "no level, use the account default". `price` is
-// the limit price and is only written on a limit order - a market order that carries a stray price field is a
-// rejection waiting to happen, and the key is simply left out rather than sent as 0.
-//
-// THE TWO CREDENTIAL FIELDS ARE NOT THE SAME KIND OF THING.
-//   token      - REQUIRED, and it is the whole of the authentication: PickMyTrade maps one token to one
-//                connected broker account, so the token is what says both "this is me" and "trade THIS
-//                account". There is nowhere else to put it - the endpoint URL is the same for everybody and
-//                the token is documented as belonging in the body, not the query string. Leave it blank and
-//                every order is refused.
-//   account_id - OPTIONAL, and an EMPTY one is worse than an absent one. It is for routing to a specific
-//                account when a token fans out to several; on an ordinary single-account setup the token has
-//                already picked the account and this key adds nothing. Sending "account_id":"" asks to route
-//                to an account whose id is the empty string, which the endpoint can read as a real (and
-//                missing) account rather than as "unset". The key is therefore OMITTED entirely while the
-//                input is blank, and only written once you actually put an id in it.
-//
-// EVERY NUMBER GOES THROUGH f_num OR f_qty, AND THAT IS LOAD-BEARING. str.tostring(na) renders the three
-// characters NaN, and TradingView decides the request's Content-Type by parsing the message: valid JSON is
-// POSTed as application/json, anything else as text/plain, which PickMyTrade rejects with 415 "unsupported
-// media type". So a single na anywhere in the payload does not produce a partial order - it produces a request
-// the endpoint refuses outright. f_num renders an unknown price as 0; f_qty renders an unknown size as 0 and
-// rounds to whole contracts, because "quantity":1.5 is a rejection at any futures broker.
-//
-// `add` marks an ADD-ON to a position that is already open, and it changes three things:
-//   quantity  - the caller sends the INCREMENT, not the net (see the quantity note below);
-//   pyramid   - true lets PickMyTrade stack the fill onto the open position instead of treating a second
-//               same-direction signal as a fresh position;
-//   update_sl / update_tp - true amends the bracket already working on that symbol rather than creating a
-//               second one, so the whole enlarged position ends up under ONE stop and ONE target. That is
-//               right for THIS file, where the first entry and the average-down deliberately share the same
-//               two exit prices.
-// This `add` machinery is for the FILL-DRIVEN paths only (the buy/sell alerts below, and Halyard) - a real
-// position exists there for pyramid/update_sl/update_tp to act on. The AT-ARM transmission further down sends
-// its average-down leg with add = false: at arm neither leg has filled, so there is no working bracket yet for
-// an "amend" to target, and flagging it as an add was silently dropping that leg at the broker.
-//
-// same_direction_ignore is pinned false: a same-direction signal must never be silently dropped, or the add
-// would vanish. reverse_order_close is pinned true so a direction flip flattens first - the seat rules mean
-// that should never happen, but if it ever did, flattening is the safe reading.
-f_num(float v) => na(v) ? "0" : str.tostring(math.round_to_mintick(v), format.mintick)
-f_qty(float v) => na(v) or v <= 0 ? "0" : str.tostring(math.round(v), "#")
-
-f_pmt(string act, float q, float slp, float tpp, bool add, string otype, bool isLmt, float px) =>
-    '{"token":"' + pmtToken + '"' +
-      (pmtAcct != "" ? ',"account_id":"' + pmtAcct + '"' : "") +
-      ',"symbol":"' + pmtSym +
-      '","data":"' + act + '","action":"' + act + '","quantity":' + f_qty(q) +
-      ',"order_type":"' + otype + '"' +
-      (isLmt ? ',"price":' + f_num(px) : "") +
-      ',"sl":' + f_num(slp) +
-      ',"tp":' + f_num(tpp) +
-      ',"pyramid":' + (add ? "true" : "false") +
-      ',"same_direction_ignore":false,"reverse_order_close":true' +
-      ',"update_sl":' + (add ? "true" : "false") +
-      ',"update_tp":' + (add ? "true" : "false") + '}'
-
-// WHICH bracket to quote. This has to survive a lag: the alerts fire on a change in the NETTED
-// strategy.position_size, and that variable only reflects a fill on the bar AFTER the engine books it, so by
-// the time an alert goes out the setup that caused it may already have been closed and reset.
-// The naive chain `halLive ? halStp : liveORB ? or_curStop : ib_curStop` has an unguarded final branch: any
-// moment neither Halyard nor the ORB was live it resolves to ib_curStop, which is na on every day the IB never
-// filled - and that na is what becomes NaN in the JSON. Prefer whichever setup is genuinely live, and
-// otherwise fall back to the bracket latched at the last fill, so there is always a real pair of prices.
-liveORB  = (or_f1 or or_f2) and not or_closed
-liveIB   = (ib_f1 or ib_f2) and not ib_closed
-var float lastStop = na
-var float lastTgt  = na
-if halEntered
-    lastStop := halStp
-    lastTgt  := halTgt
-if or_firstFill
-    lastStop := or_curStop
-    lastTgt  := or_curTP
-if ib_firstFill
-    lastStop := ib_curStop
-    lastTgt  := ib_curTP
-autoStop = halLive ? halStp : liveORB ? or_curStop : liveIB ? ib_curStop : lastStop
-autoTP   = halLive ? halTgt : liveORB ? or_curTP  : liveIB ? ib_curTP  : lastTgt
-
-// QUANTITY: THE INCREMENT, NOT THE NET.
-// Sending math.abs(strategy.position_size) - the whole netted position - looks right on a first entry, because
-// there the net and the increment are the same number. On the AVERAGE-DOWN fill it is not: holding 1 and
-// adding 1, it would transmit "buy 2" to a broker that already has 1 on. A platform reading quantity as the
-// position it should end up holding can only reconcile that by flattening the 1 and re-entering 2 - which
-// realises the first unit's open loss at the worst moment and re-opens the whole thing at the current price,
-// destroying the averaging-down the setup exists to do. What an add actually means is "buy 1 MORE".
-//   from flat         -> increment == net, unchanged
-//   same-direction up -> the difference, flagged as an add so it stacks
-//   direction flip    -> the new position size, with reverse_order_close doing the flattening
-// A same-direction DECREASE (one unit's bracket fills while the other stays on) sends nothing, as before: the
-// broker's own stop and target orders are what close the units, not these alerts.
-posNow   = strategy.position_size
-posPrev  = strategy.position_size[1]
-sameDir  = posNow != 0 and posPrev != 0 and ((posNow > 0) == (posPrev > 0))
-isAdd    = sameDir and math.abs(posNow) > math.abs(posPrev)
-autoQty  = isAdd ? math.abs(posNow - posPrev) : math.abs(posNow)
-buyNow   = posNow > 0 and (posPrev <= 0 or posNow > posPrev)
-sellNow  = posNow < 0 and (posPrev >= 0 or posNow < posPrev)
-closeNow = posNow == 0 and posPrev != 0
-// In AT-ARM mode the ORB and IB entries are already resting at the broker, so their fills must NOT be chased
-// with a second order - the broker filled its own limit and the bracket went out with it. Halyard is different:
-// it is a market order at the 15m close, so its arm and its fill are the same event and it keeps this path.
-// halLive is the tell - the seat rules mean an ORB/IB fill can never happen while a Halyard trade is open.
-sendFill = not armLimits or halLive
-// the exact string that went out, kept for the on-chart readout below
-var string pmtLast = ""
-if autoOn and ordersOn and buyNow and sendFill
-    pmtLast := f_pmt("buy",  autoQty, autoStop, autoTP, isAdd, pmtType, pmtIsLmt, close)
-    alert(pmtLast, alert.freq_once_per_bar)
-if autoOn and ordersOn and sellNow and sendFill
-    pmtLast := f_pmt("sell", autoQty, autoStop, autoTP, isAdd, pmtType, pmtIsLmt, close)
-    alert(pmtLast, alert.freq_once_per_bar)
-if autoOn and ordersOn and closeNow
-    pmtLast := f_pmt(pmtFlat, 0, 0.0, 0.0, false, pmtMktWord, false, float(na))
-    alert(pmtLast, alert.freq_once_per_bar)
-
-// ---------------------------------------------------------------- AT-ARM TRANSMISSION (resting limit + bracket)
-// The setup's whole plan goes to the broker the moment it is ARMED - the bar the range breaks and every filter
-// passes - instead of after price has come back and TradingView's simulated limit has filled. The first unit's
-// limit goes out at whichever fib line this setup entered on (the 25% line on a shallow setup, the 50% line on
-// a deeper one), carrying the absolute stop - the far range edge - and the absolute target. A SHALLOW setup
-// also has an average-down unit, and its limit at the 50% line leaves in the same breath - as its OWN fresh
-// pending order, NOT flagged as an add. `add` (pyramid / update_sl / update_tp true) means "amend the bracket
-// ALREADY WORKING on this symbol", which only makes sense once a position exists to amend - see the `add`
-// note above f_pmt. At arm, NEITHER leg has filled yet, so there is no working bracket for the second leg to
-// amend; flagging it as an add here told PickMyTrade to update a position that was not there yet, which is
-// very likely why the first leg's limit reached the broker and the average-down's silently did not. Both legs
-// are plain new limit orders instead; same_direction_ignore stays false on both so neither is dropped as a
-// duplicate of the other. A deeper setup has no second unit (its entry IS the 50% line), so exactly one order
-// leaves.
-//
-// WHY barstate.isconfirmed + alert.freq_all, when everything else here uses freq_once_per_bar: once_per_bar
-// lets only the FIRST alert() of the bar out, which would silently swallow the average-down order. freq_all
-// lets both through, and would normally re-fire on every tick of the live bar - isconfirmed is what stops that,
-// by only letting the block run on the bar's final iteration. Historical bars never fire alerts at all.
-//
-// The prices are fixed at arm and cannot drift afterwards: the stop is the range extreme, breakeven-move is off
-// in this build, and both targets are range EXTENSIONS. (Switch orbTpL/orbTpS or ibTpL/ibTpS in the hardcoded
-// config to "HOD/LOD" and that stops being true - the level transmitted would be the day's high/low as it stood
-// at the break, while the Strategy Tester would keep using the one at the fill.)
-orbArm = armLimits and runORB and or_placed and not or_placed[1] and not na(or_e1) and not na(or_zstop) and or_dir != 0
-ibArm  = armLimits and runIB  and ib_placed and not ib_placed[1] and not na(ib_e1) and not na(ib_zstop) and ib_dir != 0
-// DIAGNOSTIC LABEL, drawn on the arm bar itself and kept in history (unlike the "last payload" label below,
-// which just shows whatever fired most recently and gets overwritten by the next event). Answers exactly one
-// question when you scroll back to a specific break: did the avg-down alert actually fire from Pine, or did
-// this setup never have one to begin with (a deep close, one unit only)? If it says "sent" and the broker still
-// only shows one resting order, the drop is happening downstream of TradingView (PickMyTrade/Tradovate), not
-// in this script - check the order log there.
-f_armLbl(float y, string nm, bool addSent, bool useAdd) =>
-    string txt = nm + " armed: entry limit sent" + (addSent ? " | avg-down limit sent" : useAdd ? " | avg-down SKIPPED (sizing < 1 contract)" : " | avg-down SKIPPED (deep close - one unit only, no add on this setup)")
-    label.new(bar_index, y, txt, style = label.style_label_down, color = color.new(color.blue, 70), textcolor = color.white, size = size.tiny)
-
-if autoOn and ordersOn and barstate.isconfirmed and orbArm
-    orbArmTP  = f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
-    orbArmAct = or_dir == 1 ? "buy" : "sell"
-    pmtLast := f_pmt(orbArmAct, orbSz1, or_zstop, orbArmTP, false, pmtLmtWord, true, or_e1)
-    alert(pmtLast, alert.freq_all)
-    orbAddSent = or_useAdd and orbSz2 >= 1
-    if orbAddSent
-        pmtLast := f_pmt(orbArmAct, orbSz2, or_zstop, orbArmTP, false, pmtLmtWord, true, or_e2)
-        alert(pmtLast, alert.freq_all)
-    if pmtDebug
-        f_armLbl(or_e1, "ORB", orbAddSent, or_useAdd)
-if autoOn and ordersOn and barstate.isconfirmed and ibArm
-    ibArmTP  = f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
-    ibArmAct = ib_dir == 1 ? "buy" : "sell"
-    pmtLast := f_pmt(ibArmAct, ibSz1, ib_zstop, ibArmTP, false, pmtLmtWord, true, ib_e1)
-    alert(pmtLast, alert.freq_all)
-    ibAddSent = ib_useAdd and ibSz2 >= 1
-    if ibAddSent
-        pmtLast := f_pmt(ibArmAct, ibSz2, ib_zstop, ibArmTP, false, pmtLmtWord, true, ib_e2)
-        alert(pmtLast, alert.freq_all)
-    if pmtDebug
-        f_armLbl(ib_e1, "IB", ibAddSent, ib_useAdd)
-
-// PULLING A WORKING ORDER. An armed setup that never fills has to have its resting order taken off the broker,
-// or it is still there tomorrow. With the carry gone the commonest case is the 10:30 hand-over: orbWin shuts as
-// the IB range forms and any unfilled ORB limit has to come off. These mirror the strategy.cancel conditions in
-// the two engines exactly and fire on the transition, so one message goes out per setup. The "and flat" guard is
-// the safety: the pull word is only ever sent while the account holds nothing, so it can never flatten a live
-// trade of another seat.
-orbDead = or_placed and not (or_f1 or or_f2) and (or_closed or flatten or not runORB or or_missed or (noDbl and or_oppBroke) or not orbWin)
-ibDead  = ib_placed and not (ib_f1 or ib_f2) and (ib_closed or flatten or not runIB  or ib_missed or (noDbl and ib_oppBroke) or not ibWin)
-armCxl  = armLimits and pmtCxl != "(send nothing)" and strategy.position_size == 0 and ((orbDead and not orbDead[1]) or (ibDead and not ibDead[1]))
-if autoOn and ordersOn and barstate.isconfirmed and armCxl
-    pmtLast := f_pmt(pmtCxl, 0, 0.0, 0.0, false, pmtMktWord, false, float(na))
-    alert(pmtLast, alert.freq_all)
-
-// EOD BACKSTOP. In at-arm mode the broker owns the fills, so it is possible for it to be holding a position or a
-// working order that TradingView never registered - a limit that traded on the broker's feed but not on the
-// chart's. One unconditional flatten-and-clear on the first bar of the EOD window closes that gap. It is skipped
-// when the netted position is already producing a close of its own, so the log stays readable.
-if autoOn and ordersOn and barstate.isconfirmed and armLimits and flatten and not flatten[1] and not closeNow
-    pmtLast := f_pmt(pmtFlat, 0, 0.0, 0.0, false, pmtMktWord, false, float(na))
-    alert(pmtLast, alert.freq_all)
-
-// ---- on-chart readout of the payload, so you can read what is actually transmitted ----
-// TradingView does not show you an alert()'s message after the fact, which is why a rejected bracket is so hard
-// to diagnose. This prints the most recent one - and, BEFORE anything has fired, a PREVIEW of the entry payload
-// the current settings would produce, so the JSON can be checked against your PickMyTrade template without
-// waiting for a setup to arm. Paste it into any JSON validator: if it does not parse, TradingView will POST it
-// as text/plain and PickMyTrade will answer 415 "unsupported media type".
-// Check three things: both "sl" and "tp" carry a real number and never NaN; "order_type" is the exact word your
-// PickMyTrade template uses; and an average-down reads as the INCREMENT with "pyramid":true, not the netted size.
-f_pmtPreview() =>
-    pxP = close
-    f_pmt("buy", 1, pxP - 40 * syminfo.mintick, pxP + 40 * syminfo.mintick, false, pmtLmtWord, true, pxP)
-
-// ---------------------------------------------------------------- BLANK-TOKEN GUARD
-// THE ALERT DIALOG'S MESSAGE BOX IS NOT READ BY THIS SCRIPT, AND THAT TRIPS PEOPLE UP.
-// PickMyTrade's own setup guide has you paste their JSON template - token and all - into the Message field of
-// the Create Alert dialog. That works for a script that does not build its own message. This one does: with the
-// alert condition on "alert() function calls only", TradingView takes the message from the alert() call and
-// IGNORES the dialog's Message box entirely. So a token typed in there reaches nobody, and if the Token input
-// in this script was left empty, every payload leaves carrying "token":"" and PickMyTrade refuses the lot -
-// silently, from TradingView's point of view, because the alert fired successfully.
-// The webhook URL is the opposite case: only the dialog has it, this script neither needs nor can set it.
-// A blank token while the webhook is on is therefore always a misconfiguration, never a valid state. Say so
-// loudly on the chart rather than letting a day of orders vanish into a 4xx.
-var label pmtWarnLbl = na
-if autoOn and ordersOn and barstate.islast and str.length(pmtToken) == 0
-    if not na(pmtWarnLbl)
-        label.delete(pmtWarnLbl)
-    pmtWarnLbl := label.new(bar_index, high, "WEBHOOK TOKEN IS EMPTY\nEvery payload is going out as \"token\":\"\" and will be refused.\nThe token has to go in THIS script's inputs (Automation - PickMyTrade).\nA token pasted into the alert dialog's Message box is ignored:\nwith 'alert() function calls only', the alert() call supplies the message.\n(The webhook URL does belong in the alert dialog - that part is right.)",
-         xloc = xloc.bar_index, style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white, size = size.normal)
-
-var label pmtLbl = na
-if pmtDebug and barstate.islast and autoOn
-    if not na(pmtLbl)
-        label.delete(pmtLbl)
-    pmtRaw = str.length(pmtLast) > 0 ? "last webhook payload:\n" + pmtLast : "nothing sent yet - PREVIEW of the entry payload these settings would send:\n" + f_pmtPreview()
-    // THE TOKEN IS A CREDENTIAL AND THIS LABEL IS ON YOUR CHART. Anyone you send a snapshot to, or who
-    // watches you share a screen, can read whatever is printed here - and the token is the only thing
-    // standing between a stranger and your Tradovate account. It is masked in the readout; the alert itself
-    // still carries the real value, which is what PickMyTrade needs.
-    pmtTxt = str.length(pmtToken) > 0 ? str.replace_all(pmtRaw, pmtToken, "***MASKED***") : pmtRaw
-    pmtLbl := label.new(bar_index, high, pmtTxt, xloc = xloc.bar_index, style = label.style_label_down, color = color.new(color.navy, 10), textcolor = color.white, size = size.small)
-
 // ---------------------------------------------------------------- Break alerts (fire once when each range breaks)
-// brkLive, NOT brkAlerts. These messages are human-readable text, and a TradingView alert set to "alert()
-// function calls only" carries EVERY alert() call in the script to the one webhook URL it was given - there is
-// no way to route the JSON to PickMyTrade and the prose to your phone from a single alert. Firing them while
-// the webhook is on POSTs plain text to PickMyTrade, which answers 415 "unsupported media type" - on the break
-// bar, which is the same bar the at-arm entry goes out on, so it reads exactly like the entry being rejected.
-// That is the bug this revision fixes. To run both, put a second copy of the script on the chart with the
-// webhook off and break alerts on, and give that copy its own alert.
-if brkLive and runHAL and (halBrkUp or halBrkDn)
+// The only alert() calls in the file, and they are addressed to a PERSON: the direction, the level that broke,
+// and the planned entry, stop and target, so the trade can be placed by hand.
+// A TradingView alert set to "alert() function calls only" carries EVERY alert() call in a script to whatever
+// destination that one alert was given, so these cannot be split between a human and a machine. Point the
+// alert at a notification channel, not at a broker webhook: TradingView sends anything that is not valid JSON
+// as text/plain, and an order endpoint answers that with 415 "unsupported media type".
+if brkAlerts and runHAL and (halBrkUp or halBrkDn)
     halSLa = halBrkUp ? f_halLongStop(hal15C) : f_halShortStop(hal15C)
     halTPa = halBrkUp ? f_halLongTP(hal15C, halSLa, halRR) : f_halShortTP(hal15C, halSLa, halRR)
     alert("HALYARD 15m BREAK  " + (halBrkUp ? "LONG" : "SHORT") +
@@ -1707,14 +1378,14 @@ if brkLive and runHAL and (halBrkUp or halBrkDn)
          "  | entry " + str.tostring(math.round_to_mintick(hal15C)) +
          "  | stop " + str.tostring(math.round_to_mintick(halSLa)) +
          "  | target " + str.tostring(math.round_to_mintick(halTPa)), alert.freq_once_per_bar)
-if brkLive and runORB and or_dir != 0 and or_broke and not or_broke[1]
+if brkAlerts and runORB and or_dir != 0 and or_broke and not or_broke[1]
     orTPa = f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
     alert("ORB BREAK  " + (or_dir == 1 ? "LONG" : "SHORT") +
          "  | broke " + str.tostring(math.round_to_mintick(or_dir == 1 ? or_rH : or_rL)) +
          "  | pullback entry " + str.tostring(math.round_to_mintick(or_e1)) +
          "  | stop " + str.tostring(math.round_to_mintick(or_zstop)) +
          "  | target " + str.tostring(math.round_to_mintick(orTPa)), alert.freq_once_per_bar)
-if brkLive and runIB and ib_dir != 0 and ib_broke and not ib_broke[1]
+if brkAlerts and runIB and ib_dir != 0 and ib_broke and not ib_broke[1]
     ibTPa = f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
     alert("IB BREAK  " + (ib_dir == 1 ? "LONG" : "SHORT") +
          "  | broke " + str.tostring(math.round_to_mintick(ib_dir == 1 ? ib_rH : ib_rL)) +
@@ -1896,7 +1567,7 @@ if halGrow
 // ---------------------------------------------------------------- Strategy rules panel (top-right)
 var table info = na
 if showInfo and barstate.islast
-    info := table.new(position.top_right, 1, 20, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
+    info := table.new(position.top_right, 1, 19, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
     table.cell(info, 0, 0,  (ordersOn ? "" : "[INDICATOR - no orders]  ") + "HALYARD + BREAK-THEN-PULLBACK (ORB + IB)",
          text_color = ordersOn ? color.aqua : color.orange, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 1,  "HALYARD: 15m candles built from chart bars - any chart TF",  text_color = color.fuchsia, text_size = size.small, text_halign = text.align_left)
@@ -1917,11 +1588,8 @@ if showInfo and barstate.islast
     table.cell(info, 0, 15, "Skip double-break days | ORB/IB flatten 15:30 ET",           text_color = color.silver,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 16, "Toggle Run HAL / ORB / IB + weekdays to isolate results",    text_color = color.aqua,    text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 17, modeTxt + (maxDayLoss > 0 ? "  | day stop $" + str.tostring(maxDayLoss, "#") + (dayHalt ? " - HIT" : "") : "") + (rmFixed ? "" : " (per entry, fixed capital)"), text_color = dayHalt ? color.red : color.yellow, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 18, autoOn ? (armLimits ? "Webhook: AT ARM - limits + bracket sent on the break" : "Webhook: ON FILL - market chase after the pullback") : "Webhook: off", text_color = autoOn ? color.lime : color.gray, text_size = size.small, text_halign = text.align_left)
-    // The one line that tells you WHY a break alert did not arrive, and why that is deliberate.
-    tokenMissing = autoOn and str.length(pmtToken) == 0
-    table.cell(info, 0, 19, tokenMissing ? "  TOKEN EMPTY - payloads will be refused (put it in the inputs)" : autoOn ? "  order_type " + pmtLmtWord + "/" + pmtMktWord + " | break alerts OFF (JSON channel)" : (brkLive ? "Break alerts: ON (manual)" : "Break alerts: off"),
-         text_color = tokenMissing ? color.red : autoOn ? color.lime : color.gray, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 18, brkAlerts ? "Break alerts: ON - manual notifications, no broker automation" : "Break alerts: off",
+         text_color = brkAlerts ? color.lime : color.gray, text_size = size.small, text_halign = text.align_left)
 
 // ---------------------------------------------------------------- Probability table (ORB / IB setups only)
 // Columns: N = sample size, Reach = how often that starting point is even reached, then the odds of price
