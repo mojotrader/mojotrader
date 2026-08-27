@@ -22,7 +22,7 @@
 //
 // Timezone is hardcoded — do not change your chart's timezone expecting the
 // levels to move, they will not.
-strategy("PropQuantX Halyard MNQ 15min FREE", overlay = true, pyramiding = 0, process_orders_on_close = true, initial_capital = 150000, default_qty_type = strategy.fixed, default_qty_value = 1, slippage = 0, commission_type = strategy.commission.cash_per_contract, commission_value = 0, margin_long = 1, margin_short = 1, max_labels_count = 500, max_boxes_count = 500)
+strategy("PropQuantX Halyard MNQ 15min FREE", overlay = true, pyramiding = 0, process_orders_on_close = true, initial_capital = 150000, default_qty_type = strategy.fixed, default_qty_value = 1, slippage = 0, commission_type = strategy.commission.cash_per_contract, commission_value = 0, margin_long = 1, margin_short = 1, max_boxes_count = 500)
 
 // === Inputs ===
 grpPS = "Position Sizing"
@@ -63,10 +63,22 @@ orbRangeMaxPts = input.float(0, "Max ORB Range (pts, 0=off)", minval = 0, step =
 if orbRangeMaxPts > 0 and orbRangeMinPts > orbRangeMaxPts
     runtime.error("Range Filter: Min ORB Range is above Max ORB Range, so no day can ever pass. Fix one of them.")
 
-// Risk/Reward tool — the same box the other strategies in this repo draw: a green
-// reward box and a red risk box off the entry, both rrBars wide, plus one label
-// carrying the dollar risk, the dollar reward, the R multiple, the contract count
-// and the per-contract numbers.
+// Entry cutoff — a wall-clock ET time after which NO new entry is taken. Neither
+// the first trade nor the reversal fires past it; a break that closes beyond the
+// range after the cutoff is simply skipped, and it still CONSUMES the day the way
+// any other break does.
+//
+// SHIPS OFF, like the Range Filter, so it changes nothing until you tick it — a
+// filter that silently deletes trades from a backtest is worse than no filter.
+grpC = "Entry Cutoff"
+useEntryCutoff = input.bool(false, "Stop New Entries After (ET)", group = grpC, tooltip = "Off by default. The session runs from 13:30 / 14:30 ET across midnight to the same time next day, so this is measured from the session's own start, not from the raw clock — 10:00 means the 10:00 that follows this session's range candle.")
+cutoffH = input.int(10, "Cutoff Hour (ET, 0-23)", minval = 0, maxval = 23, group = grpC)
+cutoffM = input.int(0, "Cutoff Minute", minval = 0, maxval = 59, step = 5, group = grpC)
+
+// Risk/Reward tool — a green reward box and a red risk box off the entry, both
+// rrBars wide, with the trade's numbers written INSIDE them. No floating labels:
+// each box carries the side it describes, so the text cannot drift away from the
+// thing it is measuring the way an anchored label does when you scroll.
 //
 // Drawn ONCE at the entry and then left alone — no extending, no deleting, no
 // keep-history bookkeeping. TradingView drops the oldest boxes itself once
@@ -175,9 +187,9 @@ f_finalQty(_entry, _sl) =>
 // short), risk box on the other side, border in the setup's colour, and the whole
 // dollar picture in one label off the right edge.
 //
-// `q` is the position size, so the top line is what THIS trade actually risks and
-// the second line is the per-contract cost of being wrong — the number that
-// matters when you are deciding whether the size is sane.
+// `q` is the position size, so the risk box shows what THIS trade actually risks
+// with the per-contract cost beside it — the number that matters when you are
+// deciding whether the size is sane.
 f_drawRR(int d, float ent, float zstop, float ptp, float q, color sigCol, string tag, int xoff) =>
     x1 = bar_index + xoff
     x2 = x1 + rrBars
@@ -190,11 +202,13 @@ f_drawRR(int d, float ent, float zstop, float ptp, float q, color sigCol, string
     rewBot = d == 1 ? ent : ptp
     rskTop = d == 1 ? ent : zstop
     rskBot = d == 1 ? zstop : ent
-    box.new(x1, rewTop, x2, rewBot, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.green, 82))
-    box.new(x1, rskTop, x2, rskBot, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.red, 82))
-    txt = tag + "  Risk $" + str.tostring(riskUsd, "#") + " | Reward $" + str.tostring(rewUsd, "#") + " (" + str.tostring(rrr, "#.##") + "R, " + str.tostring(q, "#.#") + "x)" +
-         "\n1 contract: Risk $" + str.tostring(risk1, "#") + " | Reward $" + str.tostring(rew1, "#")
-    label.new(x2, ent, txt, xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.gray, 15), textcolor = color.white, size = size.small)
+    // Two lines per box, no more: a box can be only a few points tall and a third
+    // line starts spilling over its own borders. Prices are printed to the
+    // symbol's tick size so they read as levels you could actually place.
+    rewTxt = "TP " + str.tostring(ptp, format.mintick) + "\n+$" + str.tostring(rewUsd, "#") + "   " + str.tostring(rrr, "#.##") + "R   (1 ct +$" + str.tostring(rew1, "#") + ")"
+    rskTxt = tag + "   " + str.tostring(q, "#.#") + "x @ " + str.tostring(ent, format.mintick) + "\nSL " + str.tostring(zstop, format.mintick) + "   -$" + str.tostring(riskUsd, "#") + "   (1 ct -$" + str.tostring(risk1, "#") + ")"
+    box.new(x1, rewTop, x2, rewBot, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.green, 82), text = rewTxt, text_size = size.small, text_color = color.new(color.white, 0), text_halign = text.align_center, text_valign = text.align_center)
+    box.new(x1, rskTop, x2, rskBot, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.red, 82), text = rskTxt, text_size = size.small, text_color = color.new(color.white, 0), text_halign = text.align_center, text_valign = text.align_center)
 
 // The two setups get their own border colour, the way ORB and IB do in the
 // break-pullback script: ORANGE for the day's first trade, TEAL for the reversal.
@@ -345,6 +359,26 @@ f_shortTP(entryPx, stopPx, rr) =>
 // boundary already belongs to tomorrow's session. Read off the same shifted
 // instant as the session key, so the two agree by construction.
 dow = dayofweek(f_sessionShift(time), tz)
+
+// ENTRY CUTOFF, measured in minutes ELAPSED since this session began rather than
+// off the raw clock. That distinction is load-bearing: the session starts at
+// 13:30 / 14:30 ET and runs ACROSS MIDNIGHT to the same time next day, so a plain
+// `hour*60 + minute <= cutoff` test would put a 23:00 bar — which belongs to the
+// session that started that afternoon — on the wrong side of a 10:00 cutoff, and
+// would let the whole evening trade while blocking the morning it was aimed at.
+//
+// Measuring from the roll boundary makes the count monotonic 0..1439 across the
+// session, and because f_sessionEndMin follows the US changeover the cutoff keeps
+// meaning the same WALL-CLOCK ET time all year instead of drifting an hour twice.
+//
+// Read off the bar's OPEN, so the last eligible break is the one that OPENS at or
+// before the cutoff; under process_orders_on_close its fill lands at that bar's
+// close, which can be one bar-width past the cutoff time itself.
+todMin = hour(time, tz) * 60 + minute(time, tz)
+sessStartMin = f_sessionEndMin(time)          // the roll boundary is both end and start
+elapsedMin = (todMin - sessStartMin + 1440) % 1440
+cutoffElapsed = (cutoffH * 60 + cutoffM - sessStartMin + 1440) % 1440
+entryWindowOK = not useEntryCutoff or elapsedMin <= cutoffElapsed
 // Saturday and Sunday fall through to "Off", which is what the five booleans did
 // before — nothing here has to special-case the weekend.
 dayMode = dow == dayofweek.monday ? dayMon : dow == dayofweek.tuesday ? dayTue : dow == dayofweek.wednesday ? dayWed : dow == dayofweek.thursday ? dayThu : dow == dayofweek.friday ? dayFri : "Off"
@@ -396,7 +430,7 @@ if strategy.closedtrades > prevClosedTrades
     prevClosedTrades := strategy.closedtrades
 
 // --- First trade (take the FIRST breakout triangle, if it passes the filters) ---
-enterLong = breakoutUp and directionLongOK and tradeDayOK and tradesToday < maxTradesPerDay and strategy.position_size == 0 and tradeState == 0
+enterLong = breakoutUp and directionLongOK and tradeDayOK and entryWindowOK and tradesToday < maxTradesPerDay and strategy.position_size == 0 and tradeState == 0
 if enterLong
     longSL = f_longStop(close)
     longTP = f_longTP(close, longSL, riskReward)
@@ -409,7 +443,7 @@ if enterLong
     if showRR
         f_drawRR(1, close, longSL, longTP, qty, colFirst, "First", 0)
 
-enterShort = breakoutDn and directionShortOK and tradeDayOK and filterShortOK and tradesToday < maxTradesPerDay and strategy.position_size == 0 and tradeState == 0
+enterShort = breakoutDn and directionShortOK and tradeDayOK and entryWindowOK and filterShortOK and tradesToday < maxTradesPerDay and strategy.position_size == 0 and tradeState == 0
 if enterShort
     shortSL = f_shortStop(close)
     shortTP = f_shortTP(close, shortSL, riskReward)
@@ -442,7 +476,7 @@ if enterShort
 // Note the per-day direction grid DOES reach it, via directionLongOK /
 // directionShortOK: a weekday set to one side can never take the reversal, since
 // the reversal is by definition the opposite side of the first trade.
-revLong = enableReverseTrade and tradeState == 2 and firstTradeDir == -1 and directionLongOK and tradeDayOK and tradesToday < maxTradesPerDay and strategy.position_size == 0 and barstate.isconfirmed and levelsAvailable and close > orbHigh
+revLong = enableReverseTrade and tradeState == 2 and firstTradeDir == -1 and directionLongOK and tradeDayOK and entryWindowOK and tradesToday < maxTradesPerDay and strategy.position_size == 0 and barstate.isconfirmed and levelsAvailable and close > orbHigh
 if revLong
     revLongSL = f_longStop(close)
     revLongTP = f_longTP(close, revLongSL, reverseRiskReward)
@@ -455,7 +489,7 @@ if revLong
     if showRR
         f_drawRR(1, close, revLongSL, revLongTP, qty, colRev, revLongTag, 0)
 
-revShort = enableReverseTrade and tradeState == 2 and firstTradeDir == 1 and directionShortOK and tradeDayOK and tradesToday < maxTradesPerDay and strategy.position_size == 0 and barstate.isconfirmed and levelsAvailable and close < orbLow
+revShort = enableReverseTrade and tradeState == 2 and firstTradeDir == 1 and directionShortOK and tradeDayOK and entryWindowOK and tradesToday < maxTradesPerDay and strategy.position_size == 0 and barstate.isconfirmed and levelsAvailable and close < orbLow
 if revShort
     revShortSL = f_shortStop(close)
     revShortTP = f_shortTP(close, revShortSL, reverseRiskReward)
