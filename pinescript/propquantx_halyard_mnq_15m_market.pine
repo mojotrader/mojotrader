@@ -18,7 +18,7 @@
 // to losses only.
 //
 // Editable: Position Sizing, Trade Management, Day Filter, Range Filter and
-// Trade Visualization. Everything else is fixed in the CONFIGURATION block.
+// the Risk/Reward tool. Everything else is fixed in the CONFIGURATION block.
 //
 // Timezone is hardcoded — do not change your chart's timezone expecting the
 // levels to move, they will not.
@@ -63,13 +63,18 @@ orbRangeMaxPts = input.float(0, "Max ORB Range (pts, 0=off)", minval = 0, step =
 if orbRangeMaxPts > 0 and orbRangeMinPts > orbRangeMaxPts
     runtime.error("Range Filter: Min ORB Range is above Max ORB Range, so no day can ever pass. Fix one of them.")
 
-// Trade visualization. The boxes and their three price labels draw the exact
-// stop and target of the live trade.
-grpV = "Trade Visualization"
-showPnLBoxes = input.bool(true, "Show TP/SL P&L Boxes", group = grpV)
-showPnLLabels = input.bool(true, "Show TP/SL Labels", group = grpV)
-profitBoxColor = input.color(color.blue, "Profit Box Color", group = grpV)
-lossBoxColor = input.color(color.red, "Loss Box Color", group = grpV)
+// Risk/Reward tool — the same box the other strategies in this repo draw: a green
+// reward box and a red risk box off the entry, both rrBars wide, plus one label
+// carrying the dollar risk, the dollar reward, the R multiple, the contract count
+// and the per-contract numbers.
+//
+// Drawn ONCE at the entry and then left alone — no extending, no deleting, no
+// keep-history bookkeeping. TradingView drops the oldest boxes itself once
+// max_boxes_count is reached, which is what the 500 in the strategy() call is for.
+grpRR = "Risk / Reward tool"
+showRR = input.bool(true, "Show risk/reward box at the entry", group = grpRR)
+ptVal = input.float(2.0, "$ per point per contract", group = grpRR, tooltip = "MNQ=2, NQ=20, MES=5, ES=50. This drives the BOX TEXT only — position sizing reads syminfo.pointvalue — so keep it matching the symbol or the box will disagree with the size it is reporting.")
+rrBars = input.int(24, "R/R box width (bars)", 1, 300, group = grpRR)
 
 // === CONFIGURATION ===
 // Fixed settings. Values marked UNREAD belong to a mode that is not selected —
@@ -149,11 +154,6 @@ f_sessionKey(t) =>
 // thing that needed the width as a number.
 orbTf = "15"
 
-// The two Trade Visualization knobs that stayed locked. The switches and the two
-// colours are inputs, up in the Inputs block.
-keepTradeBoxes = 20
-boxTransp = 70
-
 // The day's fill cap is DERIVED from the reversal switch (2 on, 1 off) rather
 // than being a second, disagreeable input.
 maxTradesPerDay = enableReverseTrade ? 2 : 1
@@ -169,81 +169,37 @@ f_finalQty(_entry, _sl) =>
     q = useRiskSizing ? calcQty(riskUSD, _entry, _sl) : qtyContracts
     math.min(q, maxContracts)
 
-// === TP/SL P&L visualization (boxes + labels) ===
-// A BLUE profit box from entry to target, a RED risk box from entry to stop, and
-// three text-only price labels (target / entry / stop) anchored at the entry bar
-// with fully transparent backgrounds.
-var box curRiskBox = na
-var box curProfitBox = na
-var label curSLLabel = na
-var label curTPLabel = na
-var label curEntryLabel = na
+// === Risk/Reward box (drawn at the entry) ===
+// Ported verbatim in shape from break_pullback_strategy.pine so every strategy in
+// the repo reads the same way: reward box above the entry for a long (below for a
+// short), risk box on the other side, border in the setup's colour, and the whole
+// dollar picture in one label off the right edge.
+//
+// `q` is the position size, so the top line is what THIS trade actually risks and
+// the second line is the per-contract cost of being wrong — the number that
+// matters when you are deciding whether the size is sane.
+f_drawRR(int d, float ent, float zstop, float ptp, float q, color sigCol, string tag, int xoff) =>
+    x1 = bar_index + xoff
+    x2 = x1 + rrBars
+    riskUsd = math.abs(ent - zstop) * ptVal * q
+    rewUsd = math.abs(ptp - ent) * ptVal * q
+    risk1 = math.abs(ent - zstop) * ptVal
+    rew1 = math.abs(ptp - ent) * ptVal
+    rrr = riskUsd > 0 ? rewUsd / riskUsd : na
+    rewTop = d == 1 ? ptp : ent
+    rewBot = d == 1 ? ent : ptp
+    rskTop = d == 1 ? ent : zstop
+    rskBot = d == 1 ? zstop : ent
+    box.new(x1, rewTop, x2, rewBot, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.green, 82))
+    box.new(x1, rskTop, x2, rskBot, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.red, 82))
+    txt = tag + "  Risk $" + str.tostring(riskUsd, "#") + " | Reward $" + str.tostring(rewUsd, "#") + " (" + str.tostring(rrr, "#.##") + "R, " + str.tostring(q, "#.#") + "x)" +
+         "\n1 contract: Risk $" + str.tostring(risk1, "#") + " | Reward $" + str.tostring(rew1, "#")
+    label.new(x2, ent, txt, xloc = xloc.bar_index, style = label.style_label_left, color = color.new(color.gray, 15), textcolor = color.white, size = size.small)
 
-var array<box> histBoxes = array.new<box>()
-var array<label> histLabels = array.new<label>()
-
-// Extend the boxes to the right while the trade is live. The labels stay put at
-// the entry bar, which keeps the three prices readable against the box edges
-// instead of sliding along with price.
-// math.max against left+8, never a bare bar_index: the boxes are BORN 8 bars
-// wide, so assigning bar_index would shrink them back on the very next bar.
-if showPnLBoxes and strategy.position_size != 0
-    if not na(curRiskBox)
-        box.set_right(curRiskBox, math.max(box.get_left(curRiskBox) + 8, bar_index))
-    if not na(curProfitBox)
-        box.set_right(curProfitBox, math.max(box.get_left(curProfitBox) + 8, bar_index))
-
-// When a position closes, either keep or delete the boxes/labels based on keepTradeBoxes
-posJustClosed = bar_index >= 1 and strategy.position_size == 0 and strategy.position_size[1] != 0
-if showPnLBoxes and posJustClosed
-    // Minimum 8 bars wide — a trade that closes in one or two bars
-    // would otherwise leave a sliver too thin to read.
-    if not na(curRiskBox)
-        box.set_right(curRiskBox, math.max(box.get_left(curRiskBox) + 8, bar_index))
-    if not na(curProfitBox)
-        box.set_right(curProfitBox, math.max(box.get_left(curProfitBox) + 8, bar_index))
-
-    if keepTradeBoxes == 0
-        if not na(curRiskBox)
-            box.delete(curRiskBox)
-        if not na(curProfitBox)
-            box.delete(curProfitBox)
-        if not na(curSLLabel)
-            label.delete(curSLLabel)
-        if not na(curTPLabel)
-            label.delete(curTPLabel)
-        if not na(curEntryLabel)
-            label.delete(curEntryLabel)
-    else
-        if not na(curRiskBox)
-            array.push(histBoxes, curRiskBox)
-        if not na(curProfitBox)
-            array.push(histBoxes, curProfitBox)
-        if not na(curSLLabel)
-            array.push(histLabels, curSLLabel)
-        if not na(curTPLabel)
-            array.push(histLabels, curTPLabel)
-        if not na(curEntryLabel)
-            array.push(histLabels, curEntryLabel)
-
-    curRiskBox := na
-    curProfitBox := na
-    curSLLabel := na
-    curTPLabel := na
-    curEntryLabel := na
-
-// Enforce history limit on every bar (also handles reducing keepTradeBoxes)
-if showPnLBoxes
-    maxBoxCount = keepTradeBoxes * 2
-    maxLabelCount = keepTradeBoxes * 3
-
-    while keepTradeBoxes >= 0 and array.size(histBoxes) > maxBoxCount
-        oldB = array.shift(histBoxes)
-        box.delete(oldB)
-
-    while keepTradeBoxes >= 0 and array.size(histLabels) > maxLabelCount
-        oldL = array.shift(histLabels)
-        label.delete(oldL)
+// The two setups get their own border colour, the way ORB and IB do in the
+// break-pullback script: ORANGE for the day's first trade, TEAL for the reversal.
+colFirst = color.new(color.orange, 0)
+colRev = color.new(color.teal, 0)
 
 // === Visual defaults (kept as constants, not inputs) ===
 // The breakout TRIANGLE marks the bar that BREAKS the range, not the range
@@ -439,15 +395,6 @@ if strategy.closedtrades > prevClosedTrades
         tradeState := (firstWasLoss or reverseAfter == "Loss or Target") ? 2 : 3
     prevClosedTrades := strategy.closedtrades
 
-// Whichever of the four entries fires records its three prices here and raises
-// the flag; the boxes and labels are then drawn ONCE, below. A Pine function
-// cannot assign to a global, so this is how four entry paths share one drawing
-// routine instead of repeating it four times.
-var float tradeEntryPx = na
-var float tradeStopPx = na
-var float tradeTargetPx = na
-enteredThisBar = false
-
 // --- First trade (take the FIRST breakout triangle, if it passes the filters) ---
 enterLong = breakoutUp and directionLongOK and tradeDayOK and tradesToday < maxTradesPerDay and strategy.position_size == 0 and tradeState == 0
 if enterLong
@@ -457,12 +404,10 @@ if enterLong
     firstTradeDir := 1
     tradeState := 1
     tradesToday += 1
-    tradeEntryPx := close
-    tradeStopPx := longSL
-    tradeTargetPx := longTP
-    enteredThisBar := true
     strategy.entry("Long", strategy.long, qty = qty, comment = "First")
     strategy.exit("Long TP/SL", from_entry = "Long", stop = longSL, limit = longTP)
+    if showRR
+        f_drawRR(1, close, longSL, longTP, qty, colFirst, "First", 0)
 
 enterShort = breakoutDn and directionShortOK and tradeDayOK and filterShortOK and tradesToday < maxTradesPerDay and strategy.position_size == 0 and tradeState == 0
 if enterShort
@@ -472,12 +417,10 @@ if enterShort
     firstTradeDir := -1
     tradeState := 1
     tradesToday += 1
-    tradeEntryPx := close
-    tradeStopPx := shortSL
-    tradeTargetPx := shortTP
-    enteredThisBar := true
     strategy.entry("Short", strategy.short, qty = qty, comment = "First")
     strategy.exit("Short TP/SL", from_entry = "Short", stop = shortSL, limit = shortTP)
+    if showRR
+        f_drawRR(-1, close, shortSL, shortTP, qty, colFirst, "First", 0)
 
 // --- Reversal trade (once the FIRST trade has CLOSED) ---
 // TWO WAYS IN now, and which are live is Reverse Trade After:
@@ -506,12 +449,11 @@ if revLong
     qty = f_finalQty(close, revLongSL)
     tradeState := 3
     tradesToday += 1
-    tradeEntryPx := close
-    tradeStopPx := revLongSL
-    tradeTargetPx := revLongTP
-    enteredThisBar := true
-    strategy.entry("RevLong", strategy.long, qty = qty, comment = firstWasLoss ? "Reversal (loss)" : "Reversal (target)")
+    revLongTag = firstWasLoss ? "Reversal (loss)" : "Reversal (target)"
+    strategy.entry("RevLong", strategy.long, qty = qty, comment = revLongTag)
     strategy.exit("RevLong TP/SL", from_entry = "RevLong", stop = revLongSL, limit = revLongTP)
+    if showRR
+        f_drawRR(1, close, revLongSL, revLongTP, qty, colRev, revLongTag, 0)
 
 revShort = enableReverseTrade and tradeState == 2 and firstTradeDir == 1 and directionShortOK and tradeDayOK and tradesToday < maxTradesPerDay and strategy.position_size == 0 and barstate.isconfirmed and levelsAvailable and close < orbLow
 if revShort
@@ -520,43 +462,17 @@ if revShort
     qty = f_finalQty(close, revShortSL)
     tradeState := 3
     tradesToday += 1
-    tradeEntryPx := close
-    tradeStopPx := revShortSL
-    tradeTargetPx := revShortTP
-    enteredThisBar := true
-    strategy.entry("RevShort", strategy.short, qty = qty, comment = firstWasLoss ? "Reversal (loss)" : "Reversal (target)")
+    revShortTag = firstWasLoss ? "Reversal (loss)" : "Reversal (target)"
+    strategy.entry("RevShort", strategy.short, qty = qty, comment = revShortTag)
     strategy.exit("RevShort TP/SL", from_entry = "RevShort", stop = revShortSL, limit = revShortTP)
+    if showRR
+        f_drawRR(-1, close, revShortSL, revShortTP, qty, colRev, revShortTag, 0)
 
 // The reversal fires long after the day's breakout triangle is spent, so it gets
 // its own marker — a diamond on the entry bar, above for a long and below for a
 // short. Without it the only thing on the chart at that bar is a box.
 plotshape(showBreakoutMarker and revLong, title = "Reversal Long", style = shape.diamond, location = location.abovebar, color = orbHighColor, size = size.tiny)
 plotshape(showBreakoutMarker and revShort, title = "Reversal Short", style = shape.diamond, location = location.belowbar, color = orbLowColor, size = size.tiny)
-
-// === RISK / REWARD BOXES — one routine for all four entries ===
-// A profit box entry->target, a risk box entry->stop, both starting 8 bars wide,
-// and three text-only price labels on transparent backgrounds so only the
-// numbers show against the boxes.
-if enteredThisBar and showPnLBoxes
-    // clear any still-active viz (should normally be na when flat)
-    if not na(curRiskBox)
-        box.delete(curRiskBox)
-    if not na(curProfitBox)
-        box.delete(curProfitBox)
-    if not na(curSLLabel)
-        label.delete(curSLLabel)
-    if not na(curTPLabel)
-        label.delete(curTPLabel)
-    if not na(curEntryLabel)
-        label.delete(curEntryLabel)
-
-    curProfitBox := box.new(left = bar_index, top = math.max(tradeEntryPx, tradeTargetPx), right = bar_index + 8, bottom = math.min(tradeEntryPx, tradeTargetPx), bgcolor = color.new(profitBoxColor, boxTransp), border_width = 0)
-    curRiskBox := box.new(left = bar_index, top = math.max(tradeEntryPx, tradeStopPx), right = bar_index + 8, bottom = math.min(tradeEntryPx, tradeStopPx), bgcolor = color.new(lossBoxColor, boxTransp), border_width = 0)
-
-    if showPnLLabels
-        curTPLabel := label.new(bar_index, tradeTargetPx, str.tostring(tradeTargetPx, "#.##"), style = label.style_label_right, color = color.new(profitBoxColor, 100), textcolor = profitBoxColor, size = size.small)
-        curEntryLabel := label.new(bar_index, tradeEntryPx, str.tostring(tradeEntryPx, "#.##"), style = label.style_label_right, color = color.new(color.white, 100), textcolor = color.white, size = size.small)
-        curSLLabel := label.new(bar_index, tradeStopPx, str.tostring(tradeStopPx, "#.##"), style = label.style_label_right, color = color.new(lossBoxColor, 100), textcolor = lossBoxColor, size = size.small)
 
 // === DAY HIGHLIGHT ===
 // ORANGE = the day is Off. A faint GREEN / RED wash = the day is one-way, so the
