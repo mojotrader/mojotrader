@@ -23,8 +23,11 @@
 // armed. One level serves both units, so an average-down that improves the
 // blended entry simply earns more R against the same target.
 //
-// AFTER A STOP-OUT the day can get ONE more setup: the REVERSAL, opposite to the
-// losing first trade, on a close beyond the far edge. It ships OFF.
+// ONCE THE FIRST TRADE CLOSES the day can get ONE more setup: the REVERSAL,
+// opposite to the first trade, on a close beyond the FAR edge. It now arms on
+// either outcome — after a stop-out (a failed break fading) and after a target
+// (a move that already paid and has since come all the way back through the
+// other side). "Reverse Trade After" narrows it to losses only.
 //
 // Editable: Position Sizing, Trade Management, Day Filter, Range Filter and
 // Trade Visualization. Everything else is fixed in the CONFIGURATION block.
@@ -46,7 +49,8 @@ maxContracts = input.int(1000, "Max Contracts", minval = 1, group = grpPS, toolt
 // filled: the same level pays more R from a deeper average-down fill.
 grpTM = "Trade Management"
 tpMode = input.string("Ext 30%", "Target", options = ["Ext 10%", "Ext 30%", "Ext 50%", "Ext 100%", "HOD/LOD"], group = grpTM, tooltip = "Range extension beyond the edge that broke — long: orbHigh + pct x range, short: orbLow - pct x range. Ext 100% projects the whole range again. HOD/LOD targets the session high (long) or low (short) FROZEN as it stood when the setup armed.")
-enableReverseTrade = input.bool(false, "Enable Reverse Trade", group = grpTM, tooltip = "Opposite direction to the losing first trade, on a close beyond the far edge. Raises the day's SETUP cap to 2.")
+enableReverseTrade = input.bool(true, "Enable Reverse Trade", group = grpTM, tooltip = "A second setup, opposite to the first trade, on a close beyond the far edge. Raises the day's SETUP cap to 2.")
+reverseAfter = input.string("Loss or Target", "Reverse Trade After", options = ["Loss or Target", "Loss Only"], group = grpTM, tooltip = "Loss or Target: the first trade CLOSING arms the reversal, whether it stopped out or hit its target. Loss Only is the older rule — a winning day was finished, and a close back beyond the far edge was left alone.")
 
 // Entry model. The strategy shipped as a MARKET fill on the breakout bar's close;
 // Limit Pullback is the alternative under evaluation. Both are implemented once,
@@ -453,21 +457,24 @@ directionShortOK = (tradeDirection == "Both" or tradeDirection == "Short") and (
 // State machine (per day):
 // 0 = no trade yet (wait for first breakout)
 // 1 = first trade placed (wait for it to close)
-// 2 = first trade stopped out (wait for the OPPOSITE-side close beyond the ORB
-//     that arms the reversal — the only second chance left)
-// 3 = done for the day (first trade hit TP, or the reversal was taken)
+// 2 = first trade CLOSED and the day is still open (wait for the OPPOSITE-side
+//     close beyond the ORB that arms the reversal). Reached after a stop-out
+//     always, and after a target too under Reverse Trade After = Loss or Target
+// 3 = done for the day (the reversal was taken, or a green first trade under
+//     Loss Only)
 //
 // State 2 is the only state the reversal can arm from and it leaves state 3, so
-// the day is capped at two SETUPS and a losing reversal is never followed by a
-// third attempt.
+// the day is capped at two SETUPS and the reversal is never itself reversed.
 var int tradeState = 0
 var int firstTradeDir = 0
+var bool firstWasLoss = false  // how the first trade ended, for the reversal's label
 var int prevClosedTrades = 0
 var int tradesToday = 0
 
 if bool(newDay)
     tradeState := 0
     firstTradeDir := 0
+    firstWasLoss := false
     tradesToday := 0
     prevClosedTrades := strategy.closedtrades
 
@@ -476,14 +483,26 @@ if bool(newDay)
 // an averaged-down setup closes TWO units, usually on the same bar, and unit 2
 // (filled deeper, so further from the target) can end red while the setup as a
 // whole ends green. The blended result is the one that decides the day.
-// Guarded on tradeState == 1, so a second setup closing cannot walk the state
+//
+// WHICH OUTCOMES LEAVE THE DAY OPEN is the Reverse Trade After setting. Under
+// "Loss or Target" the first trade simply CLOSING hands the day to state 2 and
+// the reversal can arm on either outcome — a target hit no longer ends the
+// session, so a move that runs to the extension and then rolls all the way back
+// through the opposite edge is tradeable. Under "Loss Only" a green first trade
+// goes straight to 3, which is how the strategy behaved before.
+// The outcome is still recorded, because it changes what the reversal IS: after a
+// loss it is a failed-break fade, after a target it is a genuine reversal of a
+// move that already paid. They are worth telling apart in the trade list.
+//
+// Guarded on tradeState == 1, so the second setup closing cannot walk the state
 // backwards out of 3 — the day stays done however that trade ends.
 if strategy.closedtrades > prevClosedTrades
     float setupProfit = 0.0
     for i = prevClosedTrades to strategy.closedtrades - 1
         setupProfit += strategy.closedtrades.profit(i)
     if tradeState == 1
-        tradeState := setupProfit < 0 ? 2 : 3
+        firstWasLoss := setupProfit < 0
+        tradeState := (firstWasLoss or reverseAfter == "Loss or Target") ? 2 : 3
     prevClosedTrades := strategy.closedtrades
 
 // === ARM — which setup fired, and on which side ===
@@ -510,14 +529,21 @@ if enterShort
     armDir := -1
     armTag := "First"
 
-// --- Reversal trade (only if the FIRST trade closed at a LOSS) ---
-// The ONLY second chance the day has. There is no same-direction re-entry any
-// more: a stop-out followed by a fresh close back beyond the SAME edge no longer
-// re-arms anything, so a day whose first trade loses is finished unless the
-// reversal is ticked on and price closes beyond the OPPOSITE edge.
+// --- Reversal trade (the day's second setup, opposite to the first) ---
+// The ONLY second chance the day has. There is no same-direction re-entry: a
+// close back beyond the SAME edge re-arms nothing, so the day's remaining trade
+// is this one or none.
 //
-// OFF BY DEFAULT.
-// NOT filtered — gated on the day-of-week, the direction and the losing first
+// TWO WAYS IN, and which are live is Reverse Trade After:
+//   after a LOSS   — the break failed, was stopped on the far edge, and price is
+//                    now closing beyond that far edge. A failed-break fade.
+//   after a TARGET — the break paid out at its extension and price has since come
+//                    all the way back through the opposite edge. The move is done
+//                    and turning, and the day is not over just because it won.
+// Both land in state 2 and both read the same trigger below; only the label
+// differs. "Loss Only" narrows it back to the first case.
+//
+// NOT filtered — gated on the day-of-week, the direction and the closed first
 // trade only. The entry filters apply to the FIRST trade.
 //
 // Note the per-day direction grid DOES reach it, via directionLongOK /
@@ -531,14 +557,14 @@ if revLong
     tradeState := 3
     tradesToday += 1
     armDir := 1
-    armTag := "Reversal"
+    armTag := firstWasLoss ? "Reversal (loss)" : "Reversal (target)"
 
 revShort = enableReverseTrade and tradeState == 2 and firstTradeDir == 1 and directionShortOK and tradeDayOK and tradesToday < maxTradesPerDay and strategy.position_size == 0 and barstate.isconfirmed and levelsAvailable and close < orbLow
 if revShort
     tradeState := 3
     tradesToday += 1
     armDir := -1
-    armTag := "Reversal"
+    armTag := firstWasLoss ? "Reversal (loss)" : "Reversal (target)"
 
 // === The armed setup's working state ===
 // These outlive the arm bar because a resting limit can sit unfilled for hours,
@@ -553,11 +579,17 @@ var bool pbResting = false     // true while an unfilled limit is still working
 // === CANCEL — a resting limit must never outlive its setup ===
 // Runs BEFORE placement, deliberately: a reversal can arm on the very bar the
 // first setup's close is detected, and cancelling after placement would kill the
-// orders it just sent. `armDir == 0` is belt and braces on top of that.
+// orders it just sent.
 //
-// Unfilled unit 2 is the one that matters. Leave it working after the setup has
-// closed and it opens a brand new position on a day whose trade is already over.
-if pbResting and armDir == 0 and (bool(newDay) or posJustClosed or (strategy.position_size == 0 and tradeState >= 2))
+// TWO triggers, and only two. The position closing is the one that matters:
+// unfilled unit 2 left working after its setup has closed would open a brand new
+// position on a day whose trade is already over. The session roll is the sweep.
+//
+// NOT "the day is done" — a setup that has ARMED but not yet filled is flat with
+// its state already advanced, and cancelling on that would delete the reversal's
+// own limits one bar after placing them. Unfilled limits are supposed to rest for
+// as long as the session lasts; the day flat at the bottom is what ends them.
+if pbResting and (bool(newDay) or posJustClosed)
     strategy.cancel("L1")
     strategy.cancel("L2")
     strategy.cancel("S1")
@@ -600,6 +632,15 @@ if pbResting and armDir == 0 and (bool(newDay) or posJustClosed or (strategy.pos
 // are UNREAD in the shipped config (slType is ORB Edge + Buffer, a level), so
 // this only matters to someone who switches slType.
 if armDir != 0
+    // Clear the board first. The entries below reuse their own IDs, so those are
+    // replaced automatically — but a reversal is by definition the OPPOSITE side,
+    // and the previous setup's S1/S2 (or L1/L2) are not touched by placing L1/L2.
+    // A stale limit from the first setup left resting here would fill against the
+    // new one and hedge the day into a net-flat mess.
+    strategy.cancel("L1")
+    strategy.cancel("L2")
+    strategy.cancel("S1")
+    strategy.cancel("S2")
     stopPx = armDir == 1 ? f_longStop(close) : f_shortStop(close)
     tgtPx = f_tpLevel(armDir, dHigh, dLow)
     pbDir := armDir
