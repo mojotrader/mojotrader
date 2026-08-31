@@ -1,0 +1,349 @@
+//@version=6
+// ============================================================================
+//  THE KATANA MODEL  -  15m FVG displacement -> 50% retrace scalp (ICT)
+//  Source: "The Katana Model" methodology breakdown (@SSJTRADES, May 2026).
+//
+//  THE CORE CONCEPT
+//    Price delivers to 50% of any range. Find institutional displacement (a Fair Value
+//    Gap) on the 15-minute timeframe, then scalp the retrace back into the range with an
+//    OTE-style limit order.
+//      bullish FVG (candle1.high < candle3.low)  -> LONG  (buy the discount retrace)
+//      bearish FVG (candle1.low  > candle3.high) -> SHORT (sell the premium retrace)
+//
+//  1) DISPLACEMENT - a closed 15m FVG sets the direction.
+//  2) THE RANGE    - anchor the fib where the displacement leg BEGAN: the lowest low
+//       (long) / highest high (short) before the FVG. Terminate it at the highest high
+//       (long) / lowest low (short) made AFTER the FVG formed. The terminus keeps
+//       extending while price runs, so the fib re-scales until the entry fills.
+//       Sometimes the range is just the three FVG candles ("FVG 3 candles" anchor mode);
+//       more often it is the whole leg that contains the FVG(s) ("Leg (lookback)").
+//  3) LEVELS       - all measured as a retracement of that range:
+//         ENTRY = .50  (equilibrium, a resting LIMIT)
+//         STOP  = .75  (deeper into the discount/premium)
+//         TP    = .25  ->  a clean 1:1 on every setup.
+//  4) MANAGEMENT   - none. No breakeven, no cutting the trade early in drawdown. The
+//       edge is the patience, not the entry (~73% win rate over 200+ manual backtests,
+//       ~30 minute average hold). The only overrides here are the session cutoff, the
+//       EOD flatten and the daily max-loss halt.
+//
+//  RUN ON A 1m - 5m CHART (chart timeframe must be <= the FVG timeframe) so the limit,
+//  the stop and the target are evaluated intrabar. FVGs are read from CLOSED 15m candles
+//  only, so the model does not repaint.
+// ============================================================================
+strategy("Katana Model (15m FVG -> 50% retrace)", overlay = true, pyramiding = 0,
+     max_boxes_count = 200, max_lines_count = 500, max_labels_count = 200,
+     initial_capital = 30000, margin_long = 0, margin_short = 0,
+     default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = false,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
+// NOTE: position sizing uses a FIXED account size (see 'Account size $' input) - it does NOT compound with P&L.
+
+// ---------------------------------------------------------------- Session & time
+gSess   = "Session & time"
+tz      = input.string("America/New_York", "Timezone", group = gSess)
+sess    = input.session("0930-1600", "Session (setups only form inside it)", group = gSess)
+htf     = input.timeframe("15", "FVG timeframe", group = gSess,
+     tooltip = "The model reads displacement from CLOSED candles of this timeframe. Keep the CHART on 1m-5m so the 50% limit / stop / target fill intrabar.")
+cutH    = input.int(15, "Last entry - hour",   0, 23, group = gSess)
+cutM    = input.int(0,  "Last entry - minute", 0, 59, group = gSess)
+eodH    = input.int(15, "EOD flatten - hour",   0, 23, group = gSess)
+eodM    = input.int(55, "EOD flatten - minute", 0, 59, group = gSess)
+
+// ---------------------------------------------------------------- Trade days (see which weekday hurts)
+gDay    = "Trade days"
+dMon    = input.bool(true, "Monday",    group = gDay)
+dTue    = input.bool(true, "Tuesday",   group = gDay)
+dWed    = input.bool(true, "Wednesday", group = gDay)
+dThu    = input.bool(true, "Thursday",  group = gDay)
+dFri    = input.bool(true, "Friday",    group = gDay)
+
+// ---------------------------------------------------------------- The Katana model
+gMod    = "Katana model"
+dirMode = input.string("Both", "Trade direction", options = ["Both", "Long only", "Short only"], group = gMod)
+anchMode= input.string("Leg (lookback)", "Fib anchor (0% - where the leg began)", options = ["Leg (lookback)", "FVG 3 candles"], group = gMod,
+     tooltip = "Leg: the lowest low / highest high of the last N closed FVG-timeframe candles up to the gap. FVG 3 candles: the extreme of the three gap candles only.")
+lookback= input.int(10, "Leg lookback (FVG-timeframe candles)", 1, 100, group = gMod)
+extendLeg= input.bool(true, "Keep the anchor when another same-direction FVG forms", group = gMod,
+     tooltip = "A single leg often prints several FVGs. ON: the first anchor is kept and the fib simply re-scales as the leg extends. OFF: every new FVG re-anchors the range.")
+entFib  = input.float(50, "Entry - % retracement",  0, 100, step = 1, group = gMod, tooltip = "Measured back from the terminus (100% = the anchor). 50% = equilibrium.")
+slFib   = input.float(75, "Stop - % retracement",   0, 100, step = 1, group = gMod)
+tpFib   = input.float(25, "Target - % retracement", 0, 100, step = 1, group = gMod)
+maxWait = input.int(120, "Cancel an unfilled limit after (minutes)", 5, 600, group = gMod)
+maxTrades= input.int(2,  "Max trades per day", 1, 10, group = gMod)
+
+// ---------------------------------------------------------------- Filters
+gFilt   = "Filters"
+minGap  = input.float(0, "Min FVG size (points, 0 = off)",   0, step = 1, group = gFilt)
+minRng  = input.float(0, "Min range size (points, 0 = off)", 0, step = 1, group = gFilt)
+maxRng  = input.float(0, "Max range size (points, 0 = off)", 0, step = 1, group = gFilt,
+     tooltip = "A huge leg makes the 25% stop distance huge too. Cap it to keep the scalp character of the model.")
+needFvg = input.bool(false, "Entry level must sit inside the FVG", group = gFilt,
+     tooltip = "Strict reading of 'price retraces INTO the FVG': only take setups where the 50% level falls between the gap edges.")
+armBeyond= input.bool(true, "Arm only while price is still beyond the entry level", group = gFilt,
+     tooltip = "ON: skip a setup when price has already retraced past the 50% level as the FVG closes (the limit would fill instantly).")
+
+// ---------------------------------------------------------------- Risk sizing (% of a FIXED capital, no compounding)
+gRisk       = "Risk sizing"
+useRiskSize = input.bool(true, "Size by % risk (else fixed contracts below)", group = gRisk,
+     tooltip = "ON: size the entry so its risk = (risk per trade %) of the FIXED account size below. OFF: use the fixed contracts input.")
+acctSize    = input.float(30000, "Account size $ (fixed - NO compounding)", minval = 1, group = gRisk,
+     tooltip = "Sizing uses this constant capital every day; it does NOT grow/shrink with P&L, so the dollar risk per trade is the same every day.")
+riskPct     = input.float(1.0, "Risk per trade (% of capital)", minval = 0.1, step = 0.1, group = gRisk)
+maxDayPct   = input.float(2.0, "Daily max loss (% of capital, 0 = off)", minval = 0, step = 0.5, group = gRisk,
+     tooltip = "Once the day's loss reaches this % of the day's starting equity, the open trade is closed and no new trades are taken until the next day.")
+qtyFixed    = input.float(1, "Contracts (when % sizing is off)", minval = 1, group = gRisk)
+ptVal       = input.float(2.0, "$ per point per contract", group = gRisk, tooltip = "MNQ=2, NQ=20, MES=5, ES=50.")
+
+// ---------------------------------------------------------------- Visuals & alerts
+gVis    = "Visuals & alerts"
+showGap = input.bool(true, "Draw the FVG box", group = gVis)
+showLvl = input.bool(true, "Draw entry / stop / target lines", group = gVis)
+showRR  = input.bool(true, "Label the filled trade with $ risk/reward", group = gVis)
+showInfo= input.bool(true, "Show strategy rules panel", group = gVis)
+holdBars= input.int(30, "Level line length after the fill (bars)", 1, 500, group = gVis)
+alertsOn= input.bool(true, "Alert when a setup arms / fills", group = gVis,
+     tooltip = "Create ONE alert on this strategy with condition 'alert() function calls only'.")
+
+// ---------------------------------------------------------------- Session / clock / day gates
+inSess     = not na(time(timeframe.period, sess, tz))
+newSession = inSess and not inSess[1]
+tod        = hour(time, tz) * 60 + minute(time, tz)
+cutMin     = cutH * 60 + cutM
+eodMin     = eodH * 60 + eodM
+flatten    = tod >= eodMin
+dow        = dayofweek(time, tz)
+dayOK      = (dow == dayofweek.monday and dMon) or (dow == dayofweek.tuesday and dTue) or (dow == dayofweek.wednesday and dWed) or (dow == dayofweek.thursday and dThu) or (dow == dayofweek.friday and dFri)
+
+// fixed-capital sizing (NO compounding) + daily max-loss halt (today's P&L vs today's start equity)
+var float dayStartEq = na
+if newSession
+    dayStartEq := strategy.equity
+dayPnL    = strategy.equity - dayStartEq                 // today's P&L incl. open
+dailyHalt = maxDayPct > 0 and dayPnL <= -(acctSize * maxDayPct / 100.0)
+
+// position sizer: contracts for a given $ budget and stop distance (points).
+// round: fractional <= .5 -> down, > .5 -> up (2.1-2.5 -> 2, >2.5 -> 3). Min 1 when the risk >= 0.5%.
+f_size(float budget, float ptDist, float unitPct) =>
+    perC = ptDist * ptVal
+    raw  = perC > 0 ? budget / perC : 0.0
+    fr   = raw - math.floor(raw)
+    n = fr > 0.5 ? math.ceil(raw) : math.floor(raw)
+    n := (unitPct >= 0.5 and n < 1) ? 1 : n
+    n
+
+// a retracement level of the range: 0% = the terminus, 100% = the anchor
+f_lvl(int d, float term, float rng, float pct) =>
+    d == 1 ? term - pct / 100.0 * rng : term + pct / 100.0 * rng
+
+// ---------------------------------------------------------------- Closed FVG-timeframe candles (non-repainting)
+[hh, ll, tt] = request.security(syminfo.tickerid, htf, [high[1], low[1], time[1]], lookahead = barmerge.lookahead_on)
+newHTF = ta.change(tt) != 0
+var array<float> hiA = array.new<float>()
+var array<float> loA = array.new<float>()
+if newHTF and not na(hh)
+    array.push(hiA, hh)
+    array.push(loA, ll)
+    if array.size(hiA) > 300
+        array.shift(hiA)
+        array.shift(loA)
+
+// ---------------------------------------------------------------- Setup state
+var bool  armed   = false
+var int   dir     = 0            // +1 long (bullish FVG) / -1 short (bearish FVG)
+var float anchor  = na           // fib 0% end - where the displacement leg began
+var float term    = na           // fib 100% end - the extreme made after the FVG (keeps extending)
+var float gapTop  = na
+var float gapBot  = na
+var int   armTime = na
+var int   nTrades = 0
+var float curStop = na
+var float curTP   = na
+var box   gapBox  = na
+var line  lnE     = na
+var line  lnS     = na
+var line  lnT     = na
+
+if newSession
+    armed   := false
+    dir     := 0
+    anchor  := na
+    term    := na
+    armTime := na
+    nTrades := 0
+    strategy.cancel("KL")
+    strategy.cancel("KS")
+
+flat = strategy.position_size == 0
+
+// ---------------------------------------------------------------- 1) Displacement: a closed FVG arms the setup
+setupOK = inSess and dayOK and tod <= cutMin and not flatten and not dailyHalt and flat and nTrades < maxTrades
+if newHTF and setupOK and array.size(hiA) >= 3
+    n   = array.size(hiA)
+    a_h = array.get(hiA, n - 3)
+    a_l = array.get(loA, n - 3)
+    b_h = array.get(hiA, n - 2)
+    b_l = array.get(loA, n - 2)
+    c_h = array.get(hiA, n - 1)
+    c_l = array.get(loA, n - 1)
+    bull = a_h < c_l and dirMode != "Short only"
+    bear = a_l > c_h and dirMode != "Long only"
+    if bull or bear
+        d    = bull ? 1 : -1
+        gap  = bull ? c_l - a_h : a_l - c_h
+        gTop = bull ? c_l : a_l
+        gBot = bull ? a_h : c_h
+        // 2) the range: anchor where the leg began, terminate at the extreme made after the FVG
+        newAnchor = bull ? math.min(math.min(a_l, b_l), c_l) : math.max(math.max(a_h, b_h), c_h)
+        if anchMode == "Leg (lookback)"
+            for i = 0 to lookback - 1
+                idx = n - 3 - i
+                if idx >= 0
+                    newAnchor := bull ? math.min(newAnchor, array.get(loA, idx)) : math.max(newAnchor, array.get(hiA, idx))
+        newTerm = bull ? math.max(math.max(a_h, b_h), c_h) : math.min(math.min(a_l, b_l), c_l)
+        newRng  = math.abs(newTerm - newAnchor)
+        newEnt  = f_lvl(d, newTerm, newRng, entFib)
+        ok = newRng > 0 and gap >= minGap
+        ok := ok and (minRng <= 0 or newRng >= minRng) and (maxRng <= 0 or newRng <= maxRng)
+        ok := ok and (not needFvg or (newEnt <= gTop and newEnt >= gBot))
+        ok := ok and (not armBeyond or (d == 1 ? close > newEnt : close < newEnt))
+        if ok
+            if armed and extendLeg and dir == d and not na(anchor) and not na(term)
+                // same leg, a fresh displacement: keep the anchor, let the fib re-scale, restart the clock
+                term    := d == 1 ? math.max(term, newTerm) : math.min(term, newTerm)
+                armTime := time
+            else
+                strategy.cancel("KL")                 // a replaced setup must not leave a stale limit resting
+                strategy.cancel("KS")
+                armed   := true
+                dir     := d
+                anchor  := newAnchor
+                term    := newTerm
+                gapTop  := gTop
+                gapBot  := gBot
+                armTime := time
+                if showGap
+                    gapBox := box.new(bar_index, gTop, bar_index + 2, gBot, xloc = xloc.bar_index,
+                         border_color = color.new(d == 1 ? color.teal : color.red, 0), bgcolor = color.new(d == 1 ? color.teal : color.red, 85))
+                if showLvl
+                    lnE := line.new(bar_index, newEnt, bar_index + 2, newEnt, xloc = xloc.bar_index, color = color.new(color.yellow, 0), width = 2)
+                    lnS := line.new(bar_index, newEnt, bar_index + 2, newEnt, xloc = xloc.bar_index, color = color.new(color.red, 0), style = line.style_dashed)
+                    lnT := line.new(bar_index, newEnt, bar_index + 2, newEnt, xloc = xloc.bar_index, color = color.new(color.green, 0), style = line.style_dashed)
+
+// ---------------------------------------------------------------- 2) The terminus keeps extending until the fill
+if armed and flat and not na(term)
+    term := dir == 1 ? math.max(term, high) : math.min(term, low)
+
+rng     = na(anchor) or na(term) ? na : math.abs(term - anchor)
+pxEntry = na(rng) ? na : f_lvl(dir, term, rng, entFib)
+pxStop  = na(rng) ? na : f_lvl(dir, term, rng, slFib)
+pxTP    = na(rng) ? na : f_lvl(dir, term, rng, tpFib)
+
+// ---------------------------------------------------------------- 3) Kill an unfilled setup that no longer qualifies
+if armed and flat
+    dead = not inSess or flatten or dailyHalt or tod > cutMin or nTrades >= maxTrades or not dayOK
+    dead := dead or na(pxEntry) or (not na(armTime) and time - armTime >= maxWait * 60000)
+    dead := dead or (not na(anchor) and (dir == 1 ? low < anchor : high > anchor))   // the leg's origin gave way -> structure broken
+    if dead
+        armed := false
+        strategy.cancel("KL")
+        strategy.cancel("KS")
+        gapBox := na
+        if not na(lnE)
+            line.delete(lnE)
+            line.delete(lnS)
+            line.delete(lnT)
+            lnE := na
+            lnS := na
+            lnT := na
+
+// ---------------------------------------------------------------- 4) The resting limit at 50% (re-priced each bar)
+float qtyNow = useRiskSize ? f_size(acctSize * riskPct / 100.0, math.abs(pxEntry - pxStop), riskPct) : qtyFixed
+if armed and flat and qtyNow > 0
+    if dir == 1
+        strategy.entry("KL", strategy.long, qty = qtyNow, limit = pxEntry)
+    else
+        strategy.entry("KS", strategy.short, qty = qtyNow, limit = pxEntry)
+
+// ---------------------------------------------------------------- 5) On the fill: freeze the levels, then hands off
+justL = strategy.position_size > 0 and strategy.position_size[1] <= 0
+justS = strategy.position_size < 0 and strategy.position_size[1] >= 0
+if justL or justS
+    curStop := pxStop[1]                    // the levels the resting order was priced from
+    curTP   := pxTP[1]
+    nTrades += 1
+    armed   := false
+    strategy.cancel("KL")
+    strategy.cancel("KS")
+    if not na(gapBox)
+        box.set_right(gapBox, bar_index + holdBars)
+        gapBox := na
+    if not na(lnE)
+        line.set_x2(lnE, bar_index + holdBars)
+        line.set_x2(lnS, bar_index + holdBars)
+        line.set_x2(lnT, bar_index + holdBars)
+        lnE := na                            // frozen - kept on the chart as the trade's record
+        lnS := na
+        lnT := na
+    if showRR
+        ent  = pxEntry[1]
+        q    = math.abs(strategy.position_size)
+        rUsd = math.abs(ent - curStop) * ptVal * q
+        wUsd = math.abs(curTP - ent) * ptVal * q
+        rrr  = rUsd > 0 ? wUsd / rUsd : na
+        txt  = "KATANA " + (justL ? "LONG" : "SHORT") + "  entry " + str.tostring(math.round_to_mintick(ent)) +
+             "\nRisk $" + str.tostring(rUsd, "#") + " | Reward $" + str.tostring(wUsd, "#") + " (" + str.tostring(rrr, "#.##") + "R, " + str.tostring(q, "#.#") + "x)" +
+             "\n1 contract: Risk $" + str.tostring(math.abs(ent - curStop) * ptVal, "#") + " | Reward $" + str.tostring(math.abs(curTP - ent) * ptVal, "#")
+        label.new(bar_index, ent, txt, xloc = xloc.bar_index, style = label.style_label_left,
+             color = color.new(color.gray, 15), textcolor = color.white, size = size.small)
+
+// keep the live setup's lines on the current levels
+if armed and flat and not na(lnE) and not na(pxEntry)
+    line.set_xy1(lnE, bar_index - 1, pxEntry)
+    line.set_xy2(lnE, bar_index + 2, pxEntry)
+    line.set_xy1(lnS, bar_index - 1, pxStop)
+    line.set_xy2(lnS, bar_index + 2, pxStop)
+    line.set_xy1(lnT, bar_index - 1, pxTP)
+    line.set_xy2(lnT, bar_index + 2, pxTP)
+if armed and flat and not na(gapBox)
+    box.set_right(gapBox, bar_index + 2)
+
+// ---------------------------------------------------------------- 6) Exits: the stop and the target, nothing else
+if strategy.position_size != 0 and not na(curStop) and not na(curTP)
+    strategy.exit("KLx", from_entry = "KL", stop = curStop, limit = curTP)
+    strategy.exit("KSx", from_entry = "KS", stop = curStop, limit = curTP)
+if flatten or dailyHalt
+    strategy.close_all(comment = dailyHalt ? "daily max loss" : "EOD flat")
+
+// ---------------------------------------------------------------- Alerts
+newArm = armed and not armed[1]
+if alertsOn and newArm
+    alert("KATANA ARMED  " + (dir == 1 ? "LONG" : "SHORT") +
+         "  | entry " + str.tostring(math.round_to_mintick(pxEntry)) +
+         "  | stop "  + str.tostring(math.round_to_mintick(pxStop)) +
+         "  | target " + str.tostring(math.round_to_mintick(pxTP)) +
+         "  | FVG " + str.tostring(math.round_to_mintick(gapBot)) + "-" + str.tostring(math.round_to_mintick(gapTop)) +
+         "  (levels re-scale until filled)", alert.freq_once_per_bar)
+if alertsOn and (justL or justS)
+    alert("KATANA FILLED  " + (justL ? "LONG" : "SHORT") +
+         "  | stop " + str.tostring(math.round_to_mintick(curStop)) +
+         "  | target " + str.tostring(math.round_to_mintick(curTP)) +
+         "  - no breakeven, no early exit", alert.freq_once_per_bar)
+
+// ---------------------------------------------------------------- Chart-timeframe sanity check
+if barstate.islast and timeframe.in_seconds() > timeframe.in_seconds(htf)
+    label.new(bar_index, high, "Katana: run this on a chart timeframe <= " + htf + " (currently " + timeframe.period + ")",
+         xloc = xloc.bar_index, style = label.style_label_down, color = color.new(color.orange, 0), textcolor = color.black, size = size.small)
+
+// ---------------------------------------------------------------- Strategy rules panel (top-right)
+var table info = na
+if showInfo and barstate.islast
+    info := table.new(position.top_right, 1, 10, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
+    table.cell(info, 0, 0, "KATANA MODEL  (" + htf + "m FVG -> 50% retrace)",        text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 1, "1. Displacement: a closed " + htf + "m FVG sets the bias", text_color = color.white,  text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 2, "   bullish gap = LONG | bearish gap = SHORT",             text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 3, "2. Range: anchor where the leg began ->",                 text_color = color.white,  text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 4, "   terminate at the extreme made after the FVG",          text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 5, "3. Entry .50 limit | Stop .75 | Target .25 = 1:1",        text_color = color.white,  text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 6, "4. Let it play out: no breakeven, no early cut",          text_color = color.white,  text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 7, "Limit cancels after " + str.tostring(maxWait) + " min | max " + str.tostring(maxTrades) + " trades/day", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 8, "Cutoff " + str.tostring(cutH) + ":" + str.format("{0,number,00}", cutM) + " | flatten " + str.tostring(eodH) + ":" + str.format("{0,number,00}", eodM) + " ET", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 9, "Run on a 1m-5m chart | toggle weekdays to isolate",       text_color = color.aqua,   text_size = size.small, text_halign = text.align_left)
