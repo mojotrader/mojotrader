@@ -5,26 +5,18 @@
 //   Halyard is a 15-minute opening-range break that fires on the 15m CLOSE. Break-then-Pullback (ORB + IB) is a
 //   pullback-limit engine that wants a fast chart. Run separately you cannot see their combined equity curve,
 //   because a chart has one timeframe and Halyard would only be right on a 15m chart.
-//   Here Halyard builds its own 15-minute bars out of whatever bars the chart is showing, and the ORB builds
-//   its own 5-minute bars the same way, so the WHOLE file can be run on a 1-MINUTE chart and both still see
-//   exactly the higher-timeframe opens, highs, lows and closes they would have seen on their own chart.
-//   Run this on 1m: ORB/IB get the resolution their limit fills need, the ORB's arming close and Halyard's
-//   break are unaffected by the chart timeframe, and the Strategy Tester shows the three of them together.
+//   Here Halyard builds its own 15-minute bars out of whatever bars the chart is showing, so the WHOLE file can
+//   be run on a 1-MINUTE chart and Halyard still trades exactly the 15m opens, highs, lows and closes it would
+//   have traded on a 15m chart. Run this on 1m: ORB/IB get the resolution their limit fills need, Halyard is
+//   unaffected by the chart timeframe, and the Strategy Tester shows the three of them together.
 //
 // THE 15-MINUTE ENGINE (Halyard), in short
 //   Every chart bar is put in a 15-minute bucket (UTC-aligned, which is where TradingView's own 15m bars sit).
 //   The LAST chart bar of a bucket closes that 15m bar, so on a 1m chart the 09:44 bar closes the 09:30-09:45
 //   candle - with process_orders_on_close = true the entry fills at that bar's close, i.e. at the 15m close
 //   price itself. A bucket that ends inside a data gap is caught up on the first bar of the next bucket.
-//
-// THE 5-MINUTE ARMING CANDLE (ORB)
-//   The ORB range is still 09:30-09:45 and the entry is still a limit at the fib pullback, but the BREAK that
-//   arms that limit is now a FIVE-MINUTE close beyond the range, not a chart-bar (1m) close. The 5m candles are
-//   built by the same bucket aggregator Halyard uses, so on a 1m chart the 09:49 bar closes the 09:45-09:50
-//   candle and that is the earliest bar the ORB can arm on - one 1m close beyond the high no longer does it.
-//   The IB is untouched: it still arms on a wick touch of its own range, on the chart bar.
-//   REQUIREMENT: use a chart timeframe that divides into BOTH 5 and 15 - i.e. 1 or 5 minutes. On anything else
-//   the aggregated candle degrades to the chart bar and the levels stop matching a real 5m / 15m chart.
+//   REQUIREMENT: use a chart timeframe that divides into 15 - 1, 3, 5 or 15 minutes. On anything larger the
+//   "15m" bar degrades to the chart bar and Halyard's levels stop matching a real 15m chart.
 //
 // HOW THE THREE SETUPS SHARE ONE POSITION
 //   Pine nets every order into ONE position: an opposite-side entry would REVERSE another setup's trade, not
@@ -225,9 +217,6 @@ flatM   = 30
 // ---- ORB settings ----
 orbLong   = true
 orbShort  = true
-// "Close beyond" is now read on the ORB's own FIVE-MINUTE candle, not on the chart bar - see the 5-minute bar
-// builder below. On a 1m chart that means the arming close is the 09:49 / 09:54 / ... bar, never the 09:46 one.
-// "Wick (touch)" is unchanged and still a chart-bar test.
 orbBreak  = "Close beyond"
 orbAvg    = true
 orbTpL    = "Ext 10%"
@@ -343,7 +332,7 @@ var bool orbibLive = false
 
 // ================================================================ HALYARD ENGINE
 // Single-candle opening-range breakout with an optional loser-reversal, on 15-MINUTE candles that this engine
-// builds itself - so the chart can be 1m or 5m and the levels, the break and the fills are identical.
+// builds itself - so the chart can be 1m, 3m, 5m or 15m and the levels, the break and the fills are identical.
 //
 // The range is one 15-minute candle. The first 15m bar that CLOSES beyond it takes the day's trade and consumes
 // the day whichever side it fired on - there is no second attempt if the filters reject it. Stop sits on the
@@ -722,48 +711,6 @@ if halNewBar
     hal15H2 := hal15H1
     hal15H1 := hal15H
 
-// ================================================================ THE 5-MINUTE BAR BUILDER (ORB arming candle)
-// The ORB arms on a FIVE-MINUTE close beyond its range. Rather than pulling a 5m series through
-// request.security - which publishes its value on the first bar of the NEXT 5m period, i.e. a bar late - the
-// 5m candle is aggregated here from the chart bars, exactly the way the Halyard engine builds its 15m ones:
-// every chart bar goes in an epoch-aligned 5-minute bucket (:00/:05/:10/... UTC, which is where TradingView's
-// own 5m bars sit), and the LAST chart bar of a bucket closes that 5m candle at its own close. So on a 1m
-// chart the 09:49 bar closes the 09:45-09:50 candle and the break is tested there, at the real 5m close price,
-// on the bar it actually happened - not one bar later.
-//
-// Only the CLOSE is kept: the break test is the sole consumer, and the range, the entry, the stop, the target
-// and the fills all still come from the chart bars, unchanged. Everything downstream of the arm therefore
-// keeps 1-minute resolution; the 5m candle only decides WHEN the limit goes in.
-//
-// A bucket whose last bar never arrived (a data gap, a halt, a session end) is caught up on the first bar of
-// the next bucket, out of the aggregate as it stood - same three steps, same order, as the 15m builder.
-orb5TfMs = 5 * 60 * 1000
-orb5Bkt  = math.floor(time / orb5TfMs)
-
-var int   orb5AggBkt  = na
-var float orb5AggC    = na
-var bool  orb5BktDone = false
-
-// set on the chart bar that CLOSES a 5-minute candle, together with that candle's close
-orb5NewBar = false
-float orb5C = na
-
-// (1) CATCH-UP out of the aggregate as it stood at the previous bar (orb5AggC is rolled below this).
-if not na(orb5AggBkt) and orb5Bkt != orb5AggBkt and not orb5BktDone
-    orb5NewBar := true
-    orb5C := orb5AggC
-// (2) ROLL the aggregate: a new bucket starts one, otherwise the running close is simply overwritten.
-if na(orb5AggBkt) or orb5Bkt != orb5AggBkt
-    orb5AggBkt  := orb5Bkt
-    orb5BktDone := false
-orb5AggC := close
-// (3) PROJECTED CLOSE - the normal path. This chart bar is the last of its bucket when the NEXT bar's time
-//     falls in a different bucket. barstate.isconfirmed keeps a forming bar from arming the ORB early.
-if not orb5BktDone and barstate.isconfirmed and math.floor((time + chartMs) / orb5TfMs) != orb5Bkt
-    orb5BktDone := true
-    orb5NewBar  := true
-    orb5C := orb5AggC
-
 // ================================================================ Historical-probability stats (ORB / IB)
 // TWO walk-forward studies are collected (a day is only added to the sample after its EOD flatten, so the
 // numbers shown on any bar never contain data from that day or later):
@@ -977,13 +924,8 @@ if or_rDone and not na(or_rH) and or_rH > or_rL
         orbSz1 := sizeByRisk ? f_size(orbRiskDlr1, math.abs(or_e1 - or_zstop)) : orbQty1
         orbSz2 := sizeByRisk ? f_size(orbRiskDlr2, math.abs(or_e2 - or_zstop)) : orbQty2
 or_useAdd = orbAvg and or_shallow and not na(or_e2)
-// BREAK BY SELECTED TYPE. "Close beyond" is the FIVE-MINUTE close - the arming candle - so the test is only
-// made on the chart bars that close a 5m bucket, against that candle's close rather than the chart bar's.
-// The range ends 09:45, which is itself a 5m boundary, so the earliest bar that can arm the ORB is the one
-// closing the 09:45-09:50 candle. A 1m close beyond the level no longer arms anything on its own; nor does a
-// 5m candle that pokes through and closes back inside, since only its CLOSE is read.
-// "Wick (touch)" is untouched and still a chart-bar test - it is the IB's mode, not the ORB's shipped one.
-or_brk = orbBreak == "Wick (touch)" ? ((or_dir == 1 and high >= or_rH) or (or_dir == -1 and low <= or_rL)) : (orb5NewBar and ((or_dir == 1 and orb5C > or_rH) or (or_dir == -1 and orb5C < or_rL)))
+// break by selected type
+or_brk = orbBreak == "Wick (touch)" ? ((or_dir == 1 and high >= or_rH) or (or_dir == -1 and low <= or_rL)) : ((or_dir == 1 and close > or_rH) or (or_dir == -1 and close < or_rL))
 if or_dir != 0 and or_brk
     or_broke := true
 // double-break detection: opposite range extreme is violated
@@ -995,8 +937,7 @@ if or_dir == -1 and high > or_rH
 orbSizeOK = orbMinRngPct <= 0 or (not na(or_rng) and or_rL > 0 and or_rng / or_rL * 100 >= orbMinRngPct)
 // NO CARRY. The ORB window shuts the moment the IB range FORMS at 10:30: a resting ORB limit is cancelled
 // there, and an ORB that breaks after 10:30 is never placed at all. The ORB owns the 09:45-10:30 slot and
-// hands the day to the IB when the IB range completes - it does not linger behind it. With the 5-minute
-// arming candle the usable slot starts at 09:50, so there are eight 5m closes that can arm the day.
+// hands the day to the IB when the IB range completes - it does not linger behind it.
 orbWin = inSess and not dayHalt and orbDayOK and tod <= (orbCutH*60 + orbCutM) and (not runIB or not ibFormed) and orbSizeOK
 // SEAT: a live HALYARD trade holds the ORB limit back rather than cancelling it - same rule the IB has always
 // had behind an open ORB. If the ORB pullback entry trades through during the hold, that fill was missed and
@@ -1113,8 +1054,6 @@ if or_trk
         or_trk := false
 
 // ---- ORB study B: armed -> 25% / 50% pullback -> which levels print from there, filed at the EOD flatten ----
-// "Armed" is now the 5-minute break, so these rows read the odds from the moment the 5m candle closes beyond
-// the range - the same instant the limit goes in.
 var bool  orP_act  = false
 var int   orP_dir  = 0
 var float orP_rngP = na
@@ -1250,8 +1189,6 @@ if ib_rDone and not na(ib_rH) and ib_rH > ib_rL
 orbLive   = runORB and (or_f1 or or_f2) and not or_closed
 ibHeld    = orbLive or halLive
 ib_useAdd = ibAvg and ib_shallow and not na(ib_e2)
-// The IB break is UNCHANGED: a wick touch of its own range, tested on the chart bar. Only the ORB moved to a
-// 5-minute arming close.
 ib_brk = ibBreak == "Wick (touch)" ? ((ib_dir == 1 and high >= ib_rH) or (ib_dir == -1 and low <= ib_rL)) : ((ib_dir == 1 and close > ib_rH) or (ib_dir == -1 and close < ib_rL))
 if ib_dir != 0 and ib_brk
     ib_broke := true
@@ -1484,8 +1421,6 @@ if dayHalt
 // destination that one alert was given, so these cannot be split between a human and a machine. Point the
 // alert at a notification channel, not at a broker webhook: TradingView sends anything that is not valid JSON
 // as text/plain, and an order endpoint answers that with 415 "unsupported media type".
-// The ORB alert now fires on the 5-MINUTE close that arms the setup, so it arrives with the limit order, not a
-// few 1m closes ahead of it.
 if brkAlerts and runHAL and (halBrkUp or halBrkDn)
     halSLa = halBrkUp ? f_halLongStop(hal15C) : f_halShortStop(hal15C)
     halTPa = halBrkUp ? f_halLongTP(hal15C, halSLa, halRR) : f_halShortTP(hal15C, halSLa, halRR)
@@ -1496,7 +1431,7 @@ if brkAlerts and runHAL and (halBrkUp or halBrkDn)
          "  | target " + str.tostring(math.round_to_mintick(halTPa)), alert.freq_once_per_bar)
 if brkAlerts and runORB and or_dir != 0 and or_broke and not or_broke[1]
     orTPa = f_tp(or_dir, or_rH, or_rL, or_rng, dHigh, dLow, orbTpL, orbTpS)
-    alert("ORB 5m BREAK  " + (or_dir == 1 ? "LONG" : "SHORT") +
+    alert("ORB BREAK  " + (or_dir == 1 ? "LONG" : "SHORT") +
          "  | broke " + str.tostring(math.round_to_mintick(or_dir == 1 ? or_rH : or_rL)) +
          "  | pullback entry " + str.tostring(math.round_to_mintick(or_e1)) +
          "  | stop " + str.tostring(math.round_to_mintick(or_zstop)) +
@@ -1595,8 +1530,6 @@ f_growFibs(array<line> fib) =>
 // Drawn when the ENTRY ORDER IS ACTUALLY PLACED (or_placed / ib_placed), so a break that any filter rejects -
 // wrong weekday, range too small, past the cutoff, IB already formed, double-break day, daily loss halt, sizing
 // under one contract, or a limit waiting behind an open Halyard/ORB trade - draws nothing at all.
-// With the 5-minute arming candle the ORB boxes therefore appear on the bar that closes the breaking 5m
-// candle, which is the bar the limit is placed on.
 var box   orbBw  = na
 var box   orbBr  = na
 var box   orbBw2 = na            // the average-down unit's own pair of boxes
@@ -1696,7 +1629,7 @@ if showInfo and barstate.islast
     table.cell(info, 0, 6,  "Direction: low-first = LONG, high-first = SHORT",            text_color = color.white,   text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 7,  (orbDepth >= 100 and ibDepth >= 100) ? "  close-depth filter: OFF (both at 100%)" : "  + close no deeper than " + str.tostring(orbDepth, "#") + "% (ORB) / " + str.tostring(ibDepth, "#") + "% (IB) into the range",
          text_color = color.silver, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 8,  "Arm on the break (ORB: 5m CLOSE, IB: wick), then limit at fib:", text_color = color.white, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 8,  "Enter AFTER the range breaks; limit at fib pullback:",       text_color = color.white,   text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 9,  "  shallow -> 25% line | deeper -> 50% line",                 text_color = color.silver,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 10, "Stop: always the range extreme (100%)",                      text_color = color.white,   text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 11, "Target: ORB L +10% / S +30% ; IB +30% extension",            text_color = color.white,   text_size = size.small, text_halign = text.align_left)
