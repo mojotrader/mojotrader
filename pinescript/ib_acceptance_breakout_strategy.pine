@@ -1,0 +1,387 @@
+//@version=6
+// ============================================================================================
+// IB ACCEPTANCE BREAKOUT  —  built on the tradingstats.net "Initial Balance Breakout
+// Statistics: ES & NQ Futures 2015-2025" study (2,686 ES + 2,833 NQ RTH sessions).
+// Run on a 5m chart (any TF that divides the 30-minute confirm period also works).
+//
+// -------------------------------------------------------------------------------- THE EDGE
+// The study's headline numbers say that *touching* the IB edge carries almost no information,
+// and that the tradeable edge lives in ACCEPTANCE (a period CLOSE beyond the edge) plus the
+// SIZE of the IB relative to ATR:
+//
+//   1. Touching is free. 97.8% of ES days and 96.2% of NQ days break the IB at least once,
+//      and 28.7% (ES) / 22.6% (NQ) break BOTH sides ("rotation day"). So a plain stop-order
+//      touch of the IB high is roughly a 1-in-4 whipsaw by construction. Only 2.2% / 3.8% of
+//      days never leave the IB at all.
+//
+//   2. Acceptance roughly doubles the odds. When the C-period (10:30-11:00, the 30 minutes
+//      right after the IB) CLOSES above the IB high on ES, 45.5% of those days go on to a
+//      full 100% extension (one whole IB range beyond the edge). A C-period close below the
+//      IB low gives 50.0% for the downside. Both are "more than double" the unconditional
+//      rate. => THIS IS THE TRIGGER: a confirm-period close beyond the edge, not a wick.
+//
+//   3. IB width vs ATR scales how far it goes. Tiers are cut on IB range / ATR:
+//        Narrow  (< 0.5x ATR): breaks 98.7% of days, median extension 74.8% of the IB range
+//        Wide    (1.0-1.5x)  : breaks 93.5% (ES) / 84.1% (NQ), median extension 39.6% / 36.7%
+//        Extreme (> 1.5x)    : breaks only 66.7-76.9%, median extension ~22.3%
+//      Same effect by percentile: the smallest 20% of IB ranges break 99.3% of the time with
+//      a median 84.5% extension; the largest 20% break 95.5% with a median 54.0%.
+//      => TARGETS ARE TIER-SCALED (a wide IB does NOT go a full IB range), and the Extreme
+//         tier is skipped by default — it breaks least often and travels least far.
+//
+//   4. Retracement depth is the continuation filter. After a breakout, if price never comes
+//      back more than 25% into the IB, the day closes in the breakout direction 93.8% of the
+//      time on ES and ZERO of those days became double-break days. If price retraces more
+//      than 50% into the IB, only 24.8% close in the breakout direction and over half turn
+//      into double-break days. Midpoint retests are a coin flip once they happen (ES: 55.6%
+//      of breakout days retest the midpoint; of those 53.4% return to the break level and
+//      52.7% break the opposite side).
+//      => THE IB MIDPOINT IS THE STATISTICALLY-JUSTIFIED STOP. Past it the edge is gone.
+//
+//   5. Timing. Nearly two-thirds of all first breakouts happen in the C-period (10:30-11:00),
+//      and over 80% have happened by the end of the D-period (11:30).
+//      => One confirm at 11:00, an optional second-chance confirm at 11:30, nothing after.
+//
+//   6. Seasonality. December and August show the lowest breakout rates and the smallest
+//      extensions (thin summer / holiday liquidity) — optional month filter, off by default.
+//
+// -------------------------------------------------------------------------------- THE RULES
+//   IB      : 09:30-10:30 ET.
+//   TIER    : IB range / daily ATR(14) as of yesterday's close -> Narrow / Normal / Wide /
+//             Extreme. Extreme is skipped by default.
+//   TRIGGER : at 11:00 ET (the C-period close) the bar closes beyond the IB edge -> take that
+//             direction. If it closes back inside, optionally look again at 11:30 (D-period).
+//   SKIP    : if the opposite IB edge has already been broken (rotation already underway).
+//   ENTRY   : market at the confirm close, or a stop order beyond the confirm period's extreme
+//             if you want follow-through before paying up.
+//   STOP    : the IB midpoint (the deep-retrace line where the edge dies). Selectable.
+//   TARGET  : tier-scaled extension beyond the broken edge — Narrow 1.00x, Normal 0.75x,
+//             Wide 0.50x, Extreme 0.25x of the IB range. Optional partial at the 50%
+//             extension with the stop pulled to breakeven.
+//   EXIT    : one trade per day, flat at 16:00.
+//
+// NOTE: this codes the study's conditional probabilities into rules; it is not a backtest of
+// the study. Validate on your own data and sample before sizing up.
+// ============================================================================================
+strategy("IB Acceptance Breakout (tradingstats)", overlay = true, pyramiding = 1,
+     max_boxes_count = 200, max_labels_count = 200, max_lines_count = 500,
+     initial_capital = 1000000, margin_long = 0, margin_short = 0,
+     default_qty_type = strategy.fixed, default_qty_value = 1,
+     process_orders_on_close = true,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
+
+// ---------------------------------------------------------------- Session
+gS      = "Session"
+tz      = input.string("America/New_York", "Timezone", group = gS)
+sess    = input.session("0930-1600", "RTH session", group = gS)
+ibSess  = input.session("0930-1030", "Initial Balance window", group = gS)
+
+// ---------------------------------------------------------------- Confirm (acceptance) periods
+gC      = "Acceptance confirm"
+c1H     = input.int(11, "C-period close hour",   0, 23, group = gC, tooltip = "The study's C-period is 10:30-11:00 ET. Nearly two-thirds of first breakouts happen inside it, and a C-period CLOSE beyond the IB edge is what more than doubles the odds of a full 1x extension (45.5% up / 50.0% down on ES).")
+c1M     = input.int(0,  "C-period close minute", 0, 59, group = gC)
+useD    = input.bool(true, "Second chance at the D-period close", group = gC, tooltip = "If the C-period closed back inside the IB, test again at 11:30. Over 80% of first breakouts have happened by then, so this is the last look worth taking.")
+c2H     = input.int(11, "D-period close hour",   0, 23, group = gC)
+c2M     = input.int(30, "D-period close minute", 0, 59, group = gC)
+breachTk= input.int(1, "Breach ticks beyond the edge", 0, 40, group = gC, tooltip = "The confirm close must clear the IB edge by at least this many ticks.")
+skipOpp = input.bool(true, "Skip if the opposite edge already broke", group = gC, tooltip = "A day that has already traded through both IB edges is a rotation day. Shallow-retrace continuation days (93.8% close in the breakout direction) never became double-break days in the study.")
+
+// ---------------------------------------------------------------- IB size tier (vs ATR)
+gT      = "IB size tier (vs ATR)"
+atrLen  = input.int(14, "Daily ATR length", 2, 100, group = gT)
+thrN    = input.float(0.5, "Narrow  : IB/ATR below", minval = 0.05, step = 0.05, group = gT)
+thrW    = input.float(1.0, "Normal  : IB/ATR below", minval = 0.05, step = 0.05, group = gT)
+thrX    = input.float(1.5, "Wide    : IB/ATR below (above = Extreme)", minval = 0.05, step = 0.05, group = gT)
+useNar  = input.bool(true,  "Trade Narrow  (breaks 98.7%, median ext 74.8%)", group = gT)
+useNor  = input.bool(true,  "Trade Normal", group = gT)
+useWid  = input.bool(true,  "Trade Wide    (breaks 93.5/84.1%, median ext 39.6/36.7%)", group = gT)
+useExt  = input.bool(false, "Trade Extreme (breaks 66.7-76.9%, median ext 22.3%)", group = gT, tooltip = "Off by default: the Extreme tier breaks least often and travels least far — the study's worst bucket on both counts.")
+
+// ---------------------------------------------------------------- Trade management
+gM      = "Trade"
+allowL  = input.bool(true, "Take longs",  group = gM)
+allowS  = input.bool(true, "Take shorts", group = gM)
+entMode = input.string("Confirm close (market)", "Entry", options = ["Confirm close (market)", "Stop beyond confirm period"], group = gM, tooltip = "Confirm close = enter at the close that produced the signal (what the statistic is measured on). Stop = wait for price to also take out the confirm period's extreme before entering.")
+stopMode= input.string("IB midpoint (deep retrace)", "Stop", options = ["IB midpoint (deep retrace)", "IB 25% retrace (shallow fail)", "Opposite IB extreme", "Broken IB edge"], group = gM, tooltip = "Midpoint is the study's line in the sand: past a 50% retrace only 24.8% of days still close in the breakout direction and over half become double-break days.")
+tgtNar  = input.float(1.00, "Target x IB range — Narrow",  minval = 0.1, step = 0.05, group = gM)
+tgtNor  = input.float(0.75, "Target x IB range — Normal",  minval = 0.1, step = 0.05, group = gM)
+tgtWid  = input.float(0.50, "Target x IB range — Wide",    minval = 0.1, step = 0.05, group = gM)
+tgtExt  = input.float(0.25, "Target x IB range — Extreme", minval = 0.1, step = 0.05, group = gM)
+usePart = input.bool(true, "Scale out at a first extension", group = gM)
+partExt = input.float(0.50, "First extension x IB range", minval = 0.05, step = 0.05, group = gM)
+partPct = input.int(50, "Scale-out %", 1, 99, group = gM)
+beAfter = input.bool(true, "Stop to breakeven after the scale-out", group = gM)
+
+// ---------------------------------------------------------------- Filters
+gF      = "Filters"
+skipAug = input.bool(false, "Skip August",   group = gF, tooltip = "August and December show the study's lowest breakout rates and smallest extensions.")
+skipDec = input.bool(false, "Skip December", group = gF)
+onMon   = input.bool(true, "Monday",    group = gF, inline = "d")
+onTue   = input.bool(true, "Tuesday",   group = gF, inline = "d")
+onWed   = input.bool(true, "Wednesday", group = gF, inline = "d")
+onThu   = input.bool(true, "Thursday",  group = gF, inline = "d")
+onFri   = input.bool(true, "Friday",    group = gF, inline = "d")
+
+// ---------------------------------------------------------------- Risk / sizing
+gR      = "Risk"
+useRisk = input.bool(true, "Size by % risk (else fixed contracts)", group = gR)
+acctSize= input.float(30000, "Account size $ (fixed - NO compounding)", minval = 1, group = gR)
+riskPct = input.float(1.0, "Risk per trade (% of capital)", minval = 0.1, step = 0.1, group = gR)
+qtyFix  = input.float(1, "Contracts (fixed sizing)", minval = 1, group = gR)
+ptVal   = input.float(2.0, "$ per point per contract", group = gR, tooltip = "MNQ=2, NQ=20, MES=5, ES=50.")
+maxDayPct= input.float(0, "Daily max loss (% of capital, 0 = off)", minval = 0, step = 0.5, group = gR)
+minStopTk= input.int(8, "Minimum stop distance (ticks)", 1, 400, group = gR, tooltip = "Floors the stop distance so a stop parked right on the broken edge cannot blow up the position size.")
+
+// ---------------------------------------------------------------- Time
+gTm     = "Time"
+cutH    = input.int(11, "Entry cutoff hour",   0, 23, group = gTm, tooltip = "No new entries after this. Over 80% of first breakouts are done by 11:30.")
+cutM    = input.int(30, "Entry cutoff minute", 0, 59, group = gTm)
+flatH   = input.int(16, "Flatten hour",   0, 23, group = gTm)
+flatM   = input.int(0,  "Flatten minute", 0, 59, group = gTm)
+
+// ---------------------------------------------------------------- Display
+gD      = "Display"
+showLv  = input.bool(true, "Draw IB, midpoint and extension ladder", group = gD)
+showTbl = input.bool(true, "Show the stats panel", group = gD)
+
+// ================================================================ Clock / session state
+inSess     = not na(time(timeframe.period, sess, tz))
+newSession = inSess and not inSess[1]
+inIB       = not na(time(timeframe.period, ibSess, tz))
+ibDone     = not inIB and inIB[1]
+
+tod     = hour(time, tz) * 60 + minute(time, tz)
+tfMin   = math.max(1, math.round(timeframe.in_seconds(timeframe.period) / 60))
+c1Min   = c1H * 60 + c1M
+c2Min   = c2H * 60 + c2M
+flatten = tod >= (flatH * 60 + flatM)
+inWindow= inSess and tod <= (cutH * 60 + cutM)
+
+// the bar that ENDS the confirm period (works on any TF that reaches the boundary)
+isC1End = inSess and tod < c1Min and (tod + tfMin) >= c1Min
+isC2End = inSess and tod < c2Min and (tod + tfMin) >= c2Min
+
+// day gates
+dow   = dayofweek(time, tz)
+dayOK = (dow == dayofweek.monday and onMon) or (dow == dayofweek.tuesday and onTue) or (dow == dayofweek.wednesday and onWed) or (dow == dayofweek.thursday and onThu) or (dow == dayofweek.friday and onFri)
+mo    = month(time, tz)
+monOK = not (skipAug and mo == 8) and not (skipDec and mo == 12)
+
+// fixed-capital sizing (no compounding) + daily max-loss halt
+var float dayStartEq = na
+if newSession
+    dayStartEq := strategy.equity
+dayPnL    = strategy.equity - dayStartEq
+dailyHalt = maxDayPct > 0 and dayPnL <= -(acctSize * maxDayPct / 100.0)
+
+// position sizer: contracts for a $ budget and a stop distance in points.
+// fractional <= .5 rounds down, > .5 rounds up; never below 1 when the trade risks >= 0.5%.
+f_size(float budget, float ptDist, float unitPct) =>
+    perC = ptDist * ptVal
+    raw  = perC > 0 ? budget / perC : 0.0
+    fr   = raw - math.floor(raw)
+    n = fr > 0.5 ? math.ceil(raw) : math.floor(raw)
+    n := (unitPct >= 0.5 and n < 1) ? 1 : n
+    n
+
+// ================================================================ Daily ATR (non-repainting)
+// ta.atr(len)[1] on the daily series = ATR through YESTERDAY'S close, so today's IB is graded
+// against context that was already known when the session opened.
+atrD = request.security(syminfo.tickerid, "D", ta.atr(atrLen)[1], lookahead = barmerge.lookahead_off)
+
+// ================================================================ IB tracking
+var float ibH   = na
+var float ibL   = na
+var float rng   = na
+var float ibMid = na
+var float ratio = na
+var string tier = ""
+var bool  tierOK= false
+var float tgtMlt= na
+
+if newSession
+    ibH := na
+    ibL := na
+    rng := na
+    ibMid := na
+    ratio := na
+    tier := ""
+    tierOK := false
+    tgtMlt := na
+if inIB
+    ibH := na(ibH) ? high : math.max(ibH, high)
+    ibL := na(ibL) ? low  : math.min(ibL, low)
+
+// classify the IB the moment it closes
+if ibDone and not na(ibH) and ibH > ibL and not na(atrD) and atrD > 0
+    rng   := ibH - ibL
+    ibMid := (ibH + ibL) / 2.0
+    ratio := rng / atrD
+    tier  := ratio < thrN ? "Narrow" : ratio < thrW ? "Normal" : ratio < thrX ? "Wide" : "Extreme"
+    tierOK := (tier == "Narrow" and useNar) or (tier == "Normal" and useNor) or (tier == "Wide" and useWid) or (tier == "Extreme" and useExt)
+    tgtMlt := tier == "Narrow" ? tgtNar : tier == "Normal" ? tgtNor : tier == "Wide" ? tgtWid : tgtExt
+
+// ================================================================ Confirm-period segment extremes
+// Reset at the IB close and again at every confirm boundary, so segH/segL always describe the
+// period being judged (C = 10:30-11:00, D = 11:00-11:30).
+var float segH = na
+var float segL = na
+if ibDone
+    segH := high
+    segL := low
+else if not na(segH) and inSess
+    segH := math.max(segH, high)
+    segL := math.min(segL, low)
+
+// has the opposite side already gone? (rotation already underway)
+var bool brokeUp = false
+var bool brokeDn = false
+if newSession
+    brokeUp := false
+    brokeDn := false
+if not na(ibH) and not inIB and inSess
+    if high > ibH
+        brokeUp := true
+    if low < ibL
+        brokeDn := true
+
+// ================================================================ Signal / order state
+var int   dir      = 0
+var float entryRef = na
+var float zstop    = na
+var float curStop  = na
+var float tp1      = na
+var float tp2      = na
+var bool  placed   = false
+var bool  wasIn    = false
+var bool  done     = false
+var bool  partDone = false
+var float qtyUse   = na
+
+if newSession
+    dir := 0
+    entryRef := na
+    zstop := na
+    curStop := na
+    tp1 := na
+    tp2 := na
+    placed := false
+    wasIn := false
+    done := false
+    partDone := false
+    qtyUse := na
+
+tk       = breachTk * syminfo.mintick
+tradeOK  = tierOK and dayOK and monOK and not dailyHalt and inWindow and not flatten and not placed and not done and not na(rng)
+confirmBar = isC1End or (useD and isC2End)
+
+// a confirm fires when the period CLOSES beyond the edge — a wick through it is not enough
+sigL = tradeOK and allowL and close > ibH + tk and not (skipOpp and brokeDn)
+sigS = tradeOK and allowS and close < ibL - tk and not (skipOpp and brokeUp)
+
+if confirmBar and (sigL or sigS)
+    dir      := sigL ? 1 : -1
+    edge     = dir == 1 ? ibH : ibL
+    entryRef := entMode == "Stop beyond confirm period" ? (dir == 1 ? segH + tk : segL - tk) : close
+    zstop    := stopMode == "IB midpoint (deep retrace)" ? ibMid : stopMode == "IB 25% retrace (shallow fail)" ? (dir == 1 ? ibH - 0.25 * rng : ibL + 0.25 * rng) : stopMode == "Opposite IB extreme" ? (dir == 1 ? ibL : ibH) : edge
+    // never let a razor-thin stop (e.g. entry sitting right on the broken edge) inflate the size
+    minDist = minStopTk * syminfo.mintick
+    if math.abs(entryRef - zstop) < minDist
+        zstop := dir == 1 ? entryRef - minDist : entryRef + minDist
+    curStop  := zstop
+    tp2      := dir == 1 ? edge + tgtMlt * rng : edge - tgtMlt * rng
+    tp1      := dir == 1 ? edge + partExt * rng : edge - partExt * rng
+    stopDist = math.abs(entryRef - zstop)
+    qtyUse   := useRisk ? f_size(acctSize * (riskPct / 100.0), stopDist, riskPct) : qtyFix
+    if stopDist > 0 and qtyUse >= 1
+        if entMode == "Stop beyond confirm period"
+            if dir == 1
+                strategy.entry("L", strategy.long,  qty = qtyUse, stop = entryRef)
+            else
+                strategy.entry("S", strategy.short, qty = qtyUse, stop = entryRef)
+        else
+            if dir == 1
+                strategy.entry("L", strategy.long,  qty = qtyUse)
+            else
+                strategy.entry("S", strategy.short, qty = qtyUse)
+        placed := true
+    else
+        dir := 0
+
+// start the next segment at each confirm boundary
+if confirmBar
+    segH := high
+    segL := low
+
+// ================================================================ Manage
+// breakeven after the scale-out prints
+if usePart and beAfter and not partDone and strategy.position_size != 0 and not na(tp1)
+    hit = dir == 1 ? high >= tp1 : low <= tp1
+    if hit
+        avg = strategy.position_avg_price
+        curStop := dir == 1 ? math.max(curStop, avg) : math.min(curStop, avg)
+        partDone := true
+
+if strategy.position_size != 0 and not na(curStop)
+    if usePart
+        strategy.exit("Lx1", from_entry = "L", qty_percent = partPct, limit = tp1, stop = curStop)
+        strategy.exit("Sx1", from_entry = "S", qty_percent = partPct, limit = tp1, stop = curStop)
+    strategy.exit("Lx2", from_entry = "L", limit = tp2, stop = curStop)
+    strategy.exit("Sx2", from_entry = "S", limit = tp2, stop = curStop)
+
+wasIn := wasIn or strategy.position_size != 0
+if strategy.position_size == 0 and wasIn
+    done := true
+if done or flatten or not inWindow
+    strategy.cancel("L")
+    strategy.cancel("S")
+if flatten
+    strategy.close_all(comment = "EOD flat")
+
+// ================================================================ Visuals
+plot(showLv and not na(ibH) ? ibH : na, "IB High", color = color.new(color.teal, 0), style = plot.style_linebr)
+plot(showLv and not na(ibL) ? ibL : na, "IB Low",  color = color.new(color.red, 0),  style = plot.style_linebr)
+plot(showLv and not na(ibMid) ? ibMid : na, "IB Mid (deep-retrace line)", color = color.new(color.orange, 0), style = plot.style_linebr)
+plot(dir != 0 and not na(tp2) ? tp2 : na, "Target", color = color.new(color.green, 0), style = plot.style_linebr)
+plot(dir != 0 and usePart and not na(tp1) ? tp1 : na, "Scale-out", color = color.new(color.lime, 40), style = plot.style_linebr)
+plot(dir != 0 and not na(curStop) ? curStop : na, "Stop", color = color.new(color.maroon, 0), style = plot.style_linebr)
+
+// the study's extension ladder, drawn once when the IB closes
+if showLv and ibDone and not na(rng)
+    for k = 1 to 4
+        m = k * 0.25
+        line.new(bar_index, ibH + m * rng, bar_index + 78, ibH + m * rng, xloc = xloc.bar_index, color = color.new(color.gray, 60), style = line.style_dotted)
+        line.new(bar_index, ibL - m * rng, bar_index + 78, ibL - m * rng, xloc = xloc.bar_index, color = color.new(color.gray, 60), style = line.style_dotted)
+
+// mark the accepted confirm close
+if confirmBar and dir != 0 and placed and not placed[1]
+    label.new(bar_index, dir == 1 ? low : high, (dir == 1 ? "IB accept LONG" : "IB accept SHORT") + "\n" + tier + "  IB/ATR " + str.tostring(ratio, "#.##") + "\ntgt " + str.tostring(tgtMlt, "#.##") + "x IB",
+         xloc = xloc.bar_index, style = dir == 1 ? label.style_label_up : label.style_label_down,
+         color = color.new(dir == 1 ? color.teal : color.red, 20), textcolor = color.white, size = size.small)
+
+// ---------------------------------------------------------------- Stats panel
+// Reference figures are the study's, shown next to what today actually is.
+var table tbl = table.new(position.top_right, 2, 9, border_width = 1)
+refBrk = tier == "Narrow" ? "98.7%" : tier == "Normal" ? "97.8 / 96.2% (all days)" : tier == "Wide" ? "93.5 / 84.1%" : tier == "Extreme" ? "66.7 - 76.9%" : "-"
+refExt = tier == "Narrow" ? "74.8%" : tier == "Wide" ? "39.6 / 36.7%" : tier == "Extreme" ? "22.3%" : "-"
+statTxt = dir == 1 ? "LONG accepted" : dir == -1 ? "SHORT accepted" : na(rng) ? "no IB yet" : tod < c1Min ? "waiting for the confirm close" : "no acceptance - stand aside"
+statCol = dir == 1 ? color.teal : dir == -1 ? color.red : color.gray
+if showTbl and barstate.islast
+    table.cell(tbl, 0, 0, "IB Acceptance", text_color = color.white, text_size = size.small, text_halign = text.align_left)
+    table.cell(tbl, 1, 0, "tradingstats 2015-25", text_color = color.gray, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(tbl, 0, 1, "IB range", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(tbl, 1, 1, na(rng) ? "-" : str.tostring(rng, format.mintick), text_color = color.white, text_size = size.small, text_halign = text.align_right)
+    table.cell(tbl, 0, 2, "Daily ATR", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(tbl, 1, 2, na(atrD) ? "-" : str.tostring(atrD, format.mintick), text_color = color.white, text_size = size.small, text_halign = text.align_right)
+    table.cell(tbl, 0, 3, "IB / ATR", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(tbl, 1, 3, na(ratio) ? "-" : str.tostring(ratio, "#.##"), text_color = color.white, text_size = size.small, text_halign = text.align_right)
+    table.cell(tbl, 0, 4, "Tier", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(tbl, 1, 4, tier == "" ? "-" : tier, text_color = tierOK ? color.teal : color.red, text_size = size.small, text_halign = text.align_right)
+    table.cell(tbl, 0, 5, "Ref break rate", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(tbl, 1, 5, refBrk, text_color = color.silver, text_size = size.small, text_halign = text.align_right)
+    table.cell(tbl, 0, 6, "Ref median ext", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(tbl, 1, 6, refExt, text_color = color.silver, text_size = size.small, text_halign = text.align_right)
+    table.cell(tbl, 0, 7, "Target", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(tbl, 1, 7, na(tgtMlt) ? "-" : str.tostring(tgtMlt, "#.##") + "x IB", text_color = color.white, text_size = size.small, text_halign = text.align_right)
+    table.cell(tbl, 0, 8, "Status", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(tbl, 1, 8, statTxt, text_color = statCol, text_size = size.small, text_halign = text.align_right)
