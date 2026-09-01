@@ -1403,7 +1403,8 @@ if ordersOn and flatten
 // by 15:30 no legitimate Halyard position exists; one that is still open got there because its own day flat
 // was missed - a holiday early close, a data gap, or its internal tracking having gone flat while the broker
 // position did not - and no other rule in this file would ever close it (the daily max loss ships OFF).
-if ordersOn and flatten and nz(flatten[1], false) and strategy.position_size != 0
+// flatten[1] needs no nz(): on the very first bar it is na, and an na inside an `if` condition is false.
+if ordersOn and flatten and flatten[1] and strategy.position_size != 0
     strategy.cancel_all()
     strategy.close_all(comment = "EOD flat (backstop)")
 // The daily max loss is the ONE rule that reaches across setups: it is an account circuit breaker, so it closes
