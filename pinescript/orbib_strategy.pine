@@ -29,10 +29,11 @@
 //   Each engine flattens only its OWN entries (strategy.close per entry id), so Halyard's 13:30/14:30 ET day
 //   flat can never close an open ORB/IB trade and the 15:30 ET EOD flatten does not close a Halyard trade.
 //   TWO rules reach across all three: the daily max-loss circuit breaker, because that is its job, and the
-//   EOD backstop - if ANY position is still open one bar after the flatten, everything is closed at market.
-//   EVERY close in this file cancels the matching exit orders first: a live strategy.exit reserves the whole
-//   position quantity, and a market close issued behind it is dropped, which is how a trade survives an EOD
-//   flatten and runs into the next session.
+//   15:30 EOD flatten, which closes the POSITION (cancel_all + close_all) rather than a list of entry ids.
+//   Closing by id cannot be trusted for a flatten: it misses any id not on the list, and Pine nets positions,
+//   so an order from one setup can end up reducing another setup's entry and leaving a remainder that no id
+//   on the list owns. EVERY close cancels first - a resting limit can still fill behind a close, and a live
+//   exit order holds the position quantity reserved.
 //
 // RISK/REWARD BOXES: all three setups draw the SAME box - a green reward box from the entry to the target, a
 //   red risk box from the entry to the stop, a coloured border per setup (orange ORB, teal IB, fuchsia
@@ -701,6 +702,25 @@ if halDayFlat
         halState := (halTrDir == 1 ? close < halEnt : close > halEnt) ? 2 : 3
     halTrDir := 0
 
+// BELT AND BRACES for the day flat above. halDayFlat is gated on halTrDir != 0 - the engine's OWN simulation
+// of the trade. If that simulation ever goes flat while the broker position does not, halDayFlat never fires
+// and nothing else in this file closes a HAL id. So on the session roll, close the four Halyard ids
+// unconditionally: closing an id that has no open trade is a no-op, and this cannot be skipped by a
+// tracking desync.
+if ordersOn and halNewDay
+    strategy.cancel("HAL-Lx")
+    strategy.cancel("HAL-Sx")
+    strategy.cancel("HAL-RLx")
+    strategy.cancel("HAL-RSx")
+    strategy.cancel("HAL-L")
+    strategy.cancel("HAL-S")
+    strategy.cancel("HAL-RL")
+    strategy.cancel("HAL-RS")
+    strategy.close("HAL-L",  comment = "day flat (sweep)")
+    strategy.close("HAL-S",  comment = "day flat (sweep)")
+    strategy.close("HAL-RL", comment = "day flat (sweep)")
+    strategy.close("HAL-RS", comment = "day flat (sweep)")
+
 // live Halyard trade -> the ORB and IB limits are held back behind it (see the ORB/IB engines below)
 halLive = halTrDir != 0
 
@@ -945,7 +965,11 @@ orbWin = inSess and not dayHalt and orbDayOK and tod <= (orbCutH*60 + orbCutM) a
 if runORB and or_dir != 0 and or_broke and not or_placed and not or_closed and halLive and not na(or_e1)
     if (or_dir == 1 and low <= or_e1) or (or_dir == -1 and high >= or_e1)
         or_missed := true
-if runORB and or_dir != 0 and or_broke and not or_placed and not or_closed and orbWin and not flatten and (not noDbl or not or_oppBroke) and orbSz1 >= 1 and not halLive and not or_missed
+// `not halLive` is the Halyard engine's own flag, and this engine runs BELOW it only for the seat variable -
+// halLive itself is current, but orbibLive (what Halyard reads) is a chart bar stale. strategy.position_size
+// is the broker's own answer and cannot be stale, so it is checked too: no ORB order is placed while ANY
+// position is open, whoever it belongs to. In Indicator mode there is no position, so the flags still decide.
+if runORB and or_dir != 0 and or_broke and not or_placed and not or_closed and orbWin and not flatten and (not noDbl or not or_oppBroke) and orbSz1 >= 1 and not halLive and not or_missed and (not ordersOn or strategy.position_size == 0)
     if ordersOn
         if or_dir == 1
             strategy.entry("ORL", strategy.long, qty = orbSz1, limit = or_e1)
@@ -1201,7 +1225,8 @@ ibWin = inSess and not dayHalt and ibDayOK and tod <= (ibCutH*60 + ibCutM)
 if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and ibHeld and not na(ib_e1)
     if (ib_dir == 1 and low <= ib_e1) or (ib_dir == -1 and high >= ib_e1)
         ib_missed := true
-if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and ibWin and not flatten and (not noDbl or not ib_oppBroke) and ibSz1 >= 1 and not ibHeld and not ib_missed
+// Same broker-truth check as the ORB placement above: never place into an already-open position.
+if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and ibWin and not flatten and (not noDbl or not ib_oppBroke) and ibSz1 >= 1 and not ibHeld and not ib_missed and (not ordersOn or strategy.position_size == 0)
     if ordersOn
         if ib_dir == 1
             strategy.entry("IBL", strategy.long, qty = ibSz1, limit = ib_e1)
@@ -1361,52 +1386,24 @@ if ibP_act
         ibP_act := false
 
 // ---------------------------------------------------------------- EOD flatten + daily loss limit
-// The 15:30 flatten closes the ORB/IB entries BY ID. Halyard has its own 13:30/14:30 ET boundary and closes its
-// own entries there, so in normal operation neither engine flattens the other's trade.
+// THE FLATTEN CLOSES THE POSITION, NOT A LIST OF IDS. The old per-id version closed ORL/ORL2/ORS/ORS2 and
+// IBL/IBL2/IBS/IBS2 - the four HALYARD ids were not on that list at all, so a Halyard trade still open at
+// 15:30 was closed by nothing (its own 13:30/14:30 flat is gated on the engine's internal tracking, and the
+// daily max loss ships OFF). Pine also NETS the position: if an ORB limit fills while a Halyard trade is live
+// - which the one-chart-bar lag on the seat flag allows - the ORB order reduces the Halyard entry instead of
+// opening its own, and strategy.close("ORL") then has no trade to close while the Halyard remainder runs on.
+// Both of those end the same way: a position still open at the flatten. close_all cannot miss either.
 //
-// ORDER MATTERS, and this is what makes the flatten actually flatten:
-//   1. CANCEL the stop/target exit orders first. While one of those is live it has the whole position
-//      reserved, and the market close that comes after it can be dropped for want of unreserved quantity -
-//      a trade that then sits open straight through 15:30 and into the next session.
-//   2. CANCEL any entry limit still resting, so nothing can fill after the flatten.
-//   3. CLOSE each entry id.
+// ORDER MATTERS: cancel FIRST. A resting entry limit could still fill after the close, and a live exit order
+// holds the position quantity reserved, which can leave the market close with nothing to close.
+//
+// COST: one "EOD flat" exit in the Strategy Tester instead of a per-setup comment. Worth it for a flat that
+// cannot be missed. Halyard's day ends at 13:30 / 14:30 ET, so no legitimate Halyard trade exists at 15:30
+// and closing one here only ever unwinds a trade that should already have been flat.
 if ordersOn and flatten
-    strategy.cancel("ORLx")
-    strategy.cancel("ORL2x")
-    strategy.cancel("ORSx")
-    strategy.cancel("ORS2x")
-    strategy.cancel("IBLx")
-    strategy.cancel("IBL2x")
-    strategy.cancel("IBSx")
-    strategy.cancel("IBS2x")
-    strategy.cancel("ORL")
-    strategy.cancel("ORL2")
-    strategy.cancel("ORS")
-    strategy.cancel("ORS2")
-    strategy.cancel("IBL")
-    strategy.cancel("IBL2")
-    strategy.cancel("IBS")
-    strategy.cancel("IBS2")
-    strategy.close("ORL",  comment = "EOD flat")
-    strategy.close("ORL2", comment = "EOD flat")
-    strategy.close("ORS",  comment = "EOD flat")
-    strategy.close("ORS2", comment = "EOD flat")
-    strategy.close("IBL",  comment = "EOD flat")
-    strategy.close("IBL2", comment = "EOD flat")
-    strategy.close("IBS",  comment = "EOD flat")
-    strategy.close("IBS2", comment = "EOD flat")
-
-// THE BACKSTOP. Nothing may survive the flatten, whatever it belongs to. It is read one bar LATER than the
-// closes above so it can never duplicate them: if the position is still open on the second flatten bar, the
-// per-id closes did not do their job and this closes everything at market.
-// It is also the only thing that catches a STRANDED HALYARD TRADE. Halyard's day ends at 13:30 / 14:30 ET, so
-// by 15:30 no legitimate Halyard position exists; one that is still open got there because its own day flat
-// was missed - a holiday early close, a data gap, or its internal tracking having gone flat while the broker
-// position did not - and no other rule in this file would ever close it (the daily max loss ships OFF).
-// flatten[1] needs no nz(): on the very first bar it is na, and an na inside an `if` condition is false.
-if ordersOn and flatten and flatten[1] and strategy.position_size != 0
     strategy.cancel_all()
-    strategy.close_all(comment = "EOD flat (backstop)")
+    strategy.close_all(comment = "EOD flat")
+
 // The daily max loss is the ONE rule that reaches across setups: it is an account circuit breaker, so it closes
 // everything that is open, Halyard included, and cancels every resting order.
 if dayHalt
