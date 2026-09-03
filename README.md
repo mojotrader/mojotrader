@@ -70,6 +70,28 @@ Two consequences worth knowing:
 Untick the input to get the original behaviour back (Halyard flat at 13:30/14:30
 ET, ORB/IB flat at 15:30 ET).
 
+**A Halyard break landing on an open ORB/IB trade.**
+With trades held to their target or stop, the ORB/IB trade still sitting there
+when Halyard breaks is usually one carried over from yesterday. The two cases are
+opposites, and the `When a Halyard break lands on an OPEN ORB/IB trade` input
+(Halyard → Trade management) picks the behaviour. The default,
+`Flatten opposite, stack same`:
+
+- **Break the other way** → the ORB/IB trade is closed at market and Halyard
+  takes its place. There's no third option: netted into one position the two
+  would only cancel each other down to a remainder that neither engine owns and
+  neither engine's stop covers.
+- **Break the same way** → Halyard is added on top and the ORB/IB trade is left
+  completely alone. They're separate entry ids with separate exit orders, so each
+  keeps its own stop and target and closes on its own terms.
+- **Either way**, an ORB/IB entry limit still *resting* unfilled is forfeited the
+  moment a Halyard trade opens. That order was placed while the seat looked free;
+  left out there it could fill behind the Halyard trade, or silently reverse it.
+
+The other two modes are `Stack same only` (an opposite break is skipped rather
+than closing a working trade) and `Skip the Halyard break`, the original
+one-trade-at-a-time rule.
+
 **Sizing: a progressive equity ladder (all three setups).**
 All three ride one ladder — the same rung, read off the same account equity —
 and differ only in the counts they put on it. Contracts climb in $6,000 rungs off
