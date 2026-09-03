@@ -55,23 +55,25 @@
 //   an order from one setup can end up reducing another setup's entry. EVERY close cancels first - a resting
 //   limit can still fill behind a close, and a live exit order holds the position quantity reserved.
 //
-// PROGRESSIVE SIZING (ORB / IB) - the default sizing mode
-//   Contracts follow the account up and down in fixed $6,000 rungs, measured from the starting capital:
+// PROGRESSIVE SIZING (ALL THREE SETUPS) - the default sizing mode
+//   Contracts follow the account up and down in fixed $6,000 rungs, measured from the starting capital. ORB, IB
+//   and Halyard share ONE ladder - the same rung, read off the same account equity - and differ only in the
+//   counts they put on it:
 //
-//     equity            ORB (first / add)     IB (first / add)
-//     -----------------------------------------------------------
-//     under $30,000           1 / 1                2 / 2      <- the floor, at any drawdown
-//     $30,000  base           1 / 1                2 / 2
-//     $36,000  +1 rung        2 / 2                4 / 4
-//     $42,000  +2 rungs       3 / 3                6 / 6
-//     $48,000  +3 rungs       4 / 4                8 / 8
+//     equity            ORB (first / add)     IB (first / add)     HALYARD
+//     ------------------------------------------------------------------------
+//     under $30,000           1 / 1                2 / 2               4      <- the floor, at any drawdown
+//     $30,000  base           1 / 1                2 / 2               4
+//     $36,000  +1 rung        2 / 2                4 / 4               8
+//     $42,000  +2 rungs       3 / 3                6 / 6              12
+//     $48,000  +3 rungs       4 / 4                8 / 8              16
 //
 //   And back down the same ladder: give $6,000 back and the size drops a rung, so $42k -> $36k takes ORB from
-//   3 to 2 and IB from 6 to 4. The rung is a FULL step in both directions - $35,999 is still the base size and
-//   so is $29,999.
+//   3 to 2, IB from 6 to 4 and Halyard from 12 to 8. The rung is a FULL step in both directions - $35,999 is
+//   still the base size and so is $29,999.
 //
-//   THE LADDER NEVER GOES BELOW THE BASE SIZE. Under $30,000 it stays at ORB 1/1 and IB 2/2 however deep the
-//   drawdown runs: the arithmetic would take a rung down to 0 contracts at $24,000 and negative below that, and
+//   THE LADDER NEVER GOES BELOW THE BASE SIZE. Under $30,000 it stays at ORB 1/1, IB 2/2 and Halyard 4 however
+//   deep the drawdown runs: the arithmetic would take a rung down to 0 contracts at $24,000 and negative below that, and
 //   the two MINIMUM inputs clamp it at the base counts instead. That floor is the intended rule, not a
 //   coincidence of the defaults - the ladder scales a winning account up and hands back the same steps on the
 //   way down, but it never sizes below where it started and it never stops trading on its own.
@@ -79,8 +81,11 @@
 //
 //   The rung is read from CLOSED equity (starting capital + net profit), not from the floating value of an open
 //   trade, so a trade swinging in and out of profit cannot change the size of the setup being armed beside it.
-//   Size is fixed when a setup ARMS - at 09:45 for ORB, 10:30 for IB - and does not move after that.
-//   Halyard is NOT on this ladder: it has its own sizing block (fixed 4 contracts as shipped).
+//   Size is fixed when a setup ARMS - 09:45 for ORB, 10:30 for IB, the breakout candle's close for Halyard -
+//   and does not move after that.
+//   THE RUNG SIZE AND BASE EQUITY LIVE IN THE ORB/IB GROUP and are read by all three, because they describe one
+//   account. Each setup keeps its own base count, per-rung count and floor: ORB and IB in that same group,
+//   Halyard in "Halyard - Position sizing".
 //
 // RISK/REWARD BOXES: all three setups draw the SAME box - a green reward box from the entry to the target, a
 //   red risk box from the entry to the stop, a coloured border per setup (orange ORB, teal IB, fuchsia
@@ -144,7 +149,7 @@ ibFri     = input.bool(true, "IB Friday",    group = gDayI)
 // Either way the four entries are sized independently: ORB first, ORB average-down, IB first, IB average-down,
 // so the add can be bigger, smaller or the same as the entry it doubles up on.
 // Halyard has its own sizing block further down - it is a different setup with a different stop.
-gRisk       = "Risk sizing - ORB / IB"
+gRisk       = "Risk sizing - ORB / IB (the equity ladder here is shared with Halyard)"
 mFixed      = input.bool(true,  "1) Fixed contract size", group = gRisk,
      tooltip = "MODE 1 (default). Trade exactly the four contract counts below - no risk maths at all. If both modes are ticked this one wins; if neither is ticked this one is used.")
 orbQty1In   = input.float(1, "   ORB contracts - FIRST entry",    minval = 1, step = 1, group = gRisk,
@@ -229,10 +234,21 @@ progIb2  = f_prog(progIbQ2,  progIbAdd,  progIbMin)
 
 // ---------------------------------------------------------------- Halyard - Position sizing
 gHPS          = "Halyard - Position sizing"
-halUseRiskSz  = input.bool(false, "Use $ Risk Position Sizing", group = gHPS, tooltip = "OFF by default: Halyard trades the fixed contract count below and the Risk Per Trade ($) figure is not read at all. Tick it to size from the dollar risk instead.")
-halRiskUSD    = input.float(535, "Risk Per Trade ($)", minval = 0, group = gHPS, tooltip = "UNREAD while $ Risk Position Sizing is off.")
-halQtyFixed   = input.int(4, "Contracts (If Risk Sizing Off)", minval = 1, group = gHPS, tooltip = "The live setting, since $ Risk Position Sizing ships OFF.")
-halMaxQty     = input.int(1000, "Max Contracts", minval = 1, group = gHPS, tooltip = "Hard cap on the risk-sized quantity.")
+halUseProg    = input.bool(true, "Use progressive contracts (equity ladder)", group = gHPS,
+     tooltip = "ON by default, and it OVERRIDES both of the settings below. Halyard rides the same equity ladder as ORB and IB: 4 contracts at the base account, plus 4 more for every full rung of profit above it, and 4 fewer for every full rung given back - $30k = 4, $36k = 8, $42k = 12, $48k = 16.\n\nTHE RUNG AND THE BASE EQUITY ARE SHARED with ORB and IB and are set in the 'Risk sizing - ORB / IB' group ($6,000 a rung off the starting capital as shipped), because they describe ONE account. Only the three counts below are Halyard's own.\n\nUntick it to go back to the fixed contract count or the $ risk sizing.")
+halProgQty    = input.float(4, "   Halyard contracts at base equity", minval = 0, step = 1, group = gHPS,
+     tooltip = "The bottom rung: contracts Halyard trades while the account is at its starting size.")
+halProgAdd    = input.float(4, "   Halyard contracts added per rung", minval = 0, step = 1, group = gHPS,
+     tooltip = "Added for every full rung of profit above the base equity, and taken off again for every full rung below it.")
+halProgMin    = input.float(4, "   Halyard minimum contracts (the floor below base equity)", minval = 0, step = 1, group = gHPS,
+     tooltip = "The floor the Halyard ladder cannot go under, shipped at the base size. The ladder steps DOWN normally while it is above the base ($42k -> $36k takes Halyard from 12 to 8), and once it reaches the base it STAYS at 4 however far equity falls below it. Set 0 only if you want Halyard to stop trading in a deep drawdown.")
+halUseRiskSz  = input.bool(false, "Use $ Risk Position Sizing", group = gHPS, tooltip = "UNREAD while the progressive ladder above is ticked. Otherwise: OFF means Halyard trades the fixed contract count below and the Risk Per Trade ($) figure is not read at all; ON sizes from the dollar risk instead.")
+halRiskUSD    = input.float(535, "Risk Per Trade ($)", minval = 0, group = gHPS, tooltip = "UNREAD unless the progressive ladder is off AND $ Risk Position Sizing is on.")
+halQtyFixed   = input.int(4, "Contracts (If Risk Sizing Off)", minval = 1, group = gHPS, tooltip = "UNREAD while the progressive ladder is ticked - it is the fallback for a flat, unladdered size.")
+halMaxQty     = input.int(1000, "Max Contracts", minval = 1, group = gHPS, tooltip = "Hard cap on the quantity, whichever mode produced it. The shared 'Max contracts per unit' cap in the ORB/IB group applies to the ladder as well, so the tighter of the two wins.")
+
+// Halyard's rung, off the SHARED ladder (progLevel / f_prog are defined with the ORB/IB sizing block above).
+progHal       = f_prog(halProgQty, halProgAdd, halProgMin)
 
 // ---------------------------------------------------------------- Halyard - Trade management
 // Both R:R inputs are exposed, not just the first: the reverse one is UNREAD while the toggle is off but goes
@@ -634,9 +650,10 @@ f_halShortTP(entryPx, stopPx, rr) =>
     halTpType == "Risk:Reward" ? entryPx - (stopPx - entryPx) * rr : halTpType == "Fixed Ticks" ? entryPx - halTpTicks * syminfo.mintick : entryPx - halAtrVal * halAtrTpMult
 
 // Quantity is auto-calculated from: risk$ / (abs(entry - stop) * point value of the symbol)
+// Order of precedence: the progressive ladder wins, then $ risk sizing, then the flat contract count.
 f_halQty(_entry, _sl) =>
     riskPerContract = math.abs(_entry - _sl) * syminfo.pointvalue
-    q = halUseRiskSz ? math.max(math.floor(halRiskUSD / (riskPerContract > 0 ? riskPerContract : syminfo.mintick * syminfo.pointvalue)), 1) : halQtyFixed
+    q = halUseProg ? progHal : halUseRiskSz ? math.max(math.floor(halRiskUSD / (riskPerContract > 0 ? riskPerContract : syminfo.mintick * syminfo.pointvalue)), 1) : halQtyFixed
     math.min(q, halMaxQty)
 
 // ---------------------------------------------------------------- day / direction grid
@@ -1831,9 +1848,17 @@ if showInfo and barstate.islast
          text_color = holdToTPSL ? color.lime : color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 16, holdToTPSL ? "  -> use an EXTENDED-HOURS chart or overnight exits cannot fill" : "Toggle Run HAL / ORB / IB + weekdays to isolate results",
          text_color = holdToTPSL ? color.orange : color.aqua, text_size = size.small, text_halign = text.align_left)
-    ladderTxt = rmProg ? " rung " + (progLevel >= 0 ? "+" : "") + str.tostring(progLevel) + " @ $" + str.tostring(progEq, "#") +
-         " -> ORB " + str.tostring(progOrb1, "#.#") + "/" + str.tostring(progOrb2, "#.#") +
-         ", IB " + str.tostring(progIb1, "#.#") + "/" + str.tostring(progIb2, "#.#") : sizeByRisk ? " (per entry, fixed capital)" : ""
+    // The live rung and the contracts it buys each setup. ORB/IB and Halyard are laddered by separate switches,
+    // so each is reported only when its own switch is on.
+    ladderTxt = ""
+    if rmProg or halUseProg
+        ladderTxt := " rung " + (progLevel >= 0 ? "+" : "") + str.tostring(progLevel) + " @ $" + str.tostring(progEq, "#")
+        if rmProg
+            ladderTxt := ladderTxt + " -> ORB " + str.tostring(progOrb1, "#.#") + "/" + str.tostring(progOrb2, "#.#") + ", IB " + str.tostring(progIb1, "#.#") + "/" + str.tostring(progIb2, "#.#")
+        if halUseProg
+            ladderTxt := ladderTxt + (rmProg ? ", " : " -> ") + "HAL " + str.tostring(progHal, "#.#")
+    else if sizeByRisk
+        ladderTxt := " (per entry, fixed capital)"
     table.cell(info, 0, 17, modeTxt + ladderTxt + (maxDayLoss > 0 ? "  | day stop $" + str.tostring(maxDayLoss, "#") + (dayHalt ? " - HIT" : "") : ""), text_color = dayHalt ? color.red : color.yellow, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 18, brkAlerts ? "Break alerts: ON - manual notifications, no broker automation" : "Break alerts: off",
          text_color = brkAlerts ? color.lime : color.gray, text_size = size.small, text_halign = text.align_left)

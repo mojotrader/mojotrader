@@ -70,26 +70,27 @@ Two consequences worth knowing:
 Untick the input to get the original behaviour back (Halyard flat at 13:30/14:30
 ET, ORB/IB flat at 15:30 ET).
 
-**Sizing: a progressive equity ladder (ORB / IB).**
-Sizing mode 3, `Progressive contracts (equity ladder)`, ships on and overrides
-the fixed-contract and risk-$ modes. Contracts climb in $6,000 rungs off the
-account's starting capital ($30,000 as shipped, editable in Properties):
+**Sizing: a progressive equity ladder (all three setups).**
+All three ride one ladder — the same rung, read off the same account equity —
+and differ only in the counts they put on it. Contracts climb in $6,000 rungs off
+the account's starting capital ($30,000 as shipped, editable in Properties):
 
-| Equity | ORB (first / avg-down) | IB (first / avg-down) |
-|---|---|---|
-| below $30,000 | 1 / 1 | 2 / 2 |
-| $30,000 (base) | 1 / 1 | 2 / 2 |
-| $36,000 | 2 / 2 | 4 / 4 |
-| $42,000 | 3 / 3 | 6 / 6 |
-| $48,000 | 4 / 4 | 8 / 8 |
+| Equity | ORB (first / avg-down) | IB (first / avg-down) | Halyard |
+|---|---|---|---|
+| below $30,000 | 1 / 1 | 2 / 2 | 4 |
+| $30,000 (base) | 1 / 1 | 2 / 2 | 4 |
+| $36,000 | 2 / 2 | 4 / 4 | 8 |
+| $42,000 | 3 / 3 | 6 / 6 | 12 |
+| $48,000 | 4 / 4 | 8 / 8 | 16 |
 
 The ladder runs both ways — give $6,000 back and every unit drops a rung, so
-$42k → $36k takes ORB from 3 to 2 and IB from 6 to 4. A rung is a **full** step
-in each direction, so $35,999 is still base size and so is $29,999.
+$42k → $36k takes ORB from 3 to 2, IB from 6 to 4 and Halyard from 12 to 8. A
+rung is a **full** step in each direction, so $35,999 is still base size and so
+is $29,999.
 
-**It never sizes below the base.** Under $30,000 it stays at ORB 1/1 and IB 2/2
-however deep the drawdown runs — the arithmetic would reach 0 contracts at
-$24,000 and go negative below that, and the two minimum inputs clamp it at the
+**It never sizes below the base.** Under $30,000 it stays at ORB 1/1, IB 2/2 and
+Halyard 4 however deep the drawdown runs — the arithmetic would reach 0 contracts
+at $24,000 and go negative below that, and the minimum inputs clamp it at the
 base counts instead. So the ladder scales a winning account up, hands back the
 same steps on the way down, and never trades smaller than it started or stops on
 its own. (Set a minimum to 0 only if you *do* want that engine to switch off in a
@@ -98,6 +99,10 @@ deep drawdown.)
 The rung is read from **closed** equity (starting capital + net profit), not from
 an open trade's floating value, so a live trade swinging around cannot change the
 size of the setup being armed beside it. Size is locked when a setup arms — 09:45
-for ORB, 10:30 for IB. Halyard is not on this ladder; it keeps its own sizing
-block. Every step, the base counts, the per-rung counts, the minimums and an
-optional hard cap are inputs.
+for ORB, 10:30 for IB, the breakout candle's close for Halyard.
+
+The rung size and base equity are set once, in the `Risk sizing - ORB / IB`
+group, and read by all three because they describe one account. Each setup keeps
+its own base count, per-rung count and floor — ORB and IB in that same group,
+Halyard under `Halyard - Position sizing`, where its ladder switch overrides the
+fixed-contract and $-risk sizing it used to run on.
