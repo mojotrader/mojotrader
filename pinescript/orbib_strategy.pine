@@ -58,18 +58,24 @@
 // PROGRESSIVE SIZING (ORB / IB) - the default sizing mode
 //   Contracts follow the account up and down in fixed $6,000 rungs, measured from the starting capital:
 //
-//     equity          ORB (first / add)     IB (first / add)
-//     ---------------------------------------------------------
-//     $30,000  base         1 / 1                2 / 2
-//     $36,000  +1 rung      2 / 2                4 / 4
-//     $42,000  +2 rungs     3 / 3                6 / 6
-//     $48,000  +3 rungs     4 / 4                8 / 8
+//     equity            ORB (first / add)     IB (first / add)
+//     -----------------------------------------------------------
+//     under $30,000           1 / 1                2 / 2      <- the floor, at any drawdown
+//     $30,000  base           1 / 1                2 / 2
+//     $36,000  +1 rung        2 / 2                4 / 4
+//     $42,000  +2 rungs       3 / 3                6 / 6
+//     $48,000  +3 rungs       4 / 4                8 / 8
 //
 //   And back down the same ladder: give $6,000 back and the size drops a rung, so $42k -> $36k takes ORB from
 //   3 to 2 and IB from 6 to 4. The rung is a FULL step in both directions - $35,999 is still the base size and
-//   so is $29,999; only a complete $6,000 below the base ($24,000) steps down past it, where the two MINIMUM
-//   inputs decide what happens: they ship at the base size (ORB 1, IB 2), so by default the ladder never
-//   trades smaller than it started, and setting a minimum to 0 stops that engine trading instead.
+//   so is $29,999.
+//
+//   THE LADDER NEVER GOES BELOW THE BASE SIZE. Under $30,000 it stays at ORB 1/1 and IB 2/2 however deep the
+//   drawdown runs: the arithmetic would take a rung down to 0 contracts at $24,000 and negative below that, and
+//   the two MINIMUM inputs clamp it at the base counts instead. That floor is the intended rule, not a
+//   coincidence of the defaults - the ladder scales a winning account up and hands back the same steps on the
+//   way down, but it never sizes below where it started and it never stops trading on its own.
+//   (Set a minimum to 0 only if you DO want that engine to stop once equity is a full rung below the base.)
 //
 //   The rung is read from CLOSED equity (starting capital + net profit), not from the floating value of an open
 //   trade, so a trade swinging in and out of profit cannot change the size of the setup being armed beside it.
@@ -171,16 +177,16 @@ progOrbQ2   = input.float(1, "   ORB contracts at base - AVG-DOWN entry", minval
      tooltip = "MODE 3. Contracts on the ORB average-down unit at base equity.")
 progOrbAdd  = input.float(1, "   ORB contracts added per rung (each unit)", minval = 0, step = 1, group = gRisk,
      tooltip = "MODE 3. Added to EACH ORB unit for every full rung above the base equity, and taken off again for every full rung below it.")
-progOrbMin  = input.float(1, "   ORB minimum contracts (0 = stop trading)", minval = 0, step = 1, group = gRisk,
-     tooltip = "MODE 3. The floor the ORB ladder cannot go under. It ships at the base size, so the ladder steps DOWN normally while it is above base (a $42k -> $36k give-back takes ORB from 3 to 2) but never trades smaller than it started. Set 0 to let it go to zero instead, which stops the ORB engine taking trades once equity is a full rung below the base.")
+progOrbMin  = input.float(1, "   ORB minimum contracts (the floor below base equity)", minval = 0, step = 1, group = gRisk,
+     tooltip = "MODE 3. The floor the ORB ladder cannot go under, and it ships at the base size - 1 contract on each unit, so 1 and 1. The ladder steps DOWN normally while it is above the base ($42k -> $36k takes ORB from 3 to 2), and once it reaches the base it STAYS at 1 and 1 no matter how far equity falls below $30,000. Leave it at 1 unless you actively want the ORB engine to stop trading in a deep drawdown - 0 does that, switching it off once equity is a full rung below the base.")
 progIbQ1    = input.float(2, "   IB contracts at base - FIRST entry",     minval = 0, step = 1, group = gRisk,
      tooltip = "MODE 3. Contracts on the first IB unit at base equity.")
 progIbQ2    = input.float(2, "   IB contracts at base - AVG-DOWN entry",  minval = 0, step = 1, group = gRisk,
      tooltip = "MODE 3. Contracts on the IB average-down unit at base equity.")
 progIbAdd   = input.float(2, "   IB contracts added per rung (each unit)", minval = 0, step = 1, group = gRisk,
      tooltip = "MODE 3. Added to EACH IB unit for every full rung above the base equity, and taken off again for every full rung below it.")
-progIbMin   = input.float(2, "   IB minimum contracts (0 = stop trading)", minval = 0, step = 1, group = gRisk,
-     tooltip = "MODE 3. The floor the IB ladder cannot go under - same rule as the ORB minimum above.")
+progIbMin   = input.float(2, "   IB minimum contracts (the floor below base equity)", minval = 0, step = 1, group = gRisk,
+     tooltip = "MODE 3. The floor the IB ladder cannot go under - same rule as the ORB minimum above, at the IB base size: 2 contracts on each unit, so 2 and 2, held however far equity falls below $30,000.")
 progMaxQty  = input.float(0, "   Max contracts per unit (0 = no cap)", minval = 0, step = 1, group = gRisk,
      tooltip = "MODE 3. A hard ceiling on any one unit, applied after the ladder. 0 (default) leaves the ladder uncapped, so a long winning backtest keeps compounding the size - set a number here if you want the results to stay inside a size you could actually fill.")
 maxDayLoss  = input.float(0, "Daily max loss $ (0 = off)", minval = 0, step = 25, group = gRisk,
@@ -208,6 +214,9 @@ progRaw    = progStep > 0 ? (progEq - progBaseEq) / progStep : 0.0
 progLevel  = progRaw >= 0 ? math.floor(progRaw) : math.ceil(progRaw)
 
 // base + rungs, floored at the minimum and capped if a cap is set. Returns contracts for ONE unit.
+// THE FLOOR IS WHAT HOLDS THE SIZE UNDER A LOSING ACCOUNT: at rung -1 the arithmetic gives ORB 1 + (-1 * 1) = 0
+// and IB 2 + (-1 * 2) = 0, and further rungs down go negative, so without math.max the engines would size
+// themselves out of the market. With the shipped minimums they sit at ORB 1/1 and IB 2/2 at any drawdown.
 f_prog(float baseQty, float addQty, float minQty) =>
     q  = baseQty + progLevel * addQty
     qm = math.max(q, minQty)

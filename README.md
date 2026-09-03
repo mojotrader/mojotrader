@@ -77,6 +77,7 @@ account's starting capital ($30,000 as shipped, editable in Properties):
 
 | Equity | ORB (first / avg-down) | IB (first / avg-down) |
 |---|---|---|
+| below $30,000 | 1 / 1 | 2 / 2 |
 | $30,000 (base) | 1 / 1 | 2 / 2 |
 | $36,000 | 2 / 2 | 4 / 4 |
 | $42,000 | 3 / 3 | 6 / 6 |
@@ -84,11 +85,15 @@ account's starting capital ($30,000 as shipped, editable in Properties):
 
 The ladder runs both ways — give $6,000 back and every unit drops a rung, so
 $42k → $36k takes ORB from 3 to 2 and IB from 6 to 4. A rung is a **full** step
-in each direction, so $35,999 is still base size and so is $29,999; only a
-complete $6,000 below the base ($24,000) steps past it, and there the two
-minimum inputs decide what happens. They ship at the base size (ORB 1, IB 2), so
-by default the ladder never trades smaller than it started; set a minimum to 0
-to stop that engine trading instead.
+in each direction, so $35,999 is still base size and so is $29,999.
+
+**It never sizes below the base.** Under $30,000 it stays at ORB 1/1 and IB 2/2
+however deep the drawdown runs — the arithmetic would reach 0 contracts at
+$24,000 and go negative below that, and the two minimum inputs clamp it at the
+base counts instead. So the ladder scales a winning account up, hands back the
+same steps on the way down, and never trades smaller than it started or stops on
+its own. (Set a minimum to 0 only if you *do* want that engine to switch off in a
+deep drawdown.)
 
 The rung is read from **closed** equity (starting capital + net profit), not from
 an open trade's floating value, so a live trade swinging around cannot change the
