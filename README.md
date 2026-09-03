@@ -30,3 +30,42 @@ slower structure. Configurable under the *Higher-timeframe structure* group:
 
 The HTF engine is **non-repainting**: a higher-timeframe bar is only processed
 once it has fully closed.
+
+## Strategies
+
+### `pinescript/orbib_strategy.pine`
+**ORBIB** — three setups on one equity curve: HALYARD (a 15-minute opening-range
+break that builds its own 15m candles, so any chart timeframe from 1m to 15m
+gives identical levels), ORB (09:30–09:45 range) and IB (09:30–10:30 range),
+both entered on a fib pullback after the range breaks. Only one of the three can
+be in a trade at a time (Halyard > ORB > IB).
+
+**Exit: take profit or stop loss, nothing else.**
+The `Hold trades until TP or SL (no time-based exit)` input ships **ON**, and it
+switches off every clock-driven exit:
+
+- no 15:30 ET end-of-day flatten for ORB/IB,
+- no 13:30 / 14:30 ET day flat for Halyard,
+- no bar-count time stop.
+
+A filled trade runs until its target or its stop trades — through the evening,
+the Asian session, London, and into the next day if that is what it takes. The
+stop and target orders are kept live on every bar, overnight included.
+
+What is still on the clock is **entry** management only: an unfilled limit is
+cancelled at 15:30 ET so nothing rests overnight, and each engine's entry window
+is unchanged. The daily max-loss circuit breaker (off by default) still closes
+everything, carried trades included — it is a risk rule, not a clock.
+
+Two consequences worth knowing:
+
+1. **Run the chart with extended trading hours on.** The exits can only fill on
+   bars that exist; on a regular-hours chart an overnight trade sits untouched
+   until the next 09:30 ET open and fills on the gap.
+2. **An open trade owns its engine until it closes.** While an ORB trade is still
+   running, the ORB engine takes no new setup the next morning — same for IB and
+   Halyard. That is the existing one-trade-at-a-time rule, extended across the
+   date change.
+
+Untick the input to get the original behaviour back (Halyard flat at 13:30/14:30
+ET, ORB/IB flat at 15:30 ET).
