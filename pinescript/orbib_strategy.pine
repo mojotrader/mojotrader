@@ -79,10 +79,23 @@
 //   way down, but it never sizes below where it started and it never stops trading on its own.
 //   (Set a minimum to 0 only if you DO want that engine to stop once equity is a full rung below the base.)
 //
-//   The rung is read from CLOSED equity (starting capital + net profit), not from the floating value of an open
-//   trade, so a trade swinging in and out of profit cannot change the size of the setup being armed beside it.
-//   Size is fixed when a setup ARMS - 09:45 for ORB, 10:30 for IB, the breakout candle's close for Halyard -
-//   and does not move after that.
+//   THE RUNG IS PER TRADE, NOT PER DAY. It is read from CLOSED equity (starting capital + net profit), which
+//   moves the moment ANY trade closes, and every order is sized at the instant it is PLACED - not when its
+//   setup armed hours earlier. So a result from one setup resizes the next order from any other:
+//     - Halyard stops out at 10:20 -> the ORB order placed at 10:25 is a rung smaller.
+//     - ORB takes its target at 11:15 -> the IB order placed at 11:20 is a rung bigger.
+//     - and three winners inside one week move all three setups up together, on the same rung.
+//   Floating P&L is deliberately NOT counted (there is an input if you want it): an open trade swinging in and
+//   out of profit would otherwise keep changing the size of the order being placed beside it.
+//
+//   THE COUNT IS FIXED WHEN THE ORDER IS PLACED, not when it fills. For ORB and IB that leaves a gap: their
+//   limit can rest for a while before price comes back to it. The account is FLAT during that wait - that is a
+//   condition of placing at all - so the only thing that can move the rung inside it is a Halyard trade opening
+//   AND closing while the limit waits, and Halyard's one break a day is normally hours earlier. Halyard itself
+//   has no gap at all: it is a market order, so placed and filled are the same instant.
+//
+//   Every entry is stamped with its rung ("ORL r+2", "HAL-L r-1") so the Strategy Tester's trade list shows the
+//   size ladder working, trade by trade, instead of only the contract count.
 //   THE RUNG SIZE AND BASE EQUITY LIVE IN THE ORB/IB GROUP and are read by all three, because they describe one
 //   account. Each setup keeps its own base count, per-rung count and floor: ORB and IB in that same group,
 //   Halyard in "Halyard - Position sizing".
@@ -249,6 +262,12 @@ halMaxQty     = input.int(1000, "Max Contracts", minval = 1, group = gHPS, toolt
 
 // Halyard's rung, off the SHARED ladder (progLevel / f_prog are defined with the ORB/IB sizing block above).
 progHal       = f_prog(halProgQty, halProgAdd, halProgMin)
+
+// A short "r+2" tag stamped on every entry, so the Strategy Tester's trade list shows which rung each trade was
+// taken on. Empty for a setup whose ladder switch is off, which leaves that setup's id showing on its own.
+progTag       = " r" + (progLevel >= 0 ? "+" : "") + str.tostring(progLevel)
+rungTag       = rmProg ? progTag : ""
+halRungTag    = halUseProg ? progTag : ""
 
 // ---------------------------------------------------------------- Halyard - Trade management
 // Both R:R inputs are exposed, not just the first: the reverse one is UNREAD while the toggle is off but goes
@@ -744,7 +763,7 @@ if halEnterL
     halEntered := true
     halEntDir  := 1
     if ordersOn
-        strategy.entry("HAL-L", strategy.long, qty = q)
+        strategy.entry("HAL-L", strategy.long, qty = q, comment = "HAL-L" + halRungTag)
         strategy.exit("HAL-Lx", from_entry = "HAL-L", stop = sl, limit = tp)
 
 halEnterS = halBrkDn and halShortOK and halDayOK and halTrendOK and halSeatFree and halTrades < halMaxTrades and halTrDir == 0 and halState == 0
@@ -765,7 +784,7 @@ if halEnterS
     halEntered := true
     halEntDir  := -1
     if ordersOn
-        strategy.entry("HAL-S", strategy.short, qty = q)
+        strategy.entry("HAL-S", strategy.short, qty = q, comment = "HAL-S" + halRungTag)
         strategy.exit("HAL-Sx", from_entry = "HAL-S", stop = sl, limit = tp)
 
 // --- Reversal trade (only if the FIRST trade closed at a LOSS) ---
@@ -793,7 +812,7 @@ if halRevL
     halEntered := true
     halEntDir  := 1
     if ordersOn
-        strategy.entry("HAL-RL", strategy.long, qty = q)
+        strategy.entry("HAL-RL", strategy.long, qty = q, comment = "HAL-RL" + halRungTag)
         strategy.exit("HAL-RLx", from_entry = "HAL-RL", stop = sl, limit = tp)
 
 halRevS = halRevOn and runHAL and halNewBar and halState == 2 and halFirstDir == 1 and halShortOK and halDayOK and halSeatFree and halTrades < halMaxTrades and halTrDir == 0 and halLevels and hal15C < halRL
@@ -813,7 +832,7 @@ if halRevS
     halEntered := true
     halEntDir  := -1
     if ordersOn
-        strategy.entry("HAL-RS", strategy.short, qty = q)
+        strategy.entry("HAL-RS", strategy.short, qty = q, comment = "HAL-RS" + halRungTag)
         strategy.exit("HAL-RSx", from_entry = "HAL-RS", stop = sl, limit = tp)
 
 // ---------------------------------------------------------------- Halyard session roll
@@ -1097,11 +1116,8 @@ if or_rDone and not orbCarryDay and not na(or_rH) and or_rH > or_rL
         or_e1 := or_shallow ? or_rL + 0.25*or_rng : or_rL + 0.5*or_rng
         or_e2 := or_rL + 0.5*or_rng
         or_zstop := or_rH                     // the stop is ALWAYS the far side of the range
-    if or_dir != 0
-        // each unit is sized on its own budget and its own stop distance (the add sits closer to the stop)
-        // SIZE IS FIXED HERE, when the setup arms at 09:45, off the rung the account is on at that moment.
-        orbSz1 := rmProg ? progOrb1 : sizeByRisk ? f_size(orbRiskDlr1, math.abs(or_e1 - or_zstop)) : orbQty1
-        orbSz2 := rmProg ? progOrb2 : sizeByRisk ? f_size(orbRiskDlr2, math.abs(or_e2 - or_zstop)) : orbQty2
+    // NOTE the setup is NOT sized here. Arming only fixes the prices; the contract count is worked out at the
+    // moment the order actually goes in, further down, off the rung the account is standing on right then.
 or_useAdd = orbAvg and or_shallow and not na(or_e2)
 // break by selected type
 or_brk = orbBreak == "Wick (touch)" ? ((or_dir == 1 and high >= or_rH) or (or_dir == -1 and low <= or_rL)) : ((or_dir == 1 and close > or_rH) or (or_dir == -1 and close < or_rL))
@@ -1125,20 +1141,32 @@ orbWin = inSess and not dayHalt and orbDayOK and tod <= (orbCutH*60 + orbCutM) a
 if runORB and or_dir != 0 and or_broke and not or_placed and not or_closed and halLive and not na(or_e1)
     if (or_dir == 1 and low <= or_e1) or (or_dir == -1 and high >= or_e1)
         or_missed := true
+// SIZE IS DECIDED HERE, at the moment the order goes in - NOT back when the setup armed at 09:45. That is what
+// puts every trade on the rung the account is standing on when it is taken, so a result from ANY setup moves the
+// next order from ANY other: a Halyard stop-out at 10:20 shrinks the ORB order placed at 10:25, and an ORB
+// winner closing at 11:15 grows the IB order placed at 11:20. Each unit is still sized on its own budget and its
+// own stop distance in the $-risk mode (the add sits closer to the stop).
+// LIMIT OF THIS: the count is fixed when the order is PLACED, not when it fills. The account is flat while an
+// ORB/IB limit rests, so the only thing that can move the rung in between is a Halyard trade opening AND closing
+// inside that wait - and Halyard's one break a day is normally hours earlier.
+orbNow1 = rmProg ? progOrb1 : sizeByRisk ? f_size(orbRiskDlr1, math.abs(or_e1 - or_zstop)) : orbQty1
+orbNow2 = rmProg ? progOrb2 : sizeByRisk ? f_size(orbRiskDlr2, math.abs(or_e2 - or_zstop)) : orbQty2
 // `not halLive` is the Halyard engine's own flag, and this engine runs BELOW it only for the seat variable -
 // halLive itself is current, but orbibLive (what Halyard reads) is a chart bar stale. strategy.position_size
 // is the broker's own answer and cannot be stale, so it is checked too: no ORB order is placed while ANY
 // position is open, whoever it belongs to - including a trade carried in from a previous session.
-if runORB and or_dir != 0 and or_broke and not or_placed and not or_closed and orbWin and not flatten and (not noDbl or not or_oppBroke) and orbSz1 >= 1 and not halLive and not or_missed and (not ordersOn or strategy.position_size == 0)
+if runORB and or_dir != 0 and or_broke and not or_placed and not or_closed and orbWin and not flatten and (not noDbl or not or_oppBroke) and orbNow1 >= 1 and not halLive and not or_missed and (not ordersOn or strategy.position_size == 0)
+    orbSz1 := orbNow1                       // recorded for the R/R box, which is drawn on this same bar
+    orbSz2 := orbNow2
     if ordersOn
         if or_dir == 1
-            strategy.entry("ORL", strategy.long, qty = orbSz1, limit = or_e1)
+            strategy.entry("ORL", strategy.long, qty = orbSz1, limit = or_e1, comment = "ORL" + rungTag)
             if or_useAdd and orbSz2 >= 1
-                strategy.entry("ORL2", strategy.long, qty = orbSz2, limit = or_e2)
+                strategy.entry("ORL2", strategy.long, qty = orbSz2, limit = or_e2, comment = "ORL2" + rungTag)
         else
-            strategy.entry("ORS", strategy.short, qty = orbSz1, limit = or_e1)
+            strategy.entry("ORS", strategy.short, qty = orbSz1, limit = or_e1, comment = "ORS" + rungTag)
             if or_useAdd and orbSz2 >= 1
-                strategy.entry("ORS2", strategy.short, qty = orbSz2, limit = or_e2)
+                strategy.entry("ORS2", strategy.short, qty = orbSz2, limit = or_e2, comment = "ORS2" + rungTag)
     or_placed  := true                      // the setup is tracked in both modes; only the order is optional
     or_ordLive := true
 // FILLS ARE ONLY TRACKED WHILE THE ORDERS ARE ACTUALLY RESTING. Without the or_ordLive gate an overnight bar
@@ -1383,10 +1411,7 @@ if ib_rDone and not ibCarryDay and not na(ib_rH) and ib_rH > ib_rL
         ib_e1 := ib_shallow ? ib_rL + 0.25*ib_rng : ib_rL + 0.5*ib_rng
         ib_e2 := ib_rL + 0.5*ib_rng
         ib_zstop := ib_rH                     // the stop is ALWAYS the far side of the range
-    if ib_dir != 0
-        // same rung, read when the IB setup arms at 10:30
-        ibSz1 := rmProg ? progIb1 : sizeByRisk ? f_size(ibRiskDlr1, math.abs(ib_e1 - ib_zstop)) : ibQty1
-        ibSz2 := rmProg ? progIb2 : sizeByRisk ? f_size(ibRiskDlr2, math.abs(ib_e2 - ib_zstop)) : ibQty2
+    // Not sized here either - see the ORB engine above. Arming fixes the prices; the count is read at placement.
 // SEAT: an OPEN trade of ANY other setup keeps priority - the IB order is held back (either direction, so the
 // two can never stack risk or hedge each other). The IB is not cancelled, only delayed: the moment the seat
 // frees the IB limit goes in, provided price has NOT already traded through the IB entry level while it was
@@ -1407,17 +1432,23 @@ ibWin = inSess and not dayHalt and ibDayOK and tod <= (ibCutH*60 + ibCutM)
 if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and ibHeld and not na(ib_e1)
     if (ib_dir == 1 and low <= ib_e1) or (ib_dir == -1 and high >= ib_e1)
         ib_missed := true
+// Sized at placement off the live rung, exactly like the ORB engine above - so an ORB trade that closed at 11:15
+// has already moved the count on the IB order that goes in at 11:20.
+ibNow1 = rmProg ? progIb1 : sizeByRisk ? f_size(ibRiskDlr1, math.abs(ib_e1 - ib_zstop)) : ibQty1
+ibNow2 = rmProg ? progIb2 : sizeByRisk ? f_size(ibRiskDlr2, math.abs(ib_e2 - ib_zstop)) : ibQty2
 // Same broker-truth check as the ORB placement above: never place into an already-open position.
-if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and ibWin and not flatten and (not noDbl or not ib_oppBroke) and ibSz1 >= 1 and not ibHeld and not ib_missed and (not ordersOn or strategy.position_size == 0)
+if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and ibWin and not flatten and (not noDbl or not ib_oppBroke) and ibNow1 >= 1 and not ibHeld and not ib_missed and (not ordersOn or strategy.position_size == 0)
+    ibSz1 := ibNow1                         // recorded for the R/R box, which is drawn on this same bar
+    ibSz2 := ibNow2
     if ordersOn
         if ib_dir == 1
-            strategy.entry("IBL", strategy.long, qty = ibSz1, limit = ib_e1)
+            strategy.entry("IBL", strategy.long, qty = ibSz1, limit = ib_e1, comment = "IBL" + rungTag)
             if ib_useAdd and ibSz2 >= 1
-                strategy.entry("IBL2", strategy.long, qty = ibSz2, limit = ib_e2)
+                strategy.entry("IBL2", strategy.long, qty = ibSz2, limit = ib_e2, comment = "IBL2" + rungTag)
         else
-            strategy.entry("IBS", strategy.short, qty = ibSz1, limit = ib_e1)
+            strategy.entry("IBS", strategy.short, qty = ibSz1, limit = ib_e1, comment = "IBS" + rungTag)
             if ib_useAdd and ibSz2 >= 1
-                strategy.entry("IBS2", strategy.short, qty = ibSz2, limit = ib_e2)
+                strategy.entry("IBS2", strategy.short, qty = ibSz2, limit = ib_e2, comment = "IBS2" + rungTag)
     ib_placed  := true
     ib_ordLive := true
 // fills are only tracked while the orders are actually resting - see the ORB engine for why

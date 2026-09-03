@@ -96,10 +96,27 @@ same steps on the way down, and never trades smaller than it started or stops on
 its own. (Set a minimum to 0 only if you *do* want that engine to switch off in a
 deep drawdown.)
 
-The rung is read from **closed** equity (starting capital + net profit), not from
-an open trade's floating value, so a live trade swinging around cannot change the
-size of the setup being armed beside it. Size is locked when a setup arms — 09:45
-for ORB, 10:30 for IB, the breakout candle's close for Halyard.
+**The rung is per trade, not per day.** It reads **closed** equity (starting
+capital + net profit), which moves the moment any trade closes, and every order is
+sized at the instant it is *placed* — not when its setup armed hours earlier. So a
+result from one setup resizes the next order from any other:
+
+- Halyard stops out at 10:20 → the ORB order placed at 10:25 is a rung smaller.
+- ORB takes its target at 11:15 → the IB order placed at 11:20 is a rung bigger.
+
+Floating P&L is deliberately not counted (there's an input if you want it), so an
+open trade swinging in and out of profit can't keep changing the size of the order
+being placed beside it.
+
+The count is fixed when the order is **placed**, not when it fills. For ORB and IB
+that leaves a gap, since their limit can rest a while before price returns to it —
+but the account is flat during that wait (a condition of placing at all), so the
+only thing that can move the rung inside it is a Halyard trade opening *and*
+closing while the limit waits. Halyard has no gap: it's a market order, so placed
+and filled are the same instant.
+
+Every entry is stamped with its rung (`ORL r+2`, `HAL-L r-1`), so the Strategy
+Tester's trade list shows the ladder working trade by trade.
 
 The rung size and base equity are set once, in the `Risk sizing - ORB / IB`
 group, and read by all three because they describe one account. Each setup keeps
