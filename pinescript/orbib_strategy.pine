@@ -55,6 +55,27 @@
 //   an order from one setup can end up reducing another setup's entry. EVERY close cancels first - a resting
 //   limit can still fill behind a close, and a live exit order holds the position quantity reserved.
 //
+// PROGRESSIVE SIZING (ORB / IB) - the default sizing mode
+//   Contracts follow the account up and down in fixed $6,000 rungs, measured from the starting capital:
+//
+//     equity          ORB (first / add)     IB (first / add)
+//     ---------------------------------------------------------
+//     $30,000  base         1 / 1                2 / 2
+//     $36,000  +1 rung      2 / 2                4 / 4
+//     $42,000  +2 rungs     3 / 3                6 / 6
+//     $48,000  +3 rungs     4 / 4                8 / 8
+//
+//   And back down the same ladder: give $6,000 back and the size drops a rung, so $42k -> $36k takes ORB from
+//   3 to 2 and IB from 6 to 4. The rung is a FULL step in both directions - $35,999 is still the base size and
+//   so is $29,999; only a complete $6,000 below the base ($24,000) steps down past it, where the two MINIMUM
+//   inputs decide what happens: they ship at the base size (ORB 1, IB 2), so by default the ladder never
+//   trades smaller than it started, and setting a minimum to 0 stops that engine trading instead.
+//
+//   The rung is read from CLOSED equity (starting capital + net profit), not from the floating value of an open
+//   trade, so a trade swinging in and out of profit cannot change the size of the setup being armed beside it.
+//   Size is fixed when a setup ARMS - at 09:45 for ORB, 10:30 for IB - and does not move after that.
+//   Halyard is NOT on this ladder: it has its own sizing block (fixed 4 contracts as shipped).
+//
 // RISK/REWARD BOXES: all three setups draw the SAME box - a green reward box from the entry to the target, a
 //   red risk box from the entry to the stop, a coloured border per setup (orange ORB, teal IB, fuchsia
 //   Halyard) and one label carrying contracts, $ risk, $ reward, the R multiple and the 1-contract numbers.
@@ -67,11 +88,11 @@
 //   - process_orders_on_close = true (Halyard needs the 15m close as its fill). ORB/IB exits are stops and
 //     limits, which fill intrabar either way; their entry limits become live at the close of the break bar
 //     instead of the next bar's open, which is what the engine's own fill tracking already assumed.
-//   - initial_capital 150000 - enough to carry both engines. Neither engine compounds: ORB/IB size from fixed
-//     dollar budgets or fixed contracts, Halyard from a fixed $ risk, so capital only affects the % figures.
+//   - initial_capital 30000 - the account the progressive ladder below is written for. CHANGE IT IN
+//     PROPERTIES AND THE LADDER FOLLOWS: its base rung defaults to whatever the initial capital is set to.
 strategy("ORBIB", overlay = true, pyramiding = 6,
      max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500,
-     initial_capital = 150000, margin_long = 0, margin_short = 0,
+     initial_capital = 30000, margin_long = 0, margin_short = 0,
      default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = true,
      commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
 
@@ -136,13 +157,66 @@ orbRiskDlr2 = input.float(150, "   ORB $ risk - AVG-DOWN entry",  minval = 1, st
      tooltip = "MODE 2. Dollars risked on the ORB average-down unit. Its stop is the same price but its entry is deeper, so the same dollars buy more contracts than the first entry - lower it if you do not want the add to dominate the setup.")
 ibRiskDlr1  = input.float(150, "   IB $ risk - FIRST entry",      minval = 1, step = 25, group = gRisk)
 ibRiskDlr2  = input.float(150, "   IB $ risk - AVG-DOWN entry",   minval = 1, step = 25, group = gRisk)
+mProg       = input.bool(true,  "3) Progressive contracts (equity ladder) - OVERRIDES modes 1 and 2", group = gRisk,
+     tooltip = "MODE 3, and the one this file ships with. Contracts climb a ladder as the account grows and come back down as it shrinks: start at the base counts below, then add the 'per rung' counts for every full step of profit above the base equity, and subtract them for every full step below it.\n\nAs shipped on a $30,000 account with $6,000 rungs: $30k = ORB 1/1 and IB 2/2, $36k = ORB 2/2 and IB 4/4, $42k = ORB 3/3 and IB 6/6 - and the same ladder in reverse on the way down.\n\nTicked, it wins over BOTH other modes. Untick it to go back to mode 1 or 2.")
+progStep    = input.float(6000, "   Equity per rung ($)", minval = 1, step = 500, group = gRisk,
+     tooltip = "MODE 3. How much the account has to gain before every unit is raised by its 'per rung' count - and how much it has to give back before they come down again. A rung is a FULL step in both directions: at $6,000 rungs off a $30,000 base, $35,999 is still base size and so is $29,999.")
+progBaseIn  = input.float(0, "   Base equity ($, 0 = use initial capital)", minval = 0, step = 1000, group = gRisk,
+     tooltip = "MODE 3. The equity the base contract counts belong to - the bottom rung of the ladder. 0 (the default) reads the strategy's own initial capital, which ships at $30,000 and is editable in the Properties tab, so the ladder follows whatever account size you backtest. Set a number here only if you want the ladder anchored somewhere other than your starting capital.")
+progUseOpen = input.bool(false, "   Count an open trade's profit in the rung", group = gRisk,
+     tooltip = "MODE 3. OFF (default): the rung is read from CLOSED equity - initial capital plus net profit of finished trades - so an open trade swinging around cannot change the size of the next setup. ON: floating profit counts too, which makes the size move while a trade is running.")
+progOrbQ1   = input.float(1, "   ORB contracts at base - FIRST entry",    minval = 0, step = 1, group = gRisk,
+     tooltip = "MODE 3. Contracts on the first ORB unit at base equity.")
+progOrbQ2   = input.float(1, "   ORB contracts at base - AVG-DOWN entry", minval = 0, step = 1, group = gRisk,
+     tooltip = "MODE 3. Contracts on the ORB average-down unit at base equity.")
+progOrbAdd  = input.float(1, "   ORB contracts added per rung (each unit)", minval = 0, step = 1, group = gRisk,
+     tooltip = "MODE 3. Added to EACH ORB unit for every full rung above the base equity, and taken off again for every full rung below it.")
+progOrbMin  = input.float(1, "   ORB minimum contracts (0 = stop trading)", minval = 0, step = 1, group = gRisk,
+     tooltip = "MODE 3. The floor the ORB ladder cannot go under. It ships at the base size, so the ladder steps DOWN normally while it is above base (a $42k -> $36k give-back takes ORB from 3 to 2) but never trades smaller than it started. Set 0 to let it go to zero instead, which stops the ORB engine taking trades once equity is a full rung below the base.")
+progIbQ1    = input.float(2, "   IB contracts at base - FIRST entry",     minval = 0, step = 1, group = gRisk,
+     tooltip = "MODE 3. Contracts on the first IB unit at base equity.")
+progIbQ2    = input.float(2, "   IB contracts at base - AVG-DOWN entry",  minval = 0, step = 1, group = gRisk,
+     tooltip = "MODE 3. Contracts on the IB average-down unit at base equity.")
+progIbAdd   = input.float(2, "   IB contracts added per rung (each unit)", minval = 0, step = 1, group = gRisk,
+     tooltip = "MODE 3. Added to EACH IB unit for every full rung above the base equity, and taken off again for every full rung below it.")
+progIbMin   = input.float(2, "   IB minimum contracts (0 = stop trading)", minval = 0, step = 1, group = gRisk,
+     tooltip = "MODE 3. The floor the IB ladder cannot go under - same rule as the ORB minimum above.")
+progMaxQty  = input.float(0, "   Max contracts per unit (0 = no cap)", minval = 0, step = 1, group = gRisk,
+     tooltip = "MODE 3. A hard ceiling on any one unit, applied after the ladder. 0 (default) leaves the ladder uncapped, so a long winning backtest keeps compounding the size - set a number here if you want the results to stay inside a size you could actually fill.")
 maxDayLoss  = input.float(0, "Daily max loss $ (0 = off)", minval = 0, step = 25, group = gRisk,
      tooltip = "A flat dollar stop for the whole day, counted from the equity at the 09:30 session open and including open floating P&L. The moment the day is down this much, EVERY open trade - Halyard and any trade carried over from a previous day included - is closed at market, every resting order is cancelled and no new setup is taken until the next session; the block latches. NOTE the baseline resets at 09:30 ET, so a carried trade is measured on TODAY'S movement, not on the P&L it already had. 0 turns it off. Needs the strategy engine, so it does nothing in Indicator mode.")
 
-// One mode only: fixed contracts wins if both are ticked, and is the fallback if neither is.
-rmFixed    = mFixed or not mDlr
-sizeByRisk = not rmFixed
-modeTxt    = rmFixed ? "Sizing: fixed contracts" : "Sizing: risk $ per entry"
+// ONE mode only, in this order: progressive wins if it is ticked; otherwise fixed contracts wins if both of the
+// other two are ticked, and is also the fallback if neither is.
+rmProg     = mProg
+rmFixed    = not rmProg and (mFixed or not mDlr)
+sizeByRisk = not rmProg and not rmFixed
+modeTxt    = rmProg ? "Sizing: progressive ladder" : rmFixed ? "Sizing: fixed contracts" : "Sizing: risk $ per entry"
+
+// ---------------------------------------------------------------- the progressive ladder (ORB / IB)
+// The rung this bar sits on. TRUNCATION TOWARD ZERO is the whole point of the two branches: floor() alone would
+// drop a rung the moment equity slipped one dollar under the base, while a rung UP needs a full step. Rounding
+// toward zero makes both directions symmetric - a full step of profit to climb, a full step of give-back to
+// drop - so +$5,999 and -$5,999 are both still the base size, and -$6,000 is the first rung down.
+progBaseEq = progBaseIn > 0 ? progBaseIn : strategy.initial_capital
+// CLOSED equity by default: initial capital plus the net profit of finished trades. strategy.equity would add
+// the floating P&L of whatever is open, which would move the size of a setup being armed beside a live trade.
+progEq     = progUseOpen ? strategy.equity : strategy.initial_capital + strategy.netprofit
+// IN INDICATOR MODE THE LADDER NEVER MOVES. Nothing is bought or sold there, so net profit stays 0 and the rung
+// stays at base - the boxes will always show the base contract counts. Read the sizes off the Strategy Tester.
+progRaw    = progStep > 0 ? (progEq - progBaseEq) / progStep : 0.0
+progLevel  = progRaw >= 0 ? math.floor(progRaw) : math.ceil(progRaw)
+
+// base + rungs, floored at the minimum and capped if a cap is set. Returns contracts for ONE unit.
+f_prog(float baseQty, float addQty, float minQty) =>
+    q  = baseQty + progLevel * addQty
+    qm = math.max(q, minQty)
+    progMaxQty > 0 ? math.min(qm, progMaxQty) : qm
+
+progOrb1 = f_prog(progOrbQ1, progOrbAdd, progOrbMin)
+progOrb2 = f_prog(progOrbQ2, progOrbAdd, progOrbMin)
+progIb1  = f_prog(progIbQ1,  progIbAdd,  progIbMin)
+progIb2  = f_prog(progIbQ2,  progIbAdd,  progIbMin)
 
 // ---------------------------------------------------------------- Halyard - Position sizing
 gHPS          = "Halyard - Position sizing"
@@ -999,8 +1073,9 @@ if or_rDone and not orbCarryDay and not na(or_rH) and or_rH > or_rL
         or_zstop := or_rH                     // the stop is ALWAYS the far side of the range
     if or_dir != 0
         // each unit is sized on its own budget and its own stop distance (the add sits closer to the stop)
-        orbSz1 := sizeByRisk ? f_size(orbRiskDlr1, math.abs(or_e1 - or_zstop)) : orbQty1
-        orbSz2 := sizeByRisk ? f_size(orbRiskDlr2, math.abs(or_e2 - or_zstop)) : orbQty2
+        // SIZE IS FIXED HERE, when the setup arms at 09:45, off the rung the account is on at that moment.
+        orbSz1 := rmProg ? progOrb1 : sizeByRisk ? f_size(orbRiskDlr1, math.abs(or_e1 - or_zstop)) : orbQty1
+        orbSz2 := rmProg ? progOrb2 : sizeByRisk ? f_size(orbRiskDlr2, math.abs(or_e2 - or_zstop)) : orbQty2
 or_useAdd = orbAvg and or_shallow and not na(or_e2)
 // break by selected type
 or_brk = orbBreak == "Wick (touch)" ? ((or_dir == 1 and high >= or_rH) or (or_dir == -1 and low <= or_rL)) : ((or_dir == 1 and close > or_rH) or (or_dir == -1 and close < or_rL))
@@ -1283,8 +1358,9 @@ if ib_rDone and not ibCarryDay and not na(ib_rH) and ib_rH > ib_rL
         ib_e2 := ib_rL + 0.5*ib_rng
         ib_zstop := ib_rH                     // the stop is ALWAYS the far side of the range
     if ib_dir != 0
-        ibSz1 := sizeByRisk ? f_size(ibRiskDlr1, math.abs(ib_e1 - ib_zstop)) : ibQty1
-        ibSz2 := sizeByRisk ? f_size(ibRiskDlr2, math.abs(ib_e2 - ib_zstop)) : ibQty2
+        // same rung, read when the IB setup arms at 10:30
+        ibSz1 := rmProg ? progIb1 : sizeByRisk ? f_size(ibRiskDlr1, math.abs(ib_e1 - ib_zstop)) : ibQty1
+        ibSz2 := rmProg ? progIb2 : sizeByRisk ? f_size(ibRiskDlr2, math.abs(ib_e2 - ib_zstop)) : ibQty2
 // SEAT: an OPEN trade of ANY other setup keeps priority - the IB order is held back (either direction, so the
 // two can never stack risk or hedge each other). The IB is not cancelled, only delayed: the moment the seat
 // frees the IB limit goes in, provided price has NOT already traded through the IB entry level while it was
@@ -1746,7 +1822,10 @@ if showInfo and barstate.islast
          text_color = holdToTPSL ? color.lime : color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 16, holdToTPSL ? "  -> use an EXTENDED-HOURS chart or overnight exits cannot fill" : "Toggle Run HAL / ORB / IB + weekdays to isolate results",
          text_color = holdToTPSL ? color.orange : color.aqua, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 17, modeTxt + (maxDayLoss > 0 ? "  | day stop $" + str.tostring(maxDayLoss, "#") + (dayHalt ? " - HIT" : "") : "") + (rmFixed ? "" : " (per entry, fixed capital)"), text_color = dayHalt ? color.red : color.yellow, text_size = size.small, text_halign = text.align_left)
+    ladderTxt = rmProg ? " rung " + (progLevel >= 0 ? "+" : "") + str.tostring(progLevel) + " @ $" + str.tostring(progEq, "#") +
+         " -> ORB " + str.tostring(progOrb1, "#.#") + "/" + str.tostring(progOrb2, "#.#") +
+         ", IB " + str.tostring(progIb1, "#.#") + "/" + str.tostring(progIb2, "#.#") : sizeByRisk ? " (per entry, fixed capital)" : ""
+    table.cell(info, 0, 17, modeTxt + ladderTxt + (maxDayLoss > 0 ? "  | day stop $" + str.tostring(maxDayLoss, "#") + (dayHalt ? " - HIT" : "") : ""), text_color = dayHalt ? color.red : color.yellow, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 18, brkAlerts ? "Break alerts: ON - manual notifications, no broker automation" : "Break alerts: off",
          text_color = brkAlerts ? color.lime : color.gray, text_size = size.small, text_halign = text.align_left)
 
