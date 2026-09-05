@@ -6,12 +6,15 @@
 //   the other side of the range, scale out at risk:reward multiples, and flatten at the session close whether or
 //   not a target was reached. That is the whole strategy.
 //
-//   It is written so the WINDOW IS AN INPUT, because the window is the thing worth researching. The overnight
+//   It is written so the WINDOW IS AN INPUT, because the window is the thing worth researching. Three clock
+//   settings define a session: the IB itself, the TRADE CUTOFF after which no new break is taken, and the
+//   FLATTEN that closes whatever is still open. Pulling the cutoff in ahead of the flatten is how you stop the
+//   engine opening a trade that has ten minutes left to live. The overnight
 //   study going around (edgeful, NQ, 09/2025-08/2026) swept 70 one-hour IB windows across the clock and found
 //   00:30-01:30 ET, closing 02:30, gave the cleanest one-sided break: 81.8% single break (211 of 258 sessions),
-//   11.6% both sides, 6.6% neither. Their "best window per session length" row is reproduced here by changing
-//   ONE input - the trade window length: 1h after the IB is their 2-hour session, 2h is their 3-hour session,
-//   and so on. THOSE DEFAULTS ARE WHAT THIS FILE SHIPS WITH, so it opens on the window they reported.
+//   11.6% both sides, 6.6% neither. Their "best window per session length" row is reproduced by moving ONE
+//   input - the flatten time: 0230 is their 2-hour session, 0330 their 3-hour, and so on. THOSE DEFAULTS ARE
+//   WHAT THIS FILE SHIPS WITH, so it opens on the window they reported.
 //
 //   >>> THAT STATISTIC IS SOMEONE ELSE'S, ON NQ, AND IT IS NOT A BACKTEST. <<<
 //   A single-break rate says the range broke one way and not the other. It says NOTHING about whether the break
@@ -52,9 +55,35 @@ strategy("IBBRK - Initial Balance Break", overlay = true, pyramiding = 6,
 gWin      = "The window (New York time)"
 ibSess    = input.session("0030-0130", "Initial balance window", group = gWin,
      tooltip = "The hour whose high and low become the range. Crossing midnight is fine - this is a session, so TradingView handles it.\n\nThe default 00:30-01:30 is the overnight window from the NQ study. Move it anywhere: 09:30-10:30 is the classic New York initial balance, 03:00-04:00 is the London open.\n\nIt does not have to be an hour. A 15-minute window makes this an opening-range break instead.")
-winMin    = input.int(60, "Trade window after the IB (minutes)", minval = 1, maxval = 1440, step = 15, group = gWin,
-     tooltip = "How long entries are allowed for after the IB closes, and when the position is flattened. Measured as a DURATION from the IB close, so an overnight window needs no special handling.\n\nThis is the input that reproduces the study's 'best window at each session length' row: 60 = their 2-hour session, 120 = 3-hour, 180 = 4-hour, and so on. Longer windows give price more time to take out BOTH sides, so the single-break rate falls as this rises - that is the trade-off their table was showing.")
+cutIn     = input.int(230, "Stop taking new entries at (HHMM)", minval = 0, maxval = 2359, group = gWin,
+     tooltip = "The TRADE CUTOFF. After this time no new break is taken - but a position already open is left alone and still runs to its stop, its target or the flatten below.\n\nWritten as a 4-digit 24h time, New York: 230 = 02:30, 1600 = 16:00. Crossing midnight is fine - it is converted to 'minutes after the IB closes', so 0030-0130 with a 0230 cutoff is simply one hour of trading.\n\nPull it in ahead of the flatten when you do not want a break taken minutes before the position is closed anyway - a trade with ten minutes to live is nearly all cost.")
+flatIn    = input.int(230, "Flatten at (HHMM)", minval = 0, maxval = 2359, group = gWin,
+     tooltip = "The SESSION CLOSE. Everything still open is closed at market on the last bar before this time, target or no target. Same 4-digit 24h New York format.\n\nThe defaults (IB 0030-0130, cutoff and flatten both 0230) are the overnight window from the NQ study: one hour of range, one hour of trading.\n\nThis is what the study's 'session length' row varies - the longer you leave it open, the more time price has to take out BOTH sides of the range, so the single-break rate falls as this moves later.")
 tz        = "America/New_York"
+
+// ---- the two times, as MINUTES AFTER THE IB CLOSES ----
+// Converting them once, here, is what keeps every later comparison free of wrap-around arithmetic: an overnight
+// window is then just a duration like any other, and 0130 -> 0230 is 60 whether or not midnight sits between.
+f_hhmmMin(float v) => na(v) ? float(na) : math.floor(v / 100) * 60.0 + (int(v) % 100)
+f_sessEndMin(string sIn) =>
+    core = array.get(str.split(sIn, ":"), 0)          // drop a ":1234567" weekday mask if the picker added one
+    prt  = str.split(core, "-")
+    f_hhmmMin(array.size(prt) > 1 ? str.tonumber(array.get(prt, 1)) : float(na))
+
+ibEndMin = f_sessEndMin(ibSess)
+cutOff   = na(ibEndMin) ? float(na) : (f_hhmmMin(cutIn)  - ibEndMin + 1440) % 1440
+flatOff  = na(ibEndMin) ? float(na) : (f_hhmmMin(flatIn) - ibEndMin + 1440) % 1440
+
+if na(ibEndMin)
+    runtime.error("The IB window could not be read. It must look like 0030-0130.")
+if cutIn % 100 > 59 or flatIn % 100 > 59
+    runtime.error("Trade cutoff / flatten: a minute above 59. These are 4-digit 24h times - 230 is 02:30, not 2.30.")
+if flatOff == 0
+    runtime.error("Flatten time is the same as the IB close, which leaves no time to trade at all. Move it later.")
+if cutOff == 0
+    runtime.error("Trade cutoff is the same as the IB close, so no break could ever be taken. Move it later.")
+if cutOff > flatOff
+    runtime.error("Trade cutoff falls AFTER the flatten, so entries would still be allowed on a session that is already closed. Set the cutoff at or before the flatten.")
 
 // ================================================================ ENTRY
 gEnt      = "Entry"
@@ -70,11 +99,12 @@ buffPts   = input.float(0.0, "Break buffer (points)", minval = 0, step = 0.25, g
 
 // ================================================================ STOP
 gStop     = "Stop"
-slMode    = input.string("Opposite side of the IB", "Stop placement",
-     options = ["Opposite side of the IB", "IB midpoint", "Fixed points", "% of the IB range"], group = gStop,
-     tooltip = "OPPOSITE SIDE (default): the classic. The trade is wrong when the range is reclaimed all the way through, so the whole IB is the risk. Widest stop, best win rate, worst R per trade.\n\nIB MIDPOINT: half the range. Doubles the R multiple of the same move, and gets stopped on an ordinary retest.\n\nFIXED POINTS / % OF RANGE: risk that does not depend on how wide the IB happened to be - useful when you want every trade to risk the same amount.")
+slMode    = input.string("IB edge (100% of the range)", "Stop placement",
+     options = ["IB edge (100% of the range)", "75% of the range", "50% of the range (midpoint)", "Custom % of the range", "Fixed points"], group = gStop,
+     tooltip = "HOW DEEP INTO THE RANGE THE STOP SITS, measured back from the edge that broke - not from the entry. The entry is a candle CLOSE and can land well past the level, so anchoring the stop to the edge keeps it on a price the market recognises instead of drifting with how far the breakout candle happened to run.\n\nFor a long break the edge is the IB high, so:\n  100% = the IB low, the full range - the trade is only wrong once the range is reclaimed end to end. Widest stop, best win rate, worst R.\n  75%  = three quarters of the way back down.\n  50%  = the midpoint. Half the risk, so the same move is worth twice the R - and an ordinary retest takes it out.\nShorts are the mirror image, measured down from the IB low.\n\nFIXED POINTS ignores the range entirely, for when you want every trade to risk the same amount however wide the IB happened to be.")
+slPct     = input.float(100, "   Custom stop depth (% of the range)", minval = 1, maxval = 200, step = 5, group = gStop,
+     tooltip = "Read only under 'Custom % of the range'. Above 100 puts the stop beyond the far edge of the IB.")
 slPts     = input.float(40, "   Fixed stop (points)", minval = 0.25, step = 0.25, group = gStop, tooltip = "Read only under 'Fixed points'.")
-slPctRng  = input.float(50, "   Stop as % of the IB range", minval = 1, maxval = 200, step = 5, group = gStop, tooltip = "Read only under '% of the IB range'.")
 slBuf     = input.float(0.0, "Stop buffer beyond the level (points)", minval = 0, step = 0.25, group = gStop,
      tooltip = "Pushes the stop further away from the entry, past the level it sits on. Costs R on every trade and saves the ones that stop out by a tick.")
 
@@ -134,7 +164,8 @@ alertsOn  = input.bool(true, "Fire an alert on each break", group = gVis,
 
 // ================================================================ THE ENGINE
 chartMs = timeframe.in_seconds(timeframe.period) * 1000
-winMs   = winMin * 60 * 1000
+cutMs   = int(cutOff  * 60000)          // no new entries once this much time has passed since the IB closed
+flatMs  = int(flatOff * 60000)          // everything closed once this much has
 
 ibIn    = not na(time(timeframe.period, ibSess, tz))
 ibStart = ibIn and not ibIn[1]
@@ -193,12 +224,17 @@ if ibDone and not na(ibH) and ibH > ibL
 ibRng   = na(ibH) or na(ibL) ? na : ibH - ibL
 rangeOK = not na(ibRng) and (rngMin <= 0 or ibRng >= rngMin) and (rngMax <= 0 or ibRng <= rngMax)
 
-// The trade window is a DURATION from the IB close, which is what makes an overnight window need no special
-// case. `lastBar` is the bar whose successor falls outside the window - a Pine script cannot see the next bar,
-// so it projects one chart bar forward, which is exact on every ordinary boundary.
+// Both clock times were turned into DURATIONS from the IB close up in the input block, which is what makes an
+// overnight window need no special case here. TWO windows, not one:
+//   inWin   - the session. A position may be held, and the break statistics are measured, right up to the flatten.
+//   inEntry - the part of it where a NEW break may still be taken. Cutting this in early leaves an open trade
+//             completely alone; it only stops another one being opened.
+// `lastBar` is the bar whose successor falls past the flatten - a Pine script cannot see the next bar, so it
+// projects one chart bar forward, which is exact on every ordinary boundary.
 elapsed = armed and not na(ibEndT) ? time - ibEndT : int(na)
-inWin   = armed and not na(elapsed) and elapsed >= 0 and elapsed < winMs
-lastBar = inWin and (elapsed + chartMs) >= winMs
+inWin   = armed and not na(elapsed) and elapsed >= 0 and elapsed < flatMs
+inEntry = inWin and elapsed < cutMs
+lastBar = inWin and (elapsed + chartMs) >= flatMs
 
 // ---- the break, on the rule the entry uses ----
 // The confirmation candle is built from the clock, not from the chart: a chart bar ENDS a confirmation bucket
@@ -217,11 +253,16 @@ if brkDnNow
     brkDn := true
 
 // ---- stop / targets / size ----
+// Depth is measured from the edge that BROKE, back into the range: a long stops at ibH - depth% of the range,
+// a short at ibL + depth%. At 100% those are exactly the far edge (ibL and ibH), which is why the "IB edge"
+// option needs no special case.
 f_stop(int d, float e) =>
-    raw = slMode == "Opposite side of the IB" ? (d == 1 ? ibL : ibH) :
-          slMode == "IB midpoint"             ? (ibL + ibH) / 2 :
-          slMode == "Fixed points"            ? (d == 1 ? e - slPts : e + slPts) :
-                                                (d == 1 ? e - ibRng * slPctRng / 100 : e + ibRng * slPctRng / 100)
+    depth = slMode == "IB edge (100% of the range)"    ? 100.0 :
+            slMode == "75% of the range"               ? 75.0  :
+            slMode == "50% of the range (midpoint)"    ? 50.0  :
+            slMode == "Custom % of the range"          ? slPct : float(na)
+    raw = na(depth) ? (d == 1 ? e - slPts : e + slPts)
+                    : (d == 1 ? ibH - ibRng * depth / 100 : ibL + ibRng * depth / 100)
     lvl = d == 1 ? raw - slBuf : raw + slBuf
     // never let the stop sit on the wrong side of the entry, which a buffer or a midpoint stop can do
     d == 1 ? math.min(lvl, e - syminfo.mintick) : math.max(lvl, e + syminfo.mintick)
@@ -231,7 +272,7 @@ f_qty(float rPts) =>
 
 longOK  = (dirMode == "Both" or dirMode == "Long only")  and not tookL
 shortOK = (dirMode == "Both" or dirMode == "Short only") and not tookS
-canTake = inWin and dayOK and rangeOK and trDir == 0 and (oneShot ? nTrades < 1 : nTrades < 2)
+canTake = inEntry and dayOK and rangeOK and trDir == 0 and (oneShot ? nTrades < 1 : nTrades < 2)
 
 // Splits the position across the legs. THE ROUNDING LEFTOVER IS THE SUBTLE PART: 3 contracts at 50/50 floors to
 // 1 and 1, and the spare contract has to go somewhere. If the percentages allocate the whole position it joins
@@ -394,7 +435,7 @@ f_row(int r, string a, string b, string c, color col) =>
 if showStats and barstate.islast
     pos = statPos == "Bottom left" ? position.bottom_left : statPos == "Top right" ? position.top_right : statPos == "Top left" ? position.top_left : position.bottom_right
     st := table.new(pos, 3, 9, bgcolor = color.new(color.black, 10), border_color = color.new(color.gray, 60), border_width = 1, frame_color = color.gray, frame_width = 1)
-    f_row(0, "IB " + ibSess + " + " + str.tostring(winMin) + "m  (NY)", "count", "share", color.aqua)
+    f_row(0, "IB " + ibSess + "  cut " + str.tostring(cutIn) + "  flat " + str.tostring(flatIn) + " (NY)", "count", "share", color.aqua)
     f_row(1, "sessions measured", str.tostring(nSess), "", color.white)
     f_row(2, "single break (one side only)", str.tostring(nSingle), f_pc(nSingle, nSess), color.lime)
     f_row(3, "   ... up only",   str.tostring(nUpOnly), f_pc(nUpOnly, nSess), color.green)
@@ -411,7 +452,7 @@ plot(showIB and trDir != 0 and not na(curStop) ? curStop : na, "Stop",   color =
 plot(showIB and trDir != 0 and not na(tp1) ? tp1 : na, "Target 1",      color = color.new(color.green, 20), style = plot.style_linebr)
 plot(showIB and trDir != 0 and l2 and not na(tp2) ? tp2 : na, "Target 2", color = color.new(color.green, 45), style = plot.style_linebr)
 plot(showIB and trDir != 0 and l3 and not na(tp3) ? tp3 : na, "Target 3", color = color.new(color.green, 65), style = plot.style_linebr)
-bgcolor(ibIn ? color.new(color.aqua, 92) : inWin ? color.new(color.blue, 96) : na, title = "IB window / trade window")
+bgcolor(ibIn ? color.new(color.aqua, 92) : inEntry ? color.new(color.blue, 96) : inWin ? color.new(color.blue, 98) : na, title = "IB / entry window / hold-only window")
 
 // The risk/reward box: a green box from the entry to the furthest live target, a red one from the entry to the
 // stop, and one line of text pinned to the entry carrying the contracts, the R multiple and the dollar risk.
@@ -449,4 +490,4 @@ if alertsOn and trDir != 0 and trDir[1] == 0
          "  | T1 " + str.tostring(math.round_to_mintick(tp1)) +
          "  T2 " + str.tostring(math.round_to_mintick(tp2)) +
          "  T3 " + str.tostring(math.round_to_mintick(tp3)) +
-         "  | flat " + str.tostring(winMin) + "m after the IB", alert.freq_once_per_bar)
+         "  | flat at " + str.tostring(flatIn) + " NY", alert.freq_once_per_bar)

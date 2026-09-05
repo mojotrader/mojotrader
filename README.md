@@ -39,16 +39,23 @@ side a **1-minute candle closes beyond**, stop on the other side of the range,
 scale out at risk:reward multiples, flat at the session close whether or not a
 target was hit.
 
-The window is the point of the file, so it's all inputs: the IB is a session
-string (`0030-0130` by default, crossing midnight is fine) and everything after
-it is measured as *minutes since the IB closed*, so an overnight window needs no
-wrap-around special case. `Trade window after the IB` set to 60 is a 2-hour
-session, 120 a 3-hour one, and so on.
+The window is the point of the file, so it's all inputs. Three clock settings
+define a session — the IB itself (`0030-0130` by default, crossing midnight is
+fine), the **trade cutoff** after which no new break is taken, and the **flatten**
+that closes whatever is still open. Both times are converted once into *minutes
+after the IB closes*, so an overnight window needs no wrap-around special case.
+Moving the flatten is what varies "session length": `0230` is a 2-hour session,
+`0330` a 3-hour one. Pulling the cutoff in ahead of the flatten stops the engine
+opening a trade with ten minutes left to live; it never touches a position
+already open.
 
-- **Entry** — 1m close beyond the level (a wick/touch option is there to measure
-  the difference, since an overnight range gets tagged constantly).
-- **Stop** — opposite side of the IB, the midpoint, fixed points, or a % of the
-  range.
+- **Entry** — a close beyond the level on a confirmation timeframe you choose
+  (5m by default), or a wick/touch option to measure the difference, since an
+  overnight range gets tagged constantly.
+- **Stop** — how deep into the range it sits, measured back from the edge that
+  broke: `100%` (the far IB edge), `75%`, `50%` (midpoint), a custom %, or fixed
+  points. The entry is a candle close and can land well past the level, so
+  anchoring to the edge keeps the stop on a price the market recognises.
 - **Targets** — three legs at configurable R multiples with configurable position
   shares, each its own entry id with its own exit order. Optional breakeven after
   target 1. Anything the percentages leave unallocated becomes a runner carried
