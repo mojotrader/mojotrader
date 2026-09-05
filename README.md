@@ -51,6 +51,9 @@ Sweep Reversal — trades confirmed **liquidity-sweep reversals** (stop runs tha
 - The protective stop is submitted together with the entry, so the position is covered from its first bar.
 - Optional break-even, ATR trailing stop, time stop, opposite-signal reverse, and EOD flatten.
 - Sizing: fixed contracts, or % risk of a **fixed** account size (no compounding), `$ per point` per contract.
+  The backtest itself runs with a large `initial_capital` and `margin_long/short = 0` so the broker emulator
+  never rejects an entry for lack of funds — futures notional would otherwise refuse every order and the
+  backtest would show no trades at all.
 - Filters: RTH session + entry cutoff, max trades per day, weekday, EMA trend, date range.
 
 Non-repainting: signals are evaluated on closed bars only and the swing levels are already confirmed pivots.

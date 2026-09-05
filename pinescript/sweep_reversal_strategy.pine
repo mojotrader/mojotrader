@@ -25,9 +25,14 @@
 //
 // Validate on your instrument/timeframe before trading this — it is a research idea, not advice.
 
+// CAPITAL / MARGIN: initial_capital is deliberately huge and margin_long/short are 0, so the broker
+// emulator NEVER rejects an order for lack of funds (one NQ contract is ~$400k notional — on a small
+// account every entry is silently refused and the backtest shows zero trades). Real risk is controlled by
+// the contract count / risk sizing below, not by the account balance in the Properties tab.
 strategy("Sweep Reversal Strategy", shorttitle = "Sweep Reversal", overlay = true,
      max_boxes_count = 200, max_lines_count = 200, max_labels_count = 200,
-     initial_capital = 30000, pyramiding = 0, default_qty_type = strategy.fixed, default_qty_value = 1,
+     initial_capital = 1000000, margin_long = 0, margin_short = 0,
+     pyramiding = 0, default_qty_type = strategy.fixed, default_qty_value = 1,
      commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1,
      process_orders_on_close = false, calc_on_every_tick = false)
 
@@ -86,7 +91,7 @@ oppMode      = input.string("Reverse", "Opposite signal action", options = ["Rev
 useRiskSize = input.bool(false, "Size by % risk (else fixed contracts below)", group = gRisk,
      tooltip = "ON: size each trade so a stop-out loses the risk % of the FIXED account size below. OFF: always trade the fixed contract count.")
 acctSize    = input.float(30000, "Account size $ (fixed - NO compounding)", minval = 1, group = gRisk,
-     tooltip = "Sizing uses this constant capital every day; it does NOT grow or shrink with P&L, so dollar risk per trade is the same throughout the backtest.")
+     tooltip = "The capital your risk % is measured against. It is NOT the backtest balance (that is set huge on purpose so no order is ever rejected for margin) and it does not grow or shrink with P&L, so dollar risk per trade stays constant.")
 riskPct     = input.float(1.0, "Risk per trade (% of capital)", minval = 0.1, step = 0.1, group = gRisk)
 ptVal       = input.float(2.0, "$ per point per contract", group = gRisk, tooltip = "MNQ=2, NQ=20, MES=5, ES=50.")
 fixedQty    = input.float(1, "Contracts (fixed sizing)", minval = 1, group = gRisk)
