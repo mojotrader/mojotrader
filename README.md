@@ -58,8 +58,29 @@ session, 120 a 3-hour one, and so on.
 - **Break-statistics table** — recomputes single-break / double-break / neither
   rates on your symbol and your window, using the same break test the entry uses.
 
-Run it on a 1-minute chart: the entry rule *is* a 1-minute close. All times are
-New York regardless of the chart's timezone.
+The entry rule doesn't depend on the chart: the confirmation candle is built from
+the clock inside the engine, so "5-minute close beyond the IB" means the same
+thing on a 1m, 3m or 5m chart. All times are New York regardless of the chart's
+timezone.
+
+**What it measured on MNQ, 5m bars, 2026-05-24 → 2026-09-04 (103 days, ~70
+sessions per window), 5m-close entry, stop on the far side of the IB, 1R target,
+costs included:**
+
+- The single-break rate reproduces the published study closely (82.7% here vs
+  81.8% quoted for NQ) — but its **correlation with profitability across 44
+  windows is +0.07**. Two windows share an 83% single-break rate: one makes
+  +1.9 pts/trade, the other loses −7.3.
+- Pooled across all 44 windows the family is a **loser after costs**: 2,410
+  trades, −2.86 pts/trade, t = −2.20. Only 37% of windows were profitable.
+- The best window (07:00–08:00 ET) scored t = 1.73. Picking the best of 44
+  windows from pure noise typically scores t = 2.16 — so **nothing in this data
+  beats what chance alone produces.**
+- With a full-IB stop, targets of 2R and above are never reached inside a
+  one-hour window: 2R, 3R and hold-to-close give byte-identical results.
+
+Treat the window inputs as a research tool, not a recommendation. 103 days of
+summer tape is far too short to establish any of this.
 
 ### `pinescript/orbib_strategy.pine`
 **ORBIB** — three setups on one equity curve: HALYARD (a 15-minute opening-range
