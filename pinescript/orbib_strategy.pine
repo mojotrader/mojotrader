@@ -62,6 +62,13 @@
 //   Two other modes are available: stack same only (an opposite break is skipped rather than closing a working
 //   trade), and the original rule where any open ORB/IB trade blocks the break and consumes the day.
 //
+// TIME WINDOWS ARE INPUTS. The ORB range, the IB range, the trading session, the two entry cutoffs and the
+//   cancel-unfilled mark all live in the "Time windows - ORB / IB" group, defaulted to the values this file
+//   always had (ORB 0930-0945, IB 0930-1030, session 0930-1600, cutoffs 15:00 / 14:00, cancel 15:30). Point the
+//   ORB at the London open, stretch the IB to two hours, or run the whole thing in the afternoon - every time
+//   is NEW YORK whatever the chart's timezone is set to. A window that could never trade fails loudly at
+//   compile time rather than quietly showing no signals. Halyard keeps its own clock and is not in that group.
+//
 //   Each engine otherwise flattens only its OWN entries (strategy.close per entry id). With the clock exits off,
 //   neither the 13:30/14:30 ET Halyard boundary nor the 15:30 ET flatten closes anything at all - they only
 //   cancel unfilled entry orders.
@@ -157,6 +164,53 @@ gStrat    = "Strategies (toggle to track each separately)"
 runHAL    = input.bool(true, "Run HALYARD strategy (15m break, timeframe-independent)", group = gStrat, tooltip = "Turn OFF to backtest ORB/IB alone.")
 runORB    = input.bool(true, "Run ORB strategy", group = gStrat, tooltip = "Turn OFF to backtest the IB strategy alone in the Strategy Tester.")
 runIB     = input.bool(true, "Run IB strategy",  group = gStrat, tooltip = "Turn OFF to backtest the ORB strategy alone.")
+
+// ---------------------------------------------------------------- Time windows - ORB / IB
+// EVERY TIME HERE IS NEW YORK, whatever timezone the chart is set to - each clock read passes the timezone
+// explicitly, so moving the chart to London or Tokyo does not shift a single level. Halyard is NOT in this
+// group: its range candle is anchored to 10:30 Asia/Kolkata and follows the US DST changeover on its own.
+//
+// The three windows and the three clock marks are what turn this file into a time-of-day laboratory: point the
+// ORB at the London open (0300-0315), stretch the IB to two hours (0930-1130), or run the whole thing on the
+// afternoon. The DEFAULTS ARE THE ORIGINAL HARDCODED VALUES, so leaving this group alone changes nothing.
+gTime     = "Time windows - ORB / IB (New York time)"
+sessIn    = input.session("0930-1600", "Trading session", group = gTime,
+     tooltip = "The hours the ORB and IB engines are allowed to work in, and the clock that defines their DAY: the session open is where the per-day state resets, where the daily-loss baseline is taken, and where a trade carried overnight decides whether it owns its engine for another day.\n\nBOTH RANGE WINDOWS BELOW SHOULD SIT INSIDE THIS. An order can only be placed while the session is open, so a range that finishes outside it arms a setup that can never trade.\n\nA session that crosses midnight will work, but the weekday filters read the calendar day of each bar, so they will split such a session across two weekdays.")
+orbSessIn = input.session("0930-0945", "ORB range window", group = gTime,
+     tooltip = "The candle the ORB setup measures. The range is the high and low of this window; direction is decided by which extreme printed first, and the entry, stop and targets are all fibs of it. The default 0930-0945 is the classic 15-minute opening range.\n\nIt must finish at or before the ORB entry cutoff below, or no ORB order could ever be placed.")
+ibSessIn  = input.session("0930-1030", "IB range window", group = gTime,
+     tooltip = "The same measurement for the IB setup - the initial balance. The default 0930-1030 is the classic first hour.\n\nBy default the ORB hands the day over to the IB the moment THIS window completes (the toggle below), so shortening it also shortens the ORB's entry window.")
+orbHandsToIb = input.bool(true, "ORB window shuts when the IB range completes", group = gTime,
+     tooltip = "ON (the original rule): an unfilled ORB limit is pulled the moment the IB range finishes, and an ORB that breaks after that is never placed - the ORB owns the slot between the two ranges and then hands the day to the IB.\n\nOFF: the two engines are independent and the ORB simply runs to its own cutoff. Worth turning off when you move the windows somewhere they no longer overlap. NOTE they still share ONE position - whichever fills first holds the seat and the other is held back behind it.")
+orbCutIn  = input.int(1500, "ORB entry cutoff (HHMM)", minval = 0, maxval = 2359, group = gTime,
+     tooltip = "No ORB order is placed at or after this time, and a resting one is pulled. Written as a 4-digit 24h time: 1500 = 15:00, 0930 = 09:30.")
+ibCutIn   = input.int(1400, "IB entry cutoff (HHMM)", minval = 0, maxval = 2359, group = gTime,
+     tooltip = "The same for the IB. Written as a 4-digit 24h time.")
+eodIn     = input.int(1530, "Cancel unfilled orders at (HHMM)", minval = 0, maxval = 2359, group = gTime,
+     tooltip = "The end-of-day mark. With 'Hold trades until TP or SL' on it CLOSES NOTHING - it only pulls entry orders that never filled, so nothing rests overnight, and it files the day's record in the probability table. With that switch off, this is the hard flatten instead.")
+
+// ---- parse and sanity-check the windows, because a bad one trades NOTHING and looks like a quiet market ----
+f_hhmmMin(float v) => na(v) ? float(na) : math.floor(v / 100) * 60.0 + (int(v) % 100)
+// a session string is "HHMM-HHMM", optionally with a ":1234567" weekday mask - drop the mask, take the end
+f_sessEndMin(string sIn) =>
+    core = array.get(str.split(sIn, ":"), 0)
+    p    = str.split(core, "-")
+    f_hhmmMin(array.size(p) > 1 ? str.tonumber(array.get(p, 1)) : float(na))
+
+orbCutMin = f_hhmmMin(orbCutIn)
+ibCutMin  = f_hhmmMin(ibCutIn)
+eodMin    = f_hhmmMin(eodIn)
+orbEndMin = f_sessEndMin(orbSessIn)
+ibEndMin  = f_sessEndMin(ibSessIn)
+
+if orbCutIn % 100 > 59 or ibCutIn % 100 > 59 or eodIn % 100 > 59
+    runtime.error("Time windows: a cutoff has a minute above 59. These are 4-digit 24h times - 1500 is 15:00, not 15.00.")
+if not na(orbEndMin) and orbEndMin > orbCutMin
+    runtime.error("Time windows: the ORB range window finishes AFTER the ORB entry cutoff, so the setup would arm with its own window already shut and no ORB order could ever be placed. Move the cutoff later than the end of the range.")
+if not na(ibEndMin) and ibEndMin > ibCutMin
+    runtime.error("Time windows: the IB range window finishes AFTER the IB entry cutoff, so no IB order could ever be placed. Move the cutoff later than the end of the range.")
+if runORB and runIB and orbHandsToIb and not na(orbEndMin) and not na(ibEndMin) and ibEndMin <= orbEndMin
+    runtime.error("Time windows: the IB range finishes at or before the ORB range, and 'ORB window shuts when the IB range completes' is on - so the ORB would be handed over before it ever arms and could never place an order. Either make the IB window end later, or untick that toggle to run the two independently.")
 
 // ---------------------------------------------------------------- Trade-day filters (see which weekday hurts each)
 gDayO     = "Trade days - ORB"
@@ -370,12 +424,14 @@ autoMode  = bMode == "Auto (equal thirds)"
 
 // ================================================================ HARDCODED CONFIG (edit values here)
 // ---- shared session clock ----
+// NEW YORK, hardcoded on purpose: Halyard derives its own EST/EDT changeover from this and would break if the
+// clock moved. The three windows and three marks below come from the "Time windows" input group.
 tz      = "America/New_York"
-sess    = "0930-1600"
-orbSess = "0930-0945"
-ibSess  = "0930-1030"
-flatH   = 15
-flatM   = 30
+sess    = sessIn
+orbSess = orbSessIn
+ibSess  = ibSessIn
+flatH   = math.floor(eodIn / 100)
+flatM   = eodIn % 100
 // ---- ORB settings ----
 orbLong   = true
 orbShort  = true
@@ -386,8 +442,8 @@ orbTpS    = "Ext 30%"
 orbBE     = false
 orbQty1   = orbQty1In         // contracts on the first ORB entry     (Risk sizing group)
 orbQty2   = orbQty2In         // contracts on the ORB avg-down entry  (Risk sizing group)
-orbCutH   = 15
-orbCutM   = 0
+orbCutH   = math.floor(orbCutIn / 100)
+orbCutM   = orbCutIn % 100
 // ---- IB settings ----
 ibLong    = true
 ibShort   = true
@@ -398,8 +454,8 @@ ibTpS     = "Ext 30%"
 ibBE      = false
 ibQty1    = ibQty1In          // contracts on the first IB entry      (Risk sizing group)
 ibQty2    = ibQty2In          // contracts on the IB avg-down entry   (Risk sizing group)
-ibCutH    = 14
-ibCutM    = 0
+ibCutH    = math.floor(ibCutIn / 100)
+ibCutM    = ibCutIn % 100
 // ---- HALYARD settings ----
 // Values marked UNREAD belong to a mode that is not selected - they are kept so the mode ternaries still
 // compile, and a constant condition folds anyway.
@@ -1207,7 +1263,7 @@ orbSizeOK = orbMinRngPct <= 0 or (not na(or_rng) and or_rL > 0 and or_rng / or_r
 // limit is cancelled there, and an ORB that breaks after 10:30 is never placed at all. The ORB owns the
 // 09:45-10:30 slot and hands the day to the IB when the IB range completes. This is ENTRY management and is
 // untouched by the hold-to-TP/SL exit, which only ever governs a trade that has already filled.
-orbWin = inSess and not dayHalt and orbDayOK and tod <= (orbCutH*60 + orbCutM) and (not runIB or not ibFormed) and orbSizeOK
+orbWin = inSess and not dayHalt and orbDayOK and tod <= (orbCutH*60 + orbCutM) and (not orbHandsToIb or not runIB or not ibFormed) and orbSizeOK
 // SEAT: a live HALYARD trade holds the ORB limit back rather than cancelling it - same rule the IB has always
 // had behind an open ORB. If the ORB pullback entry trades through during the hold, that fill was missed and
 // the ORB is done for the day.
@@ -1948,7 +2004,7 @@ if showInfo and barstate.islast
     table.cell(info, 0, 3,  "  first 15m CLOSE beyond it trades | stop = far edge | R:R " + str.tostring(halRR, "#.##"), text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 4,  holdToTPSL ? "  one break per day | no day flat - runs to TP or SL" : "  one break per day | flat 13:30 / 14:30 ET",
          text_color = holdToTPSL ? color.lime : color.silver, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 5,  "Ranges: ORB 09:30-09:45 | IB 09:30-10:30 (ET)",              text_color = color.white,   text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 5,  "Ranges: ORB " + orbSessIn + " | IB " + ibSessIn + " | session " + sessIn + " (NY)", text_color = color.white, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 6,  "Direction: low-first = LONG, high-first = SHORT",            text_color = color.white,   text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 7,  (orbDepth >= 100 and ibDepth >= 100) ? "  close-depth filter: OFF (both at 100%)" : "  + close no deeper than " + str.tostring(orbDepth, "#") + "% (ORB) / " + str.tostring(ibDepth, "#") + "% (IB) into the range",
          text_color = color.silver, text_size = size.small, text_halign = text.align_left)
@@ -1959,7 +2015,7 @@ if showInfo and barstate.islast
     table.cell(info, 0, 12, "Avg-down: 2nd unit @ 50% - own size & risk",                 text_color = color.silver,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 13, halFlatOpp ? "SEAT: HAL break vs open ORB/IB - opposite FLATTENS it, same STACKS on top" : halStackSame ? "SEAT: HAL stacks on a same-direction ORB/IB, skips an opposite one" : "SEAT: Halyard > ORB > IB - one trade at a time",
          text_color = color.aqua, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 14, "No ORB carry: an unfilled ORB dies when the IB forms at 10:30", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 14, (orbHandsToIb ? "ORB hands over when the IB range completes" : "ORB and IB windows independent") + "  | cutoffs ORB " + str.tostring(orbCutIn) + " / IB " + str.tostring(ibCutIn) + " / cancel " + str.tostring(eodIn), text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 15, holdToTPSL ? "EXIT = TP or SL ONLY. 15:30 ET just kills unfilled orders." : "Skip double-break days | ORB/IB flatten 15:30 ET",
          text_color = holdToTPSL ? color.lime : color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 16, holdToTPSL ? "  -> use an EXTENDED-HOURS chart or overnight exits cannot fill" : "Toggle Run HAL / ORB / IB + weekdays to isolate results",

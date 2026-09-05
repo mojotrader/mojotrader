@@ -70,6 +70,31 @@ Two consequences worth knowing:
 Untick the input to get the original behaviour back (Halyard flat at 13:30/14:30
 ET, ORB/IB flat at 15:30 ET).
 
+**Selectable ORB / IB time windows.**
+The `Time windows - ORB / IB` group makes the clock an input instead of a
+hardcoded constant, so the same engine can be pointed at any time of day:
+
+| Input | Default | What it sets |
+|---|---|---|
+| Trading session | `0930-1600` | hours the two engines may work, and where their day resets |
+| ORB range window | `0930-0945` | the candle the ORB measures |
+| IB range window | `0930-1030` | the candle the IB measures |
+| ORB window shuts when IB completes | on | the original hand-over rule; off runs the two independently |
+| ORB entry cutoff | `1500` | no ORB order placed at or after this (HHMM) |
+| IB entry cutoff | `1400` | same for IB |
+| Cancel unfilled orders at | `1530` | end-of-day mark |
+
+Every time is **New York**, whatever the chart's timezone — so the levels don't
+move when you change the chart. The defaults are exactly the values the file
+always had, so leaving the group alone changes nothing. Halyard keeps its own
+clock (anchored to 10:30 Asia/Kolkata, following the US DST changeover) and is
+not in this group.
+
+A window that could never trade fails loudly at compile time rather than quietly
+showing no signals — a range finishing after its own entry cutoff, an IB range
+that completes before the ORB one while the hand-over rule is on, or a minute
+field above 59.
+
 **A Halyard break landing on an open ORB/IB trade.**
 With trades held to their target or stop, the ORB/IB trade still sitting there
 when Halyard breaks is usually one carried over from yesterday. The two cases are
