@@ -33,6 +33,34 @@ once it has fully closed.
 
 ## Strategies
 
+### `pinescript/ib_break_overnight_strategy.pine`
+**IBBRK** — a 60-minute initial balance on *any* hour of the clock, then the first
+side a **1-minute candle closes beyond**, stop on the other side of the range,
+scale out at risk:reward multiples, flat at the session close whether or not a
+target was hit.
+
+The window is the point of the file, so it's all inputs: the IB is a session
+string (`0030-0130` by default, crossing midnight is fine) and everything after
+it is measured as *minutes since the IB closed*, so an overnight window needs no
+wrap-around special case. `Trade window after the IB` set to 60 is a 2-hour
+session, 120 a 3-hour one, and so on.
+
+- **Entry** — 1m close beyond the level (a wick/touch option is there to measure
+  the difference, since an overnight range gets tagged constantly).
+- **Stop** — opposite side of the IB, the midpoint, fixed points, or a % of the
+  range.
+- **Targets** — three legs at configurable R multiples with configurable position
+  shares, each its own entry id with its own exit order. Optional breakeven after
+  target 1. Anything the percentages leave unallocated becomes a runner carried
+  to the session close.
+- **Session close** — flat at market on the last bar of the window, target or no
+  target. Not optional: a range from 01:30 means nothing by lunchtime.
+- **Break-statistics table** — recomputes single-break / double-break / neither
+  rates on your symbol and your window, using the same break test the entry uses.
+
+Run it on a 1-minute chart: the entry rule *is* a 1-minute close. All times are
+New York regardless of the chart's timezone.
+
 ### `pinescript/orbib_strategy.pine`
 **ORBIB** — three setups on one equity curve: HALYARD (a 15-minute opening-range
 break that builds its own 15m candles, so any chart timeframe from 1m to 15m

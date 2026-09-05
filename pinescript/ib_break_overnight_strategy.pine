@@ -1,0 +1,443 @@
+//@version=6
+// IBBRK - initial-balance break, on ANY hour of the clock.
+//
+// WHAT THIS IS
+//   Measure a 60-minute initial balance, then take the FIRST side that a 1-minute candle CLOSES beyond, stop on
+//   the other side of the range, scale out at risk:reward multiples, and flatten at the session close whether or
+//   not a target was reached. That is the whole strategy.
+//
+//   It is written so the WINDOW IS AN INPUT, because the window is the thing worth researching. The overnight
+//   study going around (edgeful, NQ, 09/2025-08/2026) swept 70 one-hour IB windows across the clock and found
+//   00:30-01:30 ET, closing 02:30, gave the cleanest one-sided break: 81.8% single break (211 of 258 sessions),
+//   11.6% both sides, 6.6% neither. Their "best window per session length" row is reproduced here by changing
+//   ONE input - the trade window length: 1h after the IB is their 2-hour session, 2h is their 3-hour session,
+//   and so on. THOSE DEFAULTS ARE WHAT THIS FILE SHIPS WITH, so it opens on the window they reported.
+//
+//   >>> THAT STATISTIC IS SOMEONE ELSE'S, ON NQ, AND IT IS NOT A BACKTEST. <<<
+//   A single-break rate says the range broke one way and not the other. It says NOTHING about whether the break
+//   ran far enough to pay for the stop. The break-statistics table at the bottom right recomputes that number on
+//   YOUR symbol and YOUR window so you can check it, and the Strategy Tester tells you the part that pays.
+//
+// WHY THE ENTRY IS A CLOSE AND NOT A TOUCH
+//   A stop order sitting on the IB high fills on every wick that tags it, and an overnight range gets tagged a
+//   lot. Requiring a 1-minute CLOSE beyond the level throws those away at the cost of entering a few ticks
+//   worse. The wick version is available as an input if you want to measure the difference rather than assume it.
+//
+// HOW THE CLOCK WORKS - no wrap-around arithmetic anywhere
+//   The IB is a session string ("0030-0130"), which TradingView handles across midnight without help. Everything
+//   after it is measured as MINUTES SINCE THE IB CLOSED, so an overnight window needs no special case: the trade
+//   window is a duration, the flatten is a duration, and a window running 23:30 -> 02:00 behaves like any other.
+//   ALL TIMES ARE NEW YORK whatever the chart's timezone is set to - each clock read passes the timezone
+//   explicitly, so the levels do not move when you change the chart.
+//
+// WHAT CLOSES A TRADE, in order of precedence on a single bar
+//   1. the stop (assumed first when one bar covers both stop and target - the pessimistic assumption, and what
+//      the Strategy Tester assumes too)
+//   2. a target
+//   3. the session close: flat at market on the LAST bar of the trade window, target or no target. This is the
+//      "eod close without targets" case and it is not optional - the whole setup is a one-session idea and a
+//      range from 01:30 has no meaning by lunchtime.
+//
+// RUN IT ON A 1-MINUTE CHART. The entry rule is a 1-minute close; on a 5m chart it becomes a 5-minute close and
+// you are testing a different strategy. The IB itself is timeframe-independent (it is a session, not a candle).
+strategy("IBBRK - Initial Balance Break", overlay = true, pyramiding = 6,
+     max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500,
+     initial_capital = 30000, margin_long = 0, margin_short = 0,
+     default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = true,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1)
+
+// ================================================================ THE WINDOW
+gWin      = "The window (New York time)"
+ibSess    = input.session("0030-0130", "Initial balance window", group = gWin,
+     tooltip = "The hour whose high and low become the range. Crossing midnight is fine - this is a session, so TradingView handles it.\n\nThe default 00:30-01:30 is the overnight window from the NQ study. Move it anywhere: 09:30-10:30 is the classic New York initial balance, 03:00-04:00 is the London open.\n\nIt does not have to be an hour. A 15-minute window makes this an opening-range break instead.")
+winMin    = input.int(60, "Trade window after the IB (minutes)", minval = 1, maxval = 1440, step = 15, group = gWin,
+     tooltip = "How long entries are allowed for after the IB closes, and when the position is flattened. Measured as a DURATION from the IB close, so an overnight window needs no special handling.\n\nThis is the input that reproduces the study's 'best window at each session length' row: 60 = their 2-hour session, 120 = 3-hour, 180 = 4-hour, and so on. Longer windows give price more time to take out BOTH sides, so the single-break rate falls as this rises - that is the trade-off their table was showing.")
+tz        = "America/New_York"
+
+// ================================================================ ENTRY
+gEnt      = "Entry"
+entryRule = input.string("1m close beyond the IB", "Trigger", options = ["1m close beyond the IB", "Wick (any touch beyond the IB)"], group = gEnt,
+     tooltip = "CLOSE (default): the bar must CLOSE past the level. An overnight range gets wicked constantly and a resting stop order fills on every one of them; demanding a close throws those away and costs a few ticks of entry.\n\nWICK: the classic breakout-stop entry, filled the instant price trades through. Kept so you can measure the difference on your own data instead of taking the claim on faith.")
+dirMode   = input.string("Both", "Direction", options = ["Both", "Long only", "Short only"], group = gEnt)
+oneShot   = input.bool(true, "One trade per session", group = gEnt,
+     tooltip = "ON (default): the first break is the day's trade, win or lose. This is the setup the single-break statistic describes.\n\nOFF: after a stop-out, a close beyond the OTHER side may be taken as a second trade. That is the double-break day - by the study's own numbers it is the minority case (11.6%), and it is where a range strategy usually gives its profits back.")
+buffPts   = input.float(0.0, "Break buffer (points)", minval = 0, step = 0.25, group = gEnt,
+     tooltip = "How far beyond the level the close (or wick) has to be before it counts. 0 = the level itself. Raise it to filter marginal breaks; every point costs you entry price.")
+
+// ================================================================ STOP
+gStop     = "Stop"
+slMode    = input.string("Opposite side of the IB", "Stop placement",
+     options = ["Opposite side of the IB", "IB midpoint", "Fixed points", "% of the IB range"], group = gStop,
+     tooltip = "OPPOSITE SIDE (default): the classic. The trade is wrong when the range is reclaimed all the way through, so the whole IB is the risk. Widest stop, best win rate, worst R per trade.\n\nIB MIDPOINT: half the range. Doubles the R multiple of the same move, and gets stopped on an ordinary retest.\n\nFIXED POINTS / % OF RANGE: risk that does not depend on how wide the IB happened to be - useful when you want every trade to risk the same amount.")
+slPts     = input.float(40, "   Fixed stop (points)", minval = 0.25, step = 0.25, group = gStop, tooltip = "Read only under 'Fixed points'.")
+slPctRng  = input.float(50, "   Stop as % of the IB range", minval = 1, maxval = 200, step = 5, group = gStop, tooltip = "Read only under '% of the IB range'.")
+slBuf     = input.float(0.0, "Stop buffer beyond the level (points)", minval = 0, step = 0.25, group = gStop,
+     tooltip = "Pushes the stop further away from the entry, past the level it sits on. Costs R on every trade and saves the ones that stop out by a tick.")
+
+// ================================================================ TARGETS (risk:reward)
+// Three legs, each its own ENTRY ID with its own exit order, rather than one entry sliced by qty_percent. Pine
+// nets them into one position either way, but per-id exits are exact and cannot argue about what percentage of
+// what is left is being closed.
+gTgt      = "Targets (R multiples)"
+t1R       = input.float(1.0, "Target 1 - R multiple", minval = 0.1, step = 0.1, group = gTgt)
+t1Pct     = input.float(50,  "Target 1 - % of the position", minval = 0, maxval = 100, step = 5, group = gTgt,
+     tooltip = "Set this to 100 and the other two to 0 for a single-target strategy.")
+t2R       = input.float(2.0, "Target 2 - R multiple", minval = 0.1, step = 0.1, group = gTgt)
+t2Pct     = input.float(50,  "Target 2 - % of the position", minval = 0, maxval = 100, step = 5, group = gTgt)
+t3R       = input.float(3.0, "Target 3 - R multiple", minval = 0.1, step = 0.1, group = gTgt)
+t3Pct     = input.float(0,   "Target 3 - % of the position", minval = 0, maxval = 100, step = 5, group = gTgt,
+     tooltip = "Ships at 0 - two legs by default. Anything left over after the three percentages is carried to the session close and flattened there.")
+beOn      = input.bool(false, "Move the stop to breakeven after target 1", group = gTgt,
+     tooltip = "OFF by default, and it is not the free lunch it looks like: it converts trades that would have recovered into scratches. Worth measuring on your own data rather than assuming.")
+beOffs    = input.float(0.0, "   Breakeven offset (points)", step = 0.25, group = gTgt, tooltip = "Positive puts the breakeven stop that many points in profit.")
+
+if t1Pct + t2Pct + t3Pct > 100
+    runtime.error("Targets: the three percentages add up to more than 100% of the position. Lower one of them.")
+
+// ================================================================ SIZE
+gSz       = "Position size"
+szMode    = input.string("Fixed contracts", "Sizing", options = ["Fixed contracts", "Risk $ per trade"], group = gSz)
+qtyFixed  = input.float(3, "   Contracts per trade", minval = 1, step = 1, group = gSz,
+     tooltip = "Split across the target legs by their percentages, rounded down, with the leftover joining the LAST target. 3 contracts at 50/50 gives 1 to target 1 and 2 to target 2; 1 contract takes target 1 and nothing else.\n\nIf the three percentages add up to LESS than 100 the shortfall becomes a runner with no target at all - it is carried to the session close and flattened there.")
+riskUSD   = input.float(300, "   Risk $ per trade", minval = 1, step = 25, group = gSz,
+     tooltip = "Read only under 'Risk $ per trade'. Contracts = risk / (stop distance x point value), so a wide IB buys fewer contracts. If the budget cannot cover one contract the session is skipped.")
+ptVal     = input.float(2.0, "$ per point per contract", minval = 0.01, step = 0.5, group = gSz,
+     tooltip = "MNQ = 2, NQ = 20, MES = 5, ES = 50. Used for risk sizing and the risk/reward box.")
+
+// ================================================================ FILTERS
+gFil      = "Filters"
+rngMin    = input.float(0, "Min IB range (points, 0 = off)", minval = 0, step = 5, group = gFil,
+     tooltip = "Skip the session when the IB is narrower than this. A dead range breaks and goes nowhere; it also gives the tightest stop, so it is the cheapest trade to take and the easiest to be fooled by.")
+rngMax    = input.float(0, "Max IB range (points, 0 = off)", minval = 0, step = 5, group = gFil,
+     tooltip = "Skip the session when the IB is wider than this. A huge overnight range has usually already made its move.")
+dMon      = input.bool(true, "Monday",    group = gFil)
+dTue      = input.bool(true, "Tuesday",   group = gFil)
+dWed      = input.bool(true, "Wednesday", group = gFil)
+dThu      = input.bool(true, "Thursday",  group = gFil)
+dFri      = input.bool(true, "Friday",    group = gFil)
+if rngMax > 0 and rngMin > rngMax
+    runtime.error("Filters: Min IB range is above Max IB range, so no session can ever pass. Fix one of them.")
+
+// ================================================================ VISUALS
+gVis      = "Visuals"
+showIB    = input.bool(true,  "Draw the IB range and its levels", group = gVis)
+showRR    = input.bool(true,  "Draw the risk/reward box on entry", group = gVis)
+showStats = input.bool(true,  "Show the break-statistics table", group = gVis,
+     tooltip = "Recomputes the single-break / double-break numbers on YOUR symbol and YOUR window, over whatever history the chart has loaded. This is the table to check before believing a window - a break rate quoted for one instrument is not a fact about another.")
+statPos   = input.string("Bottom right", "Table position", options = ["Bottom right","Bottom left","Top right","Top left"], group = gVis)
+alertsOn  = input.bool(true, "Fire an alert on each break", group = gVis,
+     tooltip = "Plain readable text for a phone or an email - the direction, the level, the entry, the stop and the three targets. Create ONE alert on this strategy with condition 'alert() function calls only'. Do not point it at a broker webhook: TradingView sends non-JSON as text/plain and an order endpoint answers 415.")
+
+// ================================================================ THE ENGINE
+chartMs = timeframe.in_seconds(timeframe.period) * 1000
+winMs   = winMin * 60 * 1000
+
+ibIn    = not na(time(timeframe.period, ibSess, tz))
+ibStart = ibIn and not ibIn[1]
+ibDone  = not ibIn and ibIn[1]          // the first bar AFTER the IB window closed
+
+// ---- the session's state ----
+var float ibH   = na
+var float ibL   = na
+var int   ibEndT = na
+var bool  armed = false                 // the IB is complete and the trade window is running
+var bool  dayOK = false                 // weekday filter, read on the day the IB STARTS
+var bool  counted = false               // this session has been filed in the statistics table
+var bool  brkUp = false                 // did price break the top during the trade window (statistics)
+var bool  brkDn = false
+var int   nTrades = 0
+var bool  tookL = false                 // each side may be taken at most once
+var bool  tookS = false
+
+// ---- the live trade ----
+var int   trDir   = 0                   // 0 flat, 1 long, -1 short
+var float entPx   = na
+var float slPx    = na
+var float curStop = na                  // moves to breakeven if that option is on
+var float tp1 = na
+var float tp2 = na
+var float tp3 = na
+var float rDist = na
+var bool  l1 = false                    // which target legs are still open
+var bool  l2 = false
+var bool  l3 = false
+var bool  l4 = false                    // the runner - no target, session close only
+var bool  beDone = false
+var int   entBar  = na
+
+if ibStart
+    ibH := high
+    ibL := low
+    ibEndT := na
+    armed := false
+    counted := false
+    brkUp := false
+    brkDn := false
+    nTrades := 0
+    tookL := false
+    tookS := false
+    dow = dayofweek(time, tz)
+    dayOK := (dow == dayofweek.monday and dMon) or (dow == dayofweek.tuesday and dTue) or (dow == dayofweek.wednesday and dWed) or (dow == dayofweek.thursday and dThu) or (dow == dayofweek.friday and dFri)
+else if ibIn
+    ibH := math.max(ibH, high)
+    ibL := math.min(ibL, low)
+
+if ibDone and not na(ibH) and ibH > ibL
+    ibEndT := time
+    armed  := true
+
+ibRng   = na(ibH) or na(ibL) ? na : ibH - ibL
+rangeOK = not na(ibRng) and (rngMin <= 0 or ibRng >= rngMin) and (rngMax <= 0 or ibRng <= rngMax)
+
+// The trade window is a DURATION from the IB close, which is what makes an overnight window need no special
+// case. `lastBar` is the bar whose successor falls outside the window - a Pine script cannot see the next bar,
+// so it projects one chart bar forward, which is exact on every ordinary boundary.
+elapsed = armed and not na(ibEndT) ? time - ibEndT : int(na)
+inWin   = armed and not na(elapsed) and elapsed >= 0 and elapsed < winMs
+lastBar = inWin and (elapsed + chartMs) >= winMs
+
+// ---- the break, on the rule the entry uses ----
+upLvl = na(ibH) ? na : ibH + buffPts
+dnLvl = na(ibL) ? na : ibL - buffPts
+useClose = entryRule == "1m close beyond the IB"
+brkUpNow = inWin and not na(upLvl) and (useClose ? close > upLvl : high >= upLvl)
+brkDnNow = inWin and not na(dnLvl) and (useClose ? close < dnLvl : low  <= dnLvl)
+if brkUpNow
+    brkUp := true
+if brkDnNow
+    brkDn := true
+
+// ---- stop / targets / size ----
+f_stop(int d, float e) =>
+    raw = slMode == "Opposite side of the IB" ? (d == 1 ? ibL : ibH) :
+          slMode == "IB midpoint"             ? (ibL + ibH) / 2 :
+          slMode == "Fixed points"            ? (d == 1 ? e - slPts : e + slPts) :
+                                                (d == 1 ? e - ibRng * slPctRng / 100 : e + ibRng * slPctRng / 100)
+    lvl = d == 1 ? raw - slBuf : raw + slBuf
+    // never let the stop sit on the wrong side of the entry, which a buffer or a midpoint stop can do
+    d == 1 ? math.min(lvl, e - syminfo.mintick) : math.max(lvl, e + syminfo.mintick)
+
+f_qty(float rPts) =>
+    szMode == "Fixed contracts" ? qtyFixed : math.floor(riskUSD / math.max(rPts * ptVal, syminfo.mintick * ptVal))
+
+longOK  = (dirMode == "Both" or dirMode == "Long only")  and not tookL
+shortOK = (dirMode == "Both" or dirMode == "Short only") and not tookS
+canTake = inWin and dayOK and rangeOK and trDir == 0 and (oneShot ? nTrades < 1 : nTrades < 2)
+
+// Splits the position across the legs. THE ROUNDING LEFTOVER IS THE SUBTLE PART: 3 contracts at 50/50 floors to
+// 1 and 1, and the spare contract has to go somewhere. If the percentages allocate the whole position it joins
+// the LAST target rather than quietly becoming a runner that only the session close can take out; only a
+// deliberate under-allocation (the three adding to less than 100) creates a runner.
+f_open(int d) =>
+    e   = close
+    sl  = f_stop(d, e)
+    r   = math.abs(e - sl)
+    q   = int(math.max(math.floor(f_qty(r)), 0))
+    tot = t1Pct + t2Pct + t3Pct
+    a1  = int(math.floor(q * t1Pct / 100))
+    a2  = int(math.floor(q * t2Pct / 100))
+    a3  = int(math.floor(q * t3Pct / 100))
+    rem = q - a1 - a2 - a3
+    if tot >= 99.99
+        if a3 >= 1
+            a3 := a3 + rem
+        else if a2 >= 1
+            a2 := a2 + rem
+        else
+            a1 := a1 + rem                      // a 1-contract trade takes target 1 and nothing else
+        rem := 0
+    [e, sl, r, q, a1, a2, a3, rem]
+
+takeL = canTake and longOK  and brkUpNow
+takeS = canTake and shortOK and brkDnNow and not takeL
+
+if takeL or takeS
+    d = takeL ? 1 : -1
+    [e, sl, r, q, q1, q2, q3, q4] = f_open(d)
+    if q >= 1
+        trDir   := d
+        entPx   := e
+        slPx    := sl
+        curStop := sl
+        rDist   := r
+        tp1     := d == 1 ? e + r * t1R : e - r * t1R
+        tp2     := d == 1 ? e + r * t2R : e - r * t2R
+        tp3     := d == 1 ? e + r * t3R : e - r * t3R
+        l1 := q1 >= 1
+        l2 := q2 >= 1
+        l3 := q3 >= 1
+        l4 := q4 >= 1
+        beDone  := false
+        entBar  := bar_index
+        nTrades += 1
+        if d == 1
+            tookL := true
+        else
+            tookS := true
+        if d == 1
+            if l1
+                strategy.entry("L1", strategy.long, qty = q1, comment = "IB long T1")
+            if l2
+                strategy.entry("L2", strategy.long, qty = q2, comment = "IB long T2")
+            if l3
+                strategy.entry("L3", strategy.long, qty = q3, comment = "IB long T3")
+            if l4
+                strategy.entry("L4", strategy.long, qty = q4, comment = "IB long runner")
+        else
+            if l1
+                strategy.entry("S1", strategy.short, qty = q1, comment = "IB short T1")
+            if l2
+                strategy.entry("S2", strategy.short, qty = q2, comment = "IB short T2")
+            if l3
+                strategy.entry("S3", strategy.short, qty = q3, comment = "IB short T3")
+            if l4
+                strategy.entry("S4", strategy.short, qty = q4, comment = "IB short runner")
+
+// ---- breakeven, once target 1 has printed ----
+if beOn and trDir != 0 and not beDone and not na(tp1) and bar_index > entBar
+    if (trDir == 1 and high >= tp1) or (trDir == -1 and low <= tp1)
+        curStop := trDir == 1 ? entPx + beOffs : entPx - beOffs
+        beDone  := true
+
+// ---- the exits, re-issued every bar so a breakeven move actually reaches the broker ----
+// The runner carries the stop only: nothing takes it out but the stop or the session close.
+if trDir != 0 and not na(curStop)
+    strategy.exit("L1x", from_entry = "L1", stop = curStop, limit = tp1)
+    strategy.exit("L2x", from_entry = "L2", stop = curStop, limit = tp2)
+    strategy.exit("L3x", from_entry = "L3", stop = curStop, limit = tp3)
+    strategy.exit("L4x", from_entry = "L4", stop = curStop)
+    strategy.exit("S1x", from_entry = "S1", stop = curStop, limit = tp1)
+    strategy.exit("S2x", from_entry = "S2", stop = curStop, limit = tp2)
+    strategy.exit("S3x", from_entry = "S3", stop = curStop, limit = tp3)
+    strategy.exit("S4x", from_entry = "S4", stop = curStop)
+
+// ---- the engine's own copy of what is still open, so the drawings and the day state agree with the orders ----
+// NOT on the entry bar: the entry fills at that bar's close and its exit orders are only live from the next bar,
+// so the bar's own range cannot have taken the stop or a target.
+if trDir != 0 and not na(curStop) and bar_index > entBar
+    stopHit = trDir == 1 ? low <= curStop : high >= curStop
+    if stopHit
+        l1 := false
+        l2 := false
+        l3 := false
+        l4 := false
+    else
+        if l1 and (trDir == 1 ? high >= tp1 : low <= tp1)
+            l1 := false
+        if l2 and (trDir == 1 ? high >= tp2 : low <= tp2)
+            l2 := false
+        if l3 and (trDir == 1 ? high >= tp3 : low <= tp3)
+            l3 := false
+    if not (l1 or l2 or l3 or l4)
+        trDir := 0
+
+// ---- SESSION CLOSE: flat at market, target or no target ----
+// Cancel first. A live exit order holds the position quantity reserved, so a market close created behind it has
+// nothing left to close and is silently dropped - which is exactly how a trade survives its own flatten.
+if lastBar
+    if trDir != 0
+        strategy.cancel_all()
+        strategy.close_all(comment = "session close")
+    trDir := 0
+    armed := false                      // the range belongs to a session that is now over
+    l1 := false
+    l2 := false
+    l3 := false
+    l4 := false
+
+// ================================================================ BREAK STATISTICS
+// The number the overnight study is quoting, recomputed on YOUR symbol and YOUR window. It counts every session
+// whose IB formed, whatever the weekday and range filters say - it is a fact about the market, not about the
+// filtered subset you chose to trade. A "break" is the same test the entry uses, so switching the trigger from
+// close to wick moves these numbers too, which is the honest way to read them.
+var int   nSess   = 0
+var int   nSingle = 0
+var int   nBoth   = 0
+var int   nNone   = 0
+var int   nUpOnly = 0
+var int   nDnOnly = 0
+var float sumRng  = 0.0
+
+if lastBar and not counted and not na(ibRng)
+    counted := true
+    nSess   += 1
+    sumRng  += ibRng
+    if brkUp and brkDn
+        nBoth += 1
+    else if brkUp
+        nSingle += 1
+        nUpOnly += 1
+    else if brkDn
+        nSingle += 1
+        nDnOnly += 1
+    else
+        nNone += 1
+
+f_pc(int a, int b) => b > 0 ? str.tostring(100.0 * a / b, "#.#") + "%" : "-"
+
+var table st = na
+// declared at global scope - Pine cannot define a function inside an if-block
+f_row(int r, string a, string b, string c, color col) =>
+    table.cell(st, 0, r, a, text_color = col,          text_size = size.small, text_halign = text.align_left)
+    table.cell(st, 1, r, b, text_color = color.white,  text_size = size.small, text_halign = text.align_right)
+    table.cell(st, 2, r, c, text_color = color.silver, text_size = size.small, text_halign = text.align_right)
+
+if showStats and barstate.islast
+    pos = statPos == "Bottom left" ? position.bottom_left : statPos == "Top right" ? position.top_right : statPos == "Top left" ? position.top_left : position.bottom_right
+    st := table.new(pos, 3, 9, bgcolor = color.new(color.black, 10), border_color = color.new(color.gray, 60), border_width = 1, frame_color = color.gray, frame_width = 1)
+    f_row(0, "IB " + ibSess + " + " + str.tostring(winMin) + "m  (NY)", "count", "share", color.aqua)
+    f_row(1, "sessions measured", str.tostring(nSess), "", color.white)
+    f_row(2, "single break (one side only)", str.tostring(nSingle), f_pc(nSingle, nSess), color.lime)
+    f_row(3, "   ... up only",   str.tostring(nUpOnly), f_pc(nUpOnly, nSess), color.green)
+    f_row(4, "   ... down only", str.tostring(nDnOnly), f_pc(nDnOnly, nSess), color.red)
+    f_row(5, "both sides broken", str.tostring(nBoth), f_pc(nBoth, nSess), color.orange)
+    f_row(6, "neither side broken", str.tostring(nNone), f_pc(nNone, nSess), color.gray)
+    f_row(7, "average IB range (pts)", nSess > 0 ? str.tostring(sumRng / nSess, "#.#") : "-", "", color.white)
+    f_row(8, useClose ? "break = 1m CLOSE beyond" : "break = wick beyond", "", "", color.silver)
+
+// ================================================================ DRAWINGS
+plot(showIB and not na(ibH) and (ibIn or armed) ? ibH : na, "IB high", color = color.new(color.aqua, 0),  style = plot.style_linebr, linewidth = 2)
+plot(showIB and not na(ibL) and (ibIn or armed) ? ibL : na, "IB low",  color = color.new(color.aqua, 0),  style = plot.style_linebr, linewidth = 2)
+plot(showIB and trDir != 0 and not na(curStop) ? curStop : na, "Stop",   color = color.new(color.red, 0),    style = plot.style_linebr)
+plot(showIB and trDir != 0 and not na(tp1) ? tp1 : na, "Target 1",      color = color.new(color.green, 20), style = plot.style_linebr)
+plot(showIB and trDir != 0 and l2 and not na(tp2) ? tp2 : na, "Target 2", color = color.new(color.green, 45), style = plot.style_linebr)
+plot(showIB and trDir != 0 and l3 and not na(tp3) ? tp3 : na, "Target 3", color = color.new(color.green, 65), style = plot.style_linebr)
+bgcolor(ibIn ? color.new(color.aqua, 92) : inWin ? color.new(color.blue, 96) : na, title = "IB window / trade window")
+
+// The risk/reward box: a green box from the entry to the furthest live target, a red one from the entry to the
+// stop, and one line of text pinned to the entry carrying the contracts, the R multiple and the dollar risk.
+// It grows bar by bar while the trade is open, so it never projects into empty space past the last bar.
+var box rrW = na
+var box rrR = na
+var bool grow = false
+if showRR and trDir != 0 and trDir[1] == 0
+    far = l3 ? tp3 : l2 ? tp2 : tp1
+    q   = math.abs(strategy.position_size)
+    txt = str.tostring(q, "#.#") + "c  risk $" + str.tostring(rDist * ptVal * q, "#") + "  1R = " + str.tostring(rDist, "#.#") + " pts"
+    rrW := box.new(bar_index, trDir == 1 ? far : entPx, bar_index + 1, trDir == 1 ? entPx : far, xloc = xloc.bar_index,
+         border_color = color.new(color.green, 0), bgcolor = color.new(color.green, 85), text = txt,
+         text_color = color.new(color.white, 10), text_size = size.tiny, text_halign = text.align_left,
+         text_valign = trDir == 1 ? text.align_bottom : text.align_top)
+    rrR := box.new(bar_index, trDir == 1 ? entPx : slPx, bar_index + 1, trDir == 1 ? slPx : entPx, xloc = xloc.bar_index,
+         border_color = color.new(color.red, 0), bgcolor = color.new(color.red, 85))
+    grow := true
+if grow and not na(rrW)
+    box.set_right(rrW, bar_index)
+    box.set_right(rrR, bar_index)
+    if trDir == 0
+        grow := false
+
+plotshape(trDir != 0 and trDir[1] == 0 and trDir ==  1, title = "Long break",  style = shape.triangleup,   location = location.belowbar, color = color.new(color.green, 0), size = size.small)
+plotshape(trDir != 0 and trDir[1] == 0 and trDir == -1, title = "Short break", style = shape.triangledown, location = location.abovebar, color = color.new(color.red, 0),   size = size.small)
+
+// ================================================================ ALERT
+if alertsOn and trDir != 0 and trDir[1] == 0
+    alert("IB BREAK " + (trDir == 1 ? "LONG" : "SHORT") +
+         "  | IB " + ibSess + " NY  " + str.tostring(math.round_to_mintick(ibL)) + " - " + str.tostring(math.round_to_mintick(ibH)) +
+         "  | entry " + str.tostring(math.round_to_mintick(entPx)) +
+         "  | stop " + str.tostring(math.round_to_mintick(slPx)) +
+         "  | 1R = " + str.tostring(rDist, "#.#") + " pts" +
+         "  | T1 " + str.tostring(math.round_to_mintick(tp1)) +
+         "  T2 " + str.tostring(math.round_to_mintick(tp2)) +
+         "  T3 " + str.tostring(math.round_to_mintick(tp3)) +
+         "  | flat " + str.tostring(winMin) + "m after the IB", alert.freq_once_per_bar)
