@@ -257,13 +257,11 @@ if brkDnNow
 // a short at ibL + depth%. At 100% those are exactly the far edge (ibL and ibH), which is why the "IB edge"
 // option needs no special case.
 f_stop(int d, float e) =>
-    depth = slMode == "IB edge (100% of the range)"    ? 100.0 :
-            slMode == "75% of the range"               ? 75.0  :
-            slMode == "50% of the range (midpoint)"    ? 50.0  :
-            slMode == "Custom % of the range"          ? slPct : float(na)
-    raw = na(depth) ? (d == 1 ? e - slPts : e + slPts)
-                    : (d == 1 ? ibH - ibRng * depth / 100 : ibL + ibRng * depth / 100)
-    lvl = d == 1 ? raw - slBuf : raw + slBuf
+    // ONE LINE EACH, deliberately: Pine reads a continuation line indented by a multiple of 4 as the start of a
+    // new block, so a ternary broken across lines inside a function body is a syntax error, not a style choice.
+    depth = slMode == "IB edge (100% of the range)" ? 100.0 : slMode == "75% of the range" ? 75.0 : slMode == "50% of the range (midpoint)" ? 50.0 : slMode == "Custom % of the range" ? slPct : float(na)
+    raw   = na(depth) ? (d == 1 ? e - slPts : e + slPts) : (d == 1 ? ibH - ibRng * depth / 100 : ibL + ibRng * depth / 100)
+    lvl   = d == 1 ? raw - slBuf : raw + slBuf
     // never let the stop sit on the wrong side of the entry, which a buffer or a midpoint stop can do
     d == 1 ? math.min(lvl, e - syminfo.mintick) : math.max(lvl, e + syminfo.mintick)
 
