@@ -30,3 +30,27 @@ slower structure. Configurable under the *Higher-timeframe structure* group:
 
 The HTF engine is **non-repainting**: a higher-timeframe bar is only processed
 once it has fully closed.
+
+## Strategies
+
+### `pinescript/sweep_reversal_strategy.pine`
+Sweep Reversal — trades confirmed **liquidity-sweep reversals** (stop runs that fail).
+
+**The sequence**
+1. **Level** — a pivot high/low confirmed by `Swing length` bars on each side (a pool of resting stops).
+2. **Sweep** — price trades through that level, optionally by a minimum ATR distance.
+3. **Reclaim** — price closes back on the original side of the swept level.
+4. **Confirmation** — within `Maximum confirmation bars`, a candle *closes* beyond the local structure of
+   the last `Local structure length` bars, with a body of at least `Minimum displacement body` × ATR.
+   That close is the signal; the order fills at the next bar's open.
+
+**Trade handling**
+- Stop just beyond the sweep extreme (the liquidity-grab wick) + an ATR buffer; setups whose stop is wider
+  than `Maximum stop distance (ATR)` are skipped.
+- Target as an R multiple of the initial risk, measured from the **actual fill**, not the signal close.
+- The protective stop is submitted together with the entry, so the position is covered from its first bar.
+- Optional break-even, ATR trailing stop, time stop, opposite-signal reverse, and EOD flatten.
+- Sizing: fixed contracts, or % risk of a **fixed** account size (no compounding), `$ per point` per contract.
+- Filters: RTH session + entry cutoff, max trades per day, weekday, EMA trend, date range.
+
+Non-repainting: signals are evaluated on closed bars only and the swing levels are already confirmed pivots.

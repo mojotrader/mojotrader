@@ -1,0 +1,457 @@
+//@version=6
+// Sweep Reversal Map Strategy — trades confirmed liquidity-sweep reversals (built for NQ/ES intraday, 1m-15m).
+//
+// THE IDEA (plain English)
+//   1) SWING LEVEL : a pivot high/low confirmed by `Swing length` bars on each side is a pool of liquidity
+//                    (resting stops sit just beyond it).
+//   2) SWEEP       : price pokes THROUGH that level (optionally by a minimum ATR distance) — the stop run.
+//   3) RECLAIM     : price closes back on the original side of the swept level.
+//   4) CONFIRMATION: within `Maximum confirmation bars`, a candle CLOSES beyond the local structure of the
+//                    last `Local structure length` bars, and its body is at least `Minimum displacement body`
+//                    x ATR. That close is the signal; the order goes in at the next bar's open.
+//
+//   ENTRY  : long after a swept LOW is reclaimed and structure breaks up; short after a swept HIGH is
+//            rejected and structure breaks down.
+//   STOP   : just beyond the sweep extreme (the wick that grabbed liquidity) + ATR buffer.
+//   TARGET : R multiple of the initial risk (optional).
+//   MANAGE : optional break-even, ATR trail, time stop, opposite-signal reverse, EOD flatten.
+//
+// NOTHING REPAINTS: every signal is evaluated on closed bars only (barstate.isconfirmed) and pivots are
+// confirmed levels, so a live bar can never create or remove a past signal.
+//
+// NOTE ON FILLS: the signal bar closes -> the entry fills at the NEXT bar's open, so the real entry (and the
+// real R) can differ from the signal close. The protective stop is submitted with the entry, so the position
+// is protected from its very first bar, and the target is re-based on the actual fill price.
+//
+// Validate on your instrument/timeframe before trading this — it is a research idea, not advice.
+
+strategy("Sweep Reversal Strategy", shorttitle = "Sweep Reversal", overlay = true,
+     max_boxes_count = 200, max_lines_count = 200, max_labels_count = 200,
+     initial_capital = 30000, pyramiding = 0, default_qty_type = strategy.fixed, default_qty_value = 1,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0.5, slippage = 1,
+     process_orders_on_close = false, calc_on_every_tick = false)
+
+// ---------------------------------------------------------------- Groups
+gDet   = "Detection"
+gConf  = "Confirmation"
+gTrade = "Trade management"
+gRisk  = "Risk sizing"
+gTime  = "Session / time"
+gFilt  = "Filters"
+gStyle = "Style"
+
+// ---------------------------------------------------------------- Detection inputs
+swingLen    = input.int(5, "Swing length", minval = 2, maxval = 50, group = gDet,
+     tooltip = "Bars required on each side to confirm a swing. Higher = fewer but more important liquidity levels.")
+atrLen      = input.int(14, "ATR length", minval = 1, group = gDet,
+     tooltip = "ATR period used by the penetration, displacement, stop-buffer and trailing filters.")
+minPen      = input.float(0.0, "Minimum sweep penetration (ATR)", minval = 0.0, step = 0.05, group = gDet,
+     tooltip = "How far beyond the swing level price must trade to count as a sweep, as a fraction of ATR. 0 = any breach counts.")
+
+structLen   = input.int(3, "Local structure length", minval = 1, maxval = 20, group = gConf,
+     tooltip = "Bars before the sweep used to define the structure level that price must close beyond to confirm the reversal.")
+maxConfBars = input.int(12, "Maximum confirmation bars", minval = 1, maxval = 100, group = gConf,
+     tooltip = "How long a sweep stays valid while waiting for the structure break. After this many bars the setup is discarded.")
+minDisp     = input.float(0.2, "Minimum displacement body (ATR)", minval = 0.0, step = 0.05, group = gConf,
+     tooltip = "Minimum body of the confirming candle as a fraction of ATR. 0 disables the displacement filter.")
+
+// ---------------------------------------------------------------- Trade inputs
+allowLongs  = input.bool(true,  "Trade bullish reversals (long)",  group = gTrade)
+allowShorts = input.bool(true,  "Trade bearish reversals (short)", group = gTrade)
+stopBufAtr  = input.float(0.15, "Stop buffer beyond sweep (ATR)", minval = 0.0, step = 0.05, group = gTrade,
+     tooltip = "The stop sits beyond the sweep extreme (the liquidity-grab wick) plus this much ATR.")
+useTP       = input.bool(true,  "Use take profit", group = gTrade)
+targetR     = input.float(2.0,  "Take profit (R multiple)", minval = 0.1, step = 0.1, group = gTrade,
+     tooltip = "Target distance as a multiple of the initial risk (entry to stop).")
+maxRiskAtr  = input.float(3.0,  "Maximum stop distance (ATR)", minval = 0.0, step = 0.25, group = gTrade,
+     tooltip = "Skip setups whose stop is further than this many ATR from entry (too wide = bad R:R). 0 = no limit.")
+
+useBE       = input.bool(true,  "Move stop to break-even", group = gTrade)
+beTriggerR  = input.float(1.0,  "  Break-even trigger (R)", minval = 0.1, step = 0.1, group = gTrade,
+     tooltip = "Once price travels this many R in your favour, the stop moves to break-even plus the offset below.")
+beOffsetR   = input.float(0.05, "  Break-even offset (R)", minval = 0.0, step = 0.05, group = gTrade,
+     tooltip = "Profit locked in, in R, when the stop moves to break-even. 0 = stop exactly at the entry price.")
+
+useTrail    = input.bool(false, "Use ATR trailing stop", group = gTrade)
+trailStartR = input.float(1.5,  "  Trailing start (R)", minval = 0.0, step = 0.1, group = gTrade,
+     tooltip = "Trailing begins once price has travelled this many R in your favour. The stop only ever moves in the favourable direction.")
+trailAtrMlt = input.float(2.0,  "  Trailing distance (ATR)", minval = 0.1, step = 0.1, group = gTrade)
+
+timeStopBars = input.int(0, "Time stop (bars in trade, 0 = off)", minval = 0, maxval = 500, group = gTrade,
+     tooltip = "Close at market after this many bars if neither the stop nor the target has been hit.")
+oppMode      = input.string("Reverse", "Opposite signal action", options = ["Reverse", "Close only", "Ignore"], group = gTrade,
+     tooltip = "What to do when an opposite sweep reversal confirms while a position is open.")
+
+// ---------------------------------------------------------------- Risk sizing (% of a FIXED capital, no compounding)
+useRiskSize = input.bool(false, "Size by % risk (else fixed contracts below)", group = gRisk,
+     tooltip = "ON: size each trade so a stop-out loses the risk % of the FIXED account size below. OFF: always trade the fixed contract count.")
+acctSize    = input.float(30000, "Account size $ (fixed - NO compounding)", minval = 1, group = gRisk,
+     tooltip = "Sizing uses this constant capital every day; it does NOT grow or shrink with P&L, so dollar risk per trade is the same throughout the backtest.")
+riskPct     = input.float(1.0, "Risk per trade (% of capital)", minval = 0.1, step = 0.1, group = gRisk)
+ptVal       = input.float(2.0, "$ per point per contract", group = gRisk, tooltip = "MNQ=2, NQ=20, MES=5, ES=50.")
+fixedQty    = input.float(1, "Contracts (fixed sizing)", minval = 1, group = gRisk)
+
+// ---------------------------------------------------------------- Session / time
+tz          = input.string("America/New_York", "Timezone", group = gTime)
+useSession  = input.bool(true, "Only trade inside the session", group = gTime)
+sess        = input.session("0930-1600", "Session", group = gTime)
+useTimeRules= input.bool(true, "Use entry cutoff / EOD flatten", group = gTime)
+cutH        = input.int(15, "  Entry cutoff hour",   0, 23, group = gTime)
+cutM        = input.int(0,  "  Entry cutoff minute", 0, 59, group = gTime)
+flatH       = input.int(15, "  Flatten hour",   0, 23, group = gTime)
+flatM       = input.int(55, "  Flatten minute", 0, 59, group = gTime)
+maxPerDay   = input.int(0, "Max trades per day (0 = unlimited)", minval = 0, maxval = 50, group = gTime)
+
+// ---------------------------------------------------------------- Filters
+useTrend    = input.bool(false, "Trend filter (EMA)", group = gFilt, tooltip = "Longs only above the EMA, shorts only below it.")
+trendLen    = input.int(200, "  Trend EMA length", minval = 2, group = gFilt)
+useDates    = input.bool(false, "Date range filter", group = gFilt)
+startDate   = input.time(timestamp("01 Jan 2020 00:00 +0000"), "  Start date", group = gFilt)
+endDate     = input.time(timestamp("01 Jan 2030 00:00 +0000"), "  End date", group = gFilt)
+onMon       = input.bool(true, "Monday",    group = gFilt, inline = "dow")
+onTue       = input.bool(true, "Tuesday",   group = gFilt, inline = "dow")
+onWed       = input.bool(true, "Wednesday", group = gFilt, inline = "dow")
+onThu       = input.bool(true, "Thursday",  group = gFilt, inline = "dow")
+onFri       = input.bool(true, "Friday",    group = gFilt, inline = "dow")
+
+// ---------------------------------------------------------------- Style
+showDeveloping = input.bool(true, "Show developing reversals", group = gStyle,
+     tooltip = "Draws a faint zone while a sweep is waiting for its structure break.")
+boxExtend      = input.int(2, "Confirmed box extension", minval = 0, maxval = 50, group = gStyle)
+maxHistory     = input.int(80, "Historical setups kept", minval = 1, maxval = 150, group = gStyle)
+zoneColor      = input.color(#ff9f43, "Reversal zone", group = gStyle)
+levelColor     = input.color(#7f1d1d, "Sweep level and marker", group = gStyle)
+showLevels     = input.bool(true, "Plot active stop / target / entry", group = gStyle)
+
+const color TRANSP = #00000000
+
+// ---------------------------------------------------------------- Drawing history
+var array<box>   hBoxes  = array.new<box>()
+var array<line>  hLines  = array.new<line>()
+var array<label> hLabels = array.new<label>()
+
+trimHistory(int keep) =>
+    while array.size(hBoxes) > keep
+        box.delete(array.shift(hBoxes))
+        line.delete(array.shift(hLines))
+        label.delete(array.shift(hLabels))
+
+// ================================================================ DETECTION ENGINE
+float atrVal      = ta.atr(atrLen)
+float pivotHi     = ta.pivothigh(high, swingLen, swingLen)
+float pivotLo     = ta.pivotlow(low, swingLen, swingLen)
+float priorLow    = ta.lowest(low, structLen)[1]
+float priorHigh   = ta.highest(high, structLen)[1]
+float body        = math.abs(close - open)
+bool  dispPass    = not na(atrVal) and body >= atrVal * minDisp
+
+// latest confirmed liquidity levels
+var float swHigh    = na
+var float swLow     = na
+var int   swHighBar = na
+var int   swLowBar  = na
+var bool  swHighOk  = false
+var bool  swLowOk   = false
+
+if not na(pivotHi)
+    swHigh    := pivotHi
+    swHighBar := bar_index - swingLen
+    swHighOk  := true
+
+if not na(pivotLo)
+    swLow    := pivotLo
+    swLowBar := bar_index - swingLen
+    swLowOk  := true
+
+// bearish (swept high) state
+var bool  beActive   = false
+var bool  beReclaim  = false
+var int   beStartBar = na
+var float beLevel    = na
+var float beExtreme  = na
+var float beConfLvl  = na
+var box   beBox      = na
+var line  beLine     = na
+var label beLabel    = na
+
+// bullish (swept low) state
+var bool  buActive   = false
+var bool  buReclaim  = false
+var int   buStartBar = na
+var float buLevel    = na
+var float buExtreme  = na
+var float buConfLvl  = na
+var box   buBox      = na
+var line  buLine     = na
+var label buLabel    = na
+
+bool  bearSignal = false
+bool  bullSignal = false
+float shortSweepExtreme = na   // wick that grabbed liquidity — the short stop reference
+float longSweepExtreme  = na   // wick that grabbed liquidity — the long stop reference
+
+if barstate.isconfirmed
+    float minPenDist = nz(atrVal) * minPen
+
+    // ---- bearish candidate: price sweeps a confirmed swing high
+    bool bearSweep = not beActive and swHighOk and not na(swHigh) and not na(priorLow) and high >= swHigh + minPenDist
+    if bearSweep
+        beActive   := true
+        beReclaim  := close < swHigh
+        beStartBar := bar_index
+        beLevel    := swHigh
+        beExtreme  := high
+        beConfLvl  := priorLow
+        swHighOk   := false
+        color devFill   = showDeveloping ? color.new(zoneColor, 88) : color.new(zoneColor, 100)
+        color devBorder = showDeveloping ? color.new(zoneColor, 65) : color.new(zoneColor, 100)
+        beBox   := box.new(bar_index, beExtreme, bar_index + 1, beLevel, xloc = xloc.bar_index, bgcolor = devFill, border_color = devBorder)
+        beLine  := line.new(swHighBar, beLevel, bar_index, beLevel, xloc = xloc.bar_index, color = showDeveloping ? color.new(levelColor, 75) : color.new(levelColor, 100), style = line.style_dotted)
+        beLabel := label.new(swHighBar, beLevel, "x", xloc = xloc.bar_index, style = label.style_label_center, color = TRANSP, textcolor = showDeveloping ? color.new(levelColor, 70) : color.new(levelColor, 100), size = size.small)
+
+    if beActive
+        beExtreme := math.max(beExtreme, high)
+        beReclaim := beReclaim or close < beLevel
+        box.set_top(beBox, beExtreme)
+        box.set_right(beBox, bar_index + 1)
+        line.set_x2(beLine, bar_index)
+
+        bool confirmBear = beReclaim and close < beConfLvl and dispPass
+        bool expireBear  = bar_index - beStartBar > maxConfBars
+
+        if confirmBear
+            bearSignal := true
+            shortSweepExtreme := beExtreme
+            box.set_right(beBox, bar_index + boxExtend)
+            box.set_bgcolor(beBox, color.new(zoneColor, 35))
+            box.set_border_color(beBox, color.new(zoneColor, 5))
+            box.set_border_width(beBox, 1)
+            line.set_color(beLine, color.new(levelColor, 20))
+            line.set_style(beLine, line.style_solid)
+            label.set_textcolor(beLabel, levelColor)
+            array.push(hBoxes, beBox)
+            array.push(hLines, beLine)
+            array.push(hLabels, beLabel)
+            trimHistory(maxHistory)
+            beActive := false
+            beBox := na
+            beLine := na
+            beLabel := na
+        else if expireBear
+            box.delete(beBox)
+            line.delete(beLine)
+            label.delete(beLabel)
+            beActive := false
+            beBox := na
+            beLine := na
+            beLabel := na
+
+    // ---- bullish candidate: price sweeps a confirmed swing low
+    bool bullSweep = not buActive and swLowOk and not na(swLow) and not na(priorHigh) and low <= swLow - minPenDist
+    if bullSweep
+        buActive   := true
+        buReclaim  := close > swLow
+        buStartBar := bar_index
+        buLevel    := swLow
+        buExtreme  := low
+        buConfLvl  := priorHigh
+        swLowOk    := false
+        color devFill   = showDeveloping ? color.new(zoneColor, 88) : color.new(zoneColor, 100)
+        color devBorder = showDeveloping ? color.new(zoneColor, 65) : color.new(zoneColor, 100)
+        buBox   := box.new(bar_index, buLevel, bar_index + 1, buExtreme, xloc = xloc.bar_index, bgcolor = devFill, border_color = devBorder)
+        buLine  := line.new(swLowBar, buLevel, bar_index, buLevel, xloc = xloc.bar_index, color = showDeveloping ? color.new(levelColor, 75) : color.new(levelColor, 100), style = line.style_dotted)
+        buLabel := label.new(swLowBar, buLevel, "x", xloc = xloc.bar_index, style = label.style_label_center, color = TRANSP, textcolor = showDeveloping ? color.new(levelColor, 70) : color.new(levelColor, 100), size = size.small)
+
+    if buActive
+        buExtreme := math.min(buExtreme, low)
+        buReclaim := buReclaim or close > buLevel
+        box.set_bottom(buBox, buExtreme)
+        box.set_right(buBox, bar_index + 1)
+        line.set_x2(buLine, bar_index)
+
+        bool confirmBull = buReclaim and close > buConfLvl and dispPass
+        bool expireBull  = bar_index - buStartBar > maxConfBars
+
+        if confirmBull
+            bullSignal := true
+            longSweepExtreme := buExtreme
+            box.set_right(buBox, bar_index + boxExtend)
+            box.set_bgcolor(buBox, color.new(zoneColor, 35))
+            box.set_border_color(buBox, color.new(zoneColor, 5))
+            box.set_border_width(buBox, 1)
+            line.set_color(buLine, color.new(levelColor, 20))
+            line.set_style(buLine, line.style_solid)
+            label.set_textcolor(buLabel, levelColor)
+            array.push(hBoxes, buBox)
+            array.push(hLines, buLine)
+            array.push(hLabels, buLabel)
+            trimHistory(maxHistory)
+            buActive := false
+            buBox := na
+            buLine := na
+            buLabel := na
+        else if expireBull
+            box.delete(buBox)
+            line.delete(buLine)
+            label.delete(buLabel)
+            buActive := false
+            buBox := na
+            buLine := na
+            buLabel := na
+
+// ================================================================ TRADING ENGINE
+// ---- time / session state
+bool inSess   = not na(time(timeframe.period, sess, tz))
+bool sessOk   = not useSession or inSess
+int  tod      = hour(time, tz) * 60 + minute(time, tz)
+bool pastCut  = useTimeRules and tod >= cutH * 60 + cutM
+bool flatten  = useTimeRules and tod >= flatH * 60 + flatM
+bool datesOk  = not useDates or (time >= startDate and time <= endDate)
+int  dow      = dayofweek(time, tz)
+bool dayOk    = (dow == dayofweek.monday and onMon) or (dow == dayofweek.tuesday and onTue) or (dow == dayofweek.wednesday and onWed) or (dow == dayofweek.thursday and onThu) or (dow == dayofweek.friday and onFri)
+
+var int tradesToday = 0
+bool newDay = timeframe.change("D")
+if newDay
+    tradesToday := 0
+bool countOk = maxPerDay == 0 or tradesToday < maxPerDay
+
+// ---- trend filter
+float trendEma = ta.ema(close, trendLen)
+bool  trendOkL = not useTrend or (not na(trendEma) and close > trendEma)
+bool  trendOkS = not useTrend or (not na(trendEma) and close < trendEma)
+
+bool tradeWindow = sessOk and datesOk and dayOk and countOk and not pastCut and not flatten
+
+// ---- candidate levels for this bar's signal (risk measured from the signal close)
+float longStop   = na(longSweepExtreme)  ? na : longSweepExtreme  - stopBufAtr * nz(atrVal)
+float shortStop  = na(shortSweepExtreme) ? na : shortSweepExtreme + stopBufAtr * nz(atrVal)
+float longRisk   = na(longStop)  ? na : close - longStop
+float shortRisk  = na(shortStop) ? na : shortStop - close
+
+bool longRiskOk  = not na(longRisk)  and longRisk  > 0 and (maxRiskAtr == 0 or longRisk  <= maxRiskAtr * nz(atrVal))
+bool shortRiskOk = not na(shortRisk) and shortRisk > 0 and (maxRiskAtr == 0 or shortRisk <= maxRiskAtr * nz(atrVal))
+
+bool longRaw     = bullSignal and allowLongs  and trendOkL and tradeWindow and longRiskOk
+bool shortRaw    = bearSignal and allowShorts and trendOkS and tradeWindow and shortRiskOk
+// if both sides confirm on the same bar the market is two-way — stand aside rather than guess
+bool longSignal  = longRaw  and not shortRaw
+bool shortSignal = shortRaw and not longRaw
+
+// ---- position sizer: contracts for a stop distance in points (fixed capital, no compounding)
+f_size(float ptDist) =>
+    float n = fixedQty
+    if useRiskSize
+        float perC = ptDist * ptVal
+        float raw  = perC > 0 ? acctSize * riskPct / 100.0 / perC : 0.0
+        float fr   = raw - math.floor(raw)
+        n := fr > 0.5 ? math.ceil(raw) : math.floor(raw)
+        n := n < 1 ? 1 : n
+    n
+
+// ---- live trade state
+var float actStop   = na
+var float actTarget = na
+var float actRisk   = na
+var float actEntry  = na
+
+bool holdLong  = strategy.position_size > 0
+bool holdShort = strategy.position_size < 0
+bool flat      = strategy.position_size == 0
+
+bool oppReverse = oppMode == "Reverse"
+bool oppClose   = oppMode == "Close only"
+
+// ---- opposite-signal handling (close only: exit, do NOT flip)
+if holdLong and shortSignal and oppClose
+    strategy.close("Long", comment = "Opp signal")
+if holdShort and longSignal and oppClose
+    strategy.close("Short", comment = "Opp signal")
+
+// ---- end-of-day flatten (day-trading rule: never carry a sweep trade overnight)
+if flatten and not flat
+    strategy.close_all(comment = "EOD flat")
+
+// ---- entries. The protective stop is submitted with the entry so the trade is covered from its first bar.
+bool canLong  = longSignal  and (flat or (holdShort and oppReverse))
+bool canShort = shortSignal and (flat or (holdLong  and oppReverse))
+
+if canLong
+    actEntry  := close                       // planned; re-based to the real fill next bar
+    actStop   := longStop
+    actRisk   := longRisk
+    actTarget := useTP ? close + longRisk * targetR : na
+    tradesToday += 1
+    strategy.entry("Long", strategy.long, qty = f_size(longRisk), comment = "Sweep low reclaim")
+    strategy.exit("Long exit", from_entry = "Long", stop = actStop, limit = actTarget)
+
+if canShort
+    actEntry  := close
+    actStop   := shortStop
+    actRisk   := shortRisk
+    actTarget := useTP ? close - shortRisk * targetR : na
+    tradesToday += 1
+    strategy.entry("Short", strategy.short, qty = f_size(shortRisk), comment = "Sweep high rejection")
+    strategy.exit("Short exit", from_entry = "Short", stop = actStop, limit = actTarget)
+
+// ---- re-base the levels on the ACTUAL fill price once the position is open
+bool openedLong  = strategy.position_size > 0 and nz(strategy.position_size[1]) <= 0
+bool openedShort = strategy.position_size < 0 and nz(strategy.position_size[1]) >= 0
+
+if openedLong
+    actEntry  := strategy.position_avg_price
+    actRisk   := actEntry - actStop
+    actTarget := useTP and actRisk > 0 ? actEntry + actRisk * targetR : na
+if openedShort
+    actEntry  := strategy.position_avg_price
+    actRisk   := actStop - actEntry
+    actTarget := useTP and actRisk > 0 ? actEntry - actRisk * targetR : na
+
+// ---- management: break-even, ATR trail, time stop.
+// Skipped on a reversal bar: the new signal already owns actStop, and the old position's exit orders
+// from the previous bar stay live until the reversing market order closes it.
+if holdLong and not canShort and not na(actStop)
+    if na(actRisk) or actRisk <= 0
+        strategy.close("Long", comment = "Gapped through stop")   // filled beyond the protective level
+    else
+        if useBE and high >= actEntry + beTriggerR * actRisk
+            actStop := math.max(actStop, actEntry + beOffsetR * actRisk)
+        if useTrail and high >= actEntry + trailStartR * actRisk
+            actStop := math.max(actStop, close - trailAtrMlt * nz(atrVal))
+        if timeStopBars > 0 and strategy.opentrades > 0 and bar_index - strategy.opentrades.entry_bar_index(0) >= timeStopBars
+            strategy.close("Long", comment = "Time stop")
+        else
+            strategy.exit("Long exit", from_entry = "Long", stop = actStop, limit = actTarget)
+
+if holdShort and not canLong and not na(actStop)
+    if na(actRisk) or actRisk <= 0
+        strategy.close("Short", comment = "Gapped through stop")
+    else
+        if useBE and low <= actEntry - beTriggerR * actRisk
+            actStop := math.min(actStop, actEntry - beOffsetR * actRisk)
+        if useTrail and low <= actEntry - trailStartR * actRisk
+            actStop := math.min(actStop, close + trailAtrMlt * nz(atrVal))
+        if timeStopBars > 0 and strategy.opentrades > 0 and bar_index - strategy.opentrades.entry_bar_index(0) >= timeStopBars
+            strategy.close("Short", comment = "Time stop")
+        else
+            strategy.exit("Short exit", from_entry = "Short", stop = actStop, limit = actTarget)
+
+if flat and not canLong and not canShort
+    actStop   := na
+    actTarget := na
+    actRisk   := na
+    actEntry  := na
+
+// ================================================================ PLOTS AND ALERTS
+plot(showLevels and not na(actStop)   ? actStop   : na, "Active stop",   color = color.new(color.red, 0),   style = plot.style_linebr)
+plot(showLevels and not na(actTarget) ? actTarget : na, "Active target", color = color.new(color.teal, 0),  style = plot.style_linebr)
+plot(showLevels and not na(actEntry)  ? actEntry  : na, "Entry price",   color = color.new(color.gray, 30), style = plot.style_linebr)
+plot(useTrend ? trendEma : na, "Trend EMA", color = color.new(color.blue, 50))
+
+plotshape(longSignal,  "Long entry signal",  location = location.belowbar, style = shape.triangleup,   color = color.new(color.teal, 0), size = size.tiny)
+plotshape(shortSignal, "Short entry signal", location = location.abovebar, style = shape.triangledown, color = color.new(color.red, 0),  size = size.tiny)
+
+alertcondition(bullSignal,  "Bullish sweep reversal confirmed", "Bullish liquidity sweep reversal confirmed on {{ticker}} {{interval}}.")
+alertcondition(bearSignal,  "Bearish sweep reversal confirmed", "Bearish liquidity sweep reversal confirmed on {{ticker}} {{interval}}.")
+alertcondition(longSignal,  "Strategy long entry",  "Sweep Reversal long entry on {{ticker}} {{interval}}.")
+alertcondition(shortSignal, "Strategy short entry", "Sweep Reversal short entry on {{ticker}} {{interval}}.")
