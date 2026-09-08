@@ -78,3 +78,41 @@ time set before the cash close.
 **Note on the slippage input.** Pine cannot read back the slippage set in the
 strategy declaration, so the value has to be repeated in a second input for the
 panel's estimate. Keep the two in sync.
+
+### `pinescript/orbib_ib_aligned_strategy.pine`
+**ORBIB — IB aligned to ORB.** The three-setup ORBIB script (Halyard + ORB + IB),
+shipped in an IB-only configuration where the ORB is demoted from a strategy to a
+direction filter.
+
+**The rule.** At 09:45 the opening range resolves a direction. At 10:30 the initial
+balance resolves its own. The IB setup is armed only when the two **agree** — long
+IB after a long ORB bias, short IB after a short ORB bias. Disagree and the day is
+skipped. A morning where the ORB produced *no* direction counts as disagreement:
+alignment means an actual matching signal, not merely the absence of a conflicting
+one.
+
+**Why it works mechanically.** `Run ORB strategy` gates order placement only. The
+ORB range, its first-extreme test, its close-depth test and the resulting `or_dir`
+are computed every session regardless of that toggle. So the ORB filters the IB
+while never taking a trade of its own.
+
+Shipped defaults: Halyard **off**, ORB trading **off**, IB **on**, alignment **on**.
+Turn `IB: only trade when the ORB bias AGREES` off to get unfiltered IB behaviour
+back; turn the run toggles on to restore the original three-setup script, whose
+seat-precedence rules are left fully intact.
+
+**Auditing the filter.** An invisible filter is one you cannot check, so the ORB
+range lines stay on the chart while the ORB is acting as the filter, a small orange
+arrow at 09:45 marks the bias the IB must match, and a grey label at 10:30 names
+every day the rule blocked and what each side wanted.
+
+**Expect roughly half the trades.** Requiring two independent reads of the same
+morning to agree discards the mornings where the first fifteen minutes and the first
+hour disagree — which is the chop the IB pullback gets minced in, but it is also a
+large cut to the sample. Give it a long backtest before drawing conclusions, and
+note that the probability table's IB rows now sample only the days the filter let
+through, so they are not comparable with a run taken with the filter off.
+
+**Also note:** the ORB min-range filter gates ORB *orders*, not the ORB *direction*,
+so it has no effect on the alignment rule. To exclude narrow opening ranges from the
+filter as well, tighten the ORB close-depth input instead.
