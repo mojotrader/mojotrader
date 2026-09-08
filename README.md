@@ -117,36 +117,57 @@ through, so they are not comparable with a run taken with the filter off.
 so it has no effect on the alignment rule. To exclude narrow opening ranges from the
 filter as well, tighten the ORB close-depth input instead.
 
-### `pinescript/orbib_htf_trend_strategy.pine`
-**ORBIB + higher-timeframe trend filter.** The original three-setup ORBIB
-(Halyard + ORB + IB, all running, seat precedence intact) with one rule layered
-over all three: a **long needs price above the 5-day EMA, a short needs it below.**
+### `pinescript/orbib_session_filters_strategy.pine`
+**ORBIB + two switchable session filters.** The three-setup ORBIB (Halyard + ORB +
+IB, seat precedence intact) with two independent day-classification filters over the
+ORB and IB setups, each a mode dropdown so scenarios are swept from the settings
+dialog rather than by editing code.
 
-Nothing else changes — same ranges, same pullback entries, same stops, targets and
-precedence. Only the direction permission is new.
+**Filter 1 — overnight (Globex) range.** Where the 09:30 RTH open sits in the
+18:00–09:30 range.
 
-**Reference price.** Each setup is judged at the instant it decides its own
-direction, on the price that decision already uses: the ORB range's final close at
-09:45, the IB range's final close at 10:30, the breakout candle's close for Halyard.
+| Mode | Long allowed | Short allowed | Blocks days? |
+|---|---|---|---|
+| Open outside ON range | open > ON high | open < ON low | yes, if open is inside (your choice) |
+| Open vs ON midpoint | open ≥ midpoint | open < midpoint | never |
 
-**The EMA is deliberately one day stale.** `request.security(sym, "D", ta.ema(close, 5))`
-— the obvious spelling — hands an intraday backtest the *completed* daily EMA for the
-day being tested, which at 10:30 contains the rest of that day's trading. That is
-lookahead, and it is the most common way a higher-timeframe filter flatters a
-backtest. This file uses `ta.ema(close, len)[1]` with `lookahead_on` instead: the
-previous completed daily EMA, knowable before the open, fixed all session, identical
-on historical and real-time bars.
+**Filter 2 — prior-day location.** Where the same open sits against yesterday.
 
-**Blocked setups.** A blocked ORB or IB setup is unwound completely, so orders,
-drawings, alerts, the probability study and the seat logic all see "no setup" without
-their own gate. A blocked Halyard break still *consumes* the day, matching how every
-other Halyard filter behaves.
+| Mode | Long allowed | Short allowed | Blocks days? |
+|---|---|---|---|
+| Open outside prior range | open > PDH | open < PDL | yes, if open is inside (your choice) |
+| Open vs prior close | gap up | gap down | never |
+| Open vs prior midpoint | open ≥ midpoint | open < midpoint | never |
 
-**Halyard's reversal is gated too**, unlike Halyard's own 15m trend filter which by
-design gates only the first trade. The reversal is by definition the opposite side of
-the loser, so leaving it open would wave through the one trade the filter most wants
-to stop. An input restores the first-trade-only convention.
+Prior-day levels come from **RTH only** or from the symbol's **daily bar** — which
+for futures spans the full ~23-hour session including Globex and is therefore
+materially wider, making "open outside the prior range" much rarer. That switch is a
+scenario in its own right.
 
-Inputs: master on/off, timeframe (D/W), EMA length, per-setup toggles for ORB / IB /
-Halyard, and blocked-setup markers. The EMA plots on the chart coloured by side —
-teal when longs are permitted, red when shorts are.
+**Both ship `Off`**, so out of the box this is the unfiltered three-setup ORBIB.
+That is the baseline. Get a number with everything off, then enable one filter, then
+the other. Enabling both at once tells you nothing about either.
+
+Other scenario knobs: AND/OR when both filters are live, and a reference price of
+either the 09:30 open (one verdict for the whole day) or the price at the moment each
+setup resolves (09:45 for ORB, 10:30 for IB).
+
+**How to read the result.** Compare **trades removed against P&L removed.** A filter
+that cuts 40% of trades and 40% of profit has done nothing but shrink the sample. A
+filter earns its place only by removing disproportionately more loss than trades.
+
+**No Halyard toggle, deliberately.** Both filters classify the day from the 09:30 RTH
+open. Halyard's range candle forms at 00:00/01:00 ET and its break can fire at 03:00
+ET — before today's RTH open exists and while the overnight range is still forming. A
+Halyard toggle would silently compare against yesterday's open and an unfinished
+range, and would look like it was working. Filtering Halyard needs levels knowable at
+its own decision time.
+
+**Neither filter can look ahead.** The overnight range is frozen at the RTH open.
+Prior-day RTH levels are rolled from the previous session before the current one
+starts writing. The daily-bar source uses `[1]` + `lookahead_on` — the previous
+completed daily bar; asking for the daily high or low without that `[1]` would hand an
+intraday backtest today's finished range.
+
+Blocked setups are labelled with the direction refused and which filter refused it,
+and the levels each active filter reads are drawn on the chart.

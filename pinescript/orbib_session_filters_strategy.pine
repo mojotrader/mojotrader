@@ -1,33 +1,44 @@
 //@version=6
-// ORBIB - three setups in one script, with a higher-timeframe trend filter over all of them.
+// ORBIB - three setups in one script, plus two switchable day-classification filters for scenario testing.
 //
 // WHAT IS NEW IN THIS FILE
-//   All three setups run as before. One rule is layered on top of every one of them: a LONG needs price ABOVE
-//   the higher-timeframe EMA, a SHORT needs price BELOW it. Default is the 5-DAY EMA. Nothing else about any
-//   setup changes - same ranges, same pullback entries, same stops, same targets, same seat precedence.
+//   All three setups run exactly as before. Two INDEPENDENT filters can gate the ORB and IB setups, each a
+//   mode dropdown so scenarios are swept from the settings dialog rather than by editing code:
 //
-//   THE REFERENCE PRICE is whatever each setup already uses to decide its own direction, read at the same
-//   instant the direction is decided: the ORB range's final close at 09:45, the IB range's final close at
-//   10:30, and the breakout candle's close for Halyard. No setup is judged on a price from another moment.
+//     FILTER 1 - OVERNIGHT (GLOBEX) RANGE. Where the 09:30 RTH open sits in the 18:00-09:30 range.
+//       "Open outside ON range"  - above the ON high permits longs, below the ON low permits shorts, and an
+//                                  open INSIDE the range either blocks the day or permits both (your choice).
+//       "Open vs ON midpoint"    - a softer variant that always yields a direction and never blocks a day.
 //
-//   A BLOCKED ORB OR IB SETUP IS UNWOUND COMPLETELY - direction, entries and stop - so orders, drawings,
-//   alerts, the probability study and the seat logic all treat the day as "no setup" without needing a gate
-//   of their own. A BLOCKED HALYARD BREAK still CONSUMES the day, which is how every other Halyard filter
-//   already behaves: a filter can remove that day's trade, never substitute a later one.
+//     FILTER 2 - PRIOR DAY LOCATION. Where the same open sits against yesterday.
+//       "Open outside prior range" - the strict version, with the same inside-the-range choice.
+//       "Open vs prior close"      - pure gap direction. Never blocks.
+//       "Open vs prior midpoint"   - the same idea against the middle of yesterday's range. Never blocks.
+//       Prior-day levels come from RTH ONLY or from the symbol's DAILY BAR (which for futures includes
+//       Globex and is therefore materially wider). That switch is a scenario in its own right.
 //
-// THE EMA IS DELIBERATELY ONE DAY STALE, AND THAT IS THE POINT
-//   request.security(sym, "D", ta.ema(close, 5)) - the obvious spelling - hands an intraday backtest the
-//   COMPLETED daily EMA for the day being tested. At 10:30 that value already contains the rest of that day's
-//   trading: information the strategy could not have had. The backtest looks excellent and live trading does
-//   not match. It is the most common way a higher-timeframe filter flatters a backtest.
-//   This file asks for `ta.ema(close, len)[1]` with lookahead_on instead - the PREVIOUS completed daily bar's
-//   EMA. Knowable before the open, fixed for the whole session, identical on historical and real-time bars.
-//   No repaint, no lookahead. One day of staleness is the correct price for an honest number.
+//   BOTH SHIP "Off", so out of the box this is the unfiltered three-setup ORBIB. That is the baseline: get a
+//   number with everything off, then enable ONE filter, then the other. Enabling both at once tells you
+//   nothing about either, and each filter cuts the trade count - which is already one trade per day.
 //
-// HALYARD'S REVERSAL IS GATED TOO, unlike Halyard's own 15m trend filter, which by design only gates the
-//   FIRST trade. The reversal is by definition the opposite side of the loser, so leaving it ungated would
-//   wave through the single trade this filter most wants to stop - the counter-trend one. There is an input
-//   to restore the first-trade-only convention.
+// HOW TO READ THE RESULT - the part that decides whether a filter is worth keeping
+//   Compare TRADES REMOVED against P&L REMOVED. A filter that cuts 40% of trades and 40% of profit has done
+//   nothing except shrink the sample and make what is left less trustworthy. A filter earns its place only by
+//   removing disproportionately more loss than trades.
+//
+// WHY THERE IS NO HALYARD TOGGLE, AND WHY THAT IS DELIBERATE
+//   Both filters classify the day from the 09:30 RTH open. Halyard's range candle forms at 00:00 / 01:00 ET
+//   and its break can fire at 03:00 ET - hours before today's RTH open exists, and while the overnight range
+//   is still being built. A Halyard toggle here would quietly compare against YESTERDAY's open and an
+//   unfinished overnight range, and would look like it was working. Filtering Halyard needs levels knowable
+//   at ITS own decision time; that is a different filter, not this one with an extra checkbox.
+//
+// NEITHER FILTER CAN LOOK AHEAD
+//   The overnight range is frozen at the RTH open and never revised. The RTH open is the open. Prior-day RTH
+//   levels are rolled from the previous session before the current one starts writing. The daily-bar source
+//   uses the `[1]` + lookahead_on idiom, i.e. the PREVIOUS completed daily bar - asking for the daily high or
+//   low without that `[1]` would hand an intraday backtest today's finished range, which is the single most
+//   common way a higher-timeframe filter flatters a backtest.
 //
 // WHY THE OTHER TWO ENGINES ARE STILL IN THE FILE
 //   Halyard is a 15-minute opening-range break that fires on the 15m CLOSE. Break-then-Pullback (ORB + IB) is a
@@ -81,7 +92,7 @@
 //     EOD flatten moves from the next bar's open to the flatten bar's close.
 //   - initial_capital 150000 - enough to carry both engines. Neither engine compounds: ORB/IB size from fixed
 //     dollar budgets or fixed contracts, Halyard from a fixed $ risk, so capital only affects the % figures.
-strategy("ORBIB - HTF trend filter", overlay = true, pyramiding = 6,
+strategy("ORBIB - session filters", overlay = true, pyramiding = 6,
      max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500,
      initial_capital = 150000, margin_long = 0, margin_short = 0,
      default_qty_type = strategy.fixed, default_qty_value = 1, process_orders_on_close = true,
@@ -203,32 +214,53 @@ ibDepth   = input.float(100, "IB bias: max close depth into the range (%)", minv
 orbMinRngPct = input.float(0.40, "Min ORB range (% of price, 0 = off)", minval = 0, step = 0.05, group = gFilt,
      tooltip = "Skip ORB setups whose 15-min opening range is smaller than this % of price (range / range-low * 100). IB is NOT filtered. Set 0 to disable.\n\nThis gates ORB ORDERS ONLY - it does NOT touch the ORB's direction, so it has no effect on the alignment rule. A narrow opening range still produces a bias the IB will align to. If you want tiny ranges excluded from the filter as well, tighten the ORB close-depth input instead.")
 
-// ---------------------------------------------------------------- Higher-timeframe trend filter
-// ONE rule, applied identically to all three setups: a LONG needs price ABOVE the higher-timeframe EMA, a
-// SHORT needs price BELOW it. Nothing else about any setup changes.
+// ---------------------------------------------------------------- SESSION FILTERS (ORB / IB)
+// Two independent day-classification filters, each a MODE dropdown so scenarios can be swept without editing
+// code. BOTH SHIP "Off", so out of the box this file is the unfiltered three-setup ORBIB - turn ONE on, get a
+// number, turn it off, turn the other on. Enabling both at once tells you nothing about either.
 //
-// THE REFERENCE PRICE is whatever that setup uses to decide its own direction, so the filter is read at the
-// same instant the direction is: the ORB range's final close at 09:45, the IB range's final close at 10:30,
-// and the breakout candle's close for Halyard. No setup is judged on a price from a different moment.
-//
-// A BLOCKED SETUP IS UNWOUND COMPLETELY - direction, entries and stop - so orders, drawings, alerts, the
-// probability study and the seat logic all treat the day as "no setup" without needing a gate of their own.
-// For Halyard the break is still CONSUMED, which is how every other Halyard filter already behaves: a filter
-// can remove that day's trade but never substitute a later one.
-gTrend    = "Higher-timeframe trend filter"
-useTrend  = input.bool(true, "Filter every setup by a higher-timeframe EMA", group = gTrend,
-     tooltip = "LONG setups need price above the EMA, SHORT setups need it below. Off restores the unfiltered behaviour of all three engines.")
-trendTf   = input.string("D", "Trend timeframe", options = ["D", "W"], group = gTrend,
-     tooltip = "D with length 5 is the 5-DAY EMA - one trading week of context. W turns the same length into weeks, which is a much slower filter; drop the length if you switch.")
-trendLen  = input.int(5, "EMA length", minval = 1, group = gTrend,
-     tooltip = "5 on the daily timeframe = the 5-day EMA.")
-trendORB  = input.bool(true, "   apply to ORB",     group = gTrend)
-trendIB   = input.bool(true, "   apply to IB",      group = gTrend)
-trendHAL  = input.bool(true, "   apply to Halyard", group = gTrend)
-trendHalRev = input.bool(true, "   ... and to Halyard's reversal trade", group = gTrend,
-     tooltip = "ON, and deliberately different from Halyard's own 15m trend filter, which by design only gates the FIRST trade.\n\nThe reversal is by definition the opposite side of the loser, so leaving it ungated would let the one trade the filter most wants to stop straight through - the counter-trend one. A direction filter that permits counter-trend entries is not a direction filter. Untick to restore the first-trade-only convention.")
-showTrendMark = input.bool(true, "   mark the setups it blocks", group = gTrend,
-     tooltip = "A grey label on a blocked ORB or IB setup naming the direction refused and where price sat against the EMA, and a grey X on a blocked Halyard break. This is how you audit the filter instead of trusting it.")
+// THEY APPLY TO ORB AND IB ONLY, and that is a correctness decision rather than laziness. Both filters
+// classify the day from the 09:30 RTH open. Halyard's range candle forms at 00:00 / 01:00 ET and its break can
+// fire at 03:00 ET - hours BEFORE today's RTH open exists and while the overnight range is still forming. A
+// Halyard toggle here would silently compare against YESTERDAY's open and an incomplete overnight range, so
+// there is no Halyard toggle. Filtering Halyard needs levels knowable at ITS decision time; ask for that
+// separately rather than reusing these.
+gFil1     = "Filter 1 - Overnight (Globex) range"
+onMode    = input.string("Off", "Overnight filter", group = gFil1,
+     options = ["Off", "Open outside ON range", "Open vs ON midpoint"],
+     tooltip = "WHERE THE RTH OPEN SITS IN THE OVERNIGHT RANGE.\n\nOpen outside ON range (strict): open above the overnight high permits LONGS only, below the overnight low permits SHORTS only, and an open inside the range is handled by the setting below. This is the real signal - an open outside the whole overnight range says the day already has a driver.\n\nOpen vs ON midpoint (soft): above the midpoint permits longs, below permits shorts. Always yields a direction, so it never blocks a day and keeps far more trades. Use it when the strict mode cuts the sample too hard.")
+onInside  = input.string("Block the day", "   ... when the open is INSIDE the ON range", group = gFil1,
+     options = ["Block the day", "Allow both directions"],
+     tooltip = "Only read in 'Open outside ON range' mode. An open inside the overnight range is the ambiguous, rotational case - the one breakout strategies bleed on. 'Block the day' is the hypothesis worth testing; 'Allow both' isolates the outside-the-range days without discarding the rest.")
+onSess    = input.session("1800-0930", "Overnight session", group = gFil1,
+     tooltip = "ET. 18:00-09:30 is the CME Globex session ahead of the New York cash open.")
+onORB     = input.bool(true, "   apply to ORB", group = gFil1)
+onIB      = input.bool(true, "   apply to IB",  group = gFil1)
+
+gFil2     = "Filter 2 - Prior day location"
+pdMode    = input.string("Off", "Prior-day filter", group = gFil2,
+     options = ["Off", "Open outside prior range", "Open vs prior close", "Open vs prior midpoint"],
+     tooltip = "WHERE THE RTH OPEN SITS AGAINST YESTERDAY.\n\nOpen outside prior range (strict): above yesterday's high permits LONGS only, below yesterday's low permits SHORTS only, inside is handled below. An open inside yesterday's range is the classic rotational day.\n\nOpen vs prior close: a pure gap-direction rule - gap up permits longs, gap down permits shorts. Never blocks a day.\n\nOpen vs prior midpoint: the same idea measured against the middle of yesterday's range instead of its close. Never blocks.")
+pdInside  = input.string("Block the day", "   ... when the open is INSIDE the prior range", group = gFil2,
+     options = ["Block the day", "Allow both directions"],
+     tooltip = "Only read in 'Open outside prior range' mode.")
+pdSource  = input.string("RTH only (09:30-16:00)", "Prior-day levels from", group = gFil2,
+     options = ["RTH only (09:30-16:00)", "Daily bar (includes Globex)"],
+     tooltip = "THIS CHANGES THE LEVELS MATERIALLY, so it is a scenario in its own right.\n\nRTH only: yesterday's high/low/close between 09:30 and 16:00, tracked by this script. These are the levels floor traders and most day traders actually watch.\n\nDaily bar: the symbol's own daily candle, which for futures spans the full ~23-hour session including Globex - so its high and low are usually WIDER, and an 'open outside the prior range' day becomes much rarer.")
+pdORB     = input.bool(true, "   apply to ORB", group = gFil2)
+pdIB      = input.bool(true, "   apply to IB",  group = gFil2)
+
+gFilC     = "Filters - combination & audit"
+filCombine = input.string("Both must allow (AND)", "When BOTH filters are active", group = gFilC,
+     options = ["Both must allow (AND)", "Either may allow (OR)"],
+     tooltip = "Only matters while both filters are on. AND is the restrictive reading - the two must agree, which cuts the sample hard. OR keeps a setup that either filter permits. With only one filter active this setting does nothing.")
+filRef    = input.string("RTH open (09:30)", "Reference price", group = gFilC,
+     options = ["RTH open (09:30)", "Price when the setup resolves"],
+     tooltip = "RTH open: the day is classified once at 09:30 and every setup inherits the same verdict - a clean day-level test, and the one these filters were designed around.\n\nPrice when the setup resolves: re-reads the filter at 09:45 for the ORB and 10:30 for the IB, against the same levels. More responsive, but the two setups can then disagree about the same day.")
+showFilMark = input.bool(true, "Mark the setups the filters block", group = gFilC,
+     tooltip = "A grey label naming the direction refused and which filter refused it. This is how you audit a filter instead of trusting it.")
+showFilLvls = input.bool(true, "Draw the levels the filters read", group = gFilC,
+     tooltip = "Overnight high/low and prior-day high/low/close, drawn only while the filter that reads them is active.")
 
 // ---------------------------------------------------------------- Break alerts (manual trading)
 grpBA     = "Break alerts (manual)"
@@ -391,26 +423,109 @@ f_tp(int d, float rH, float rL, float rg, float dHi, float dLo, string tpL, stri
 // chart that is a one-minute lag on a gate that only matters when a fill and a 15m close land on the same bar.
 var bool orbibLive = false
 
-// ================================================================ HIGHER-TIMEFRAME TREND EMA
-// NON-REPAINTING, and the idiom matters more than it looks.
-//
-// request.security(sym, "D", ta.ema(close, 5)) - the obvious spelling - hands an intraday backtest the
-// COMPLETED daily EMA for the day being tested. At 10:30 that value includes the rest of that day's trading,
-// i.e. information the strategy could not have had. The backtest then looks excellent and the live results
-// do not match, which is the single most common way an HTF filter flatters a backtest.
-//
-// `ta.ema(close, len)[1]` with lookahead_on asks instead for the PREVIOUS completed daily bar's EMA. That is
-// knowable before the session opens, is fixed for the whole session, and reads the same on historical and
-// real-time bars - no repaint, no lookahead. The cost is that the filter is one day stale, which is the
-// correct price for an honest number.
-emaHTF = request.security(syminfo.tickerid, trendTf, ta.ema(close, trendLen)[1], lookahead = barmerge.lookahead_on)
+// ================================================================ SESSION FILTER DATA
+// Everything the two filters read. All of it is knowable at or before the 09:30 open and none of it is
+// revised afterwards, so neither filter can look ahead.
 
-// Does the filter permit direction `d` at price `px`? `applyIt` is that setup's own opt-out.
-// An unavailable EMA (early history, before `trendLen` daily bars exist) PASSES rather than blocking, so the
-// filter never silently swallows the start of a backtest.
-f_trendOK(int d, float px, bool applyIt) =>
-    bool skip = not useTrend or not applyIt or na(emaHTF) or na(px)
-    skip ? true : (d == 1 ? px > emaHTF : px < emaHTF)
+// ---- the overnight (Globex) range, frozen at the RTH open ----
+inON = not na(time(timeframe.period, onSess, tz))
+var float onH_acc = na
+var float onL_acc = na
+var float onH     = na       // frozen for today's RTH session
+var float onL     = na
+if inON and not inON[1]
+    onH_acc := high
+    onL_acc := low
+else if inON
+    onH_acc := math.max(onH_acc, high)
+    onL_acc := math.min(onL_acc, low)
+
+// ---- today's RTH open, and yesterday's RTH high / low / close ----
+// Tracked here rather than reusing dHigh/dLow so the capture cannot be broken by the order of that block's
+// reset. On the newSession bar the "current" registers still hold YESTERDAY's values, which is exactly the
+// moment to roll them into the prior-day slots.
+var float rthOpen  = na
+var float rthH     = na
+var float rthL     = na
+var float rthC     = na
+var float pdH_rth  = na
+var float pdL_rth  = na
+var float pdC_rth  = na
+if newSession
+    onH     := onH_acc
+    onL     := onL_acc
+    pdH_rth := rthH
+    pdL_rth := rthL
+    pdC_rth := rthC
+    rthOpen := open
+    rthH    := high
+    rthL    := low
+else if inSess
+    rthH := math.max(rthH, high)
+    rthL := math.min(rthL, low)
+if inSess
+    rthC := close
+
+// ---- prior day from the symbol's own daily bar (the alternative source) ----
+// [1] plus lookahead_on = the PREVIOUS completed daily bar. Asking for the daily high/low without the [1]
+// hands an intraday backtest today's finished range, which is information the strategy could not have had.
+pdH_day = request.security(syminfo.tickerid, "D", high[1],  lookahead = barmerge.lookahead_on)
+pdL_day = request.security(syminfo.tickerid, "D", low[1],   lookahead = barmerge.lookahead_on)
+pdC_day = request.security(syminfo.tickerid, "D", close[1], lookahead = barmerge.lookahead_on)
+
+usePdRth = pdSource == "RTH only (09:30-16:00)"
+pdHi = usePdRth ? pdH_rth : pdH_day
+pdLo = usePdRth ? pdL_rth : pdL_day
+pdCl = usePdRth ? pdC_rth : pdC_day
+
+// ---- permission helpers ----
+// Each returns "is direction d allowed at price px". A mode of "Off", or missing data, PASSES - a filter
+// never silently swallows the early history where its levels do not exist yet.
+f_onOK(int d, float px) =>
+    bool r = true
+    if onMode != "Off" and not na(onH) and not na(onL) and not na(px) and onH > onL
+        if onMode == "Open outside ON range"
+            r := px > onH ? d == 1 : px < onL ? d == -1 : onInside == "Allow both directions"
+        else
+            float mid = (onH + onL) / 2
+            r := px >= mid ? d == 1 : d == -1
+    r
+
+f_pdOK(int d, float px) =>
+    bool r = true
+    if pdMode != "Off" and not na(px)
+        if pdMode == "Open outside prior range" and not na(pdHi) and not na(pdLo) and pdHi > pdLo
+            r := px > pdHi ? d == 1 : px < pdLo ? d == -1 : pdInside == "Allow both directions"
+        else if pdMode == "Open vs prior close" and not na(pdCl)
+            r := px >= pdCl ? d == 1 : d == -1
+        else if pdMode == "Open vs prior midpoint" and not na(pdHi) and not na(pdLo)
+            float mid = (pdHi + pdLo) / 2
+            r := px >= mid ? d == 1 : d == -1
+    r
+
+// Combined verdict for one setup. applyOn / applyPd are that setup's own opt-outs. AND/OR is applied only
+// across filters that are actually live, so "OR" with a single active filter does not degrade to "always
+// true" - which is the trap in the obvious spelling of this.
+f_filOK(int d, float px, bool applyOn, bool applyPd) =>
+    bool onLive = applyOn and onMode != "Off"
+    bool pdLive = applyPd and pdMode != "Off"
+    bool r = true
+    if onLive and pdLive
+        r := filCombine == "Either may allow (OR)" ? (f_onOK(d, px) or f_pdOK(d, px)) : (f_onOK(d, px) and f_pdOK(d, px))
+    else if onLive
+        r := f_onOK(d, px)
+    else if pdLive
+        r := f_pdOK(d, px)
+    r
+
+// Which filter refused, for the audit label.
+f_filWhy(int d, float px, bool applyOn, bool applyPd) =>
+    string w = ""
+    if applyOn and onMode != "Off" and not f_onOK(d, px)
+        w := "overnight"
+    if applyPd and pdMode != "Off" and not f_pdOK(d, px)
+        w := w == "" ? "prior-day" : w + " + prior-day"
+    w
 
 // ================================================================ HALYARD ENGINE
 // Single-candle opening-range breakout with an optional loser-reversal, on 15-MINUTE candles that this engine
@@ -667,7 +782,7 @@ halEntered  = false
 halEntDir   = 0
 
 // --- First trade (take the FIRST breakout, if it passes the filters) ---
-halEnterL = halBrkUp and halLongOK and halDayOK and f_trendOK(1, hal15C, trendHAL) and halSeatFree and halTrades < halMaxTrades and halTrDir == 0 and halState == 0
+halEnterL = halBrkUp and halLongOK and halDayOK and halSeatFree and halTrades < halMaxTrades and halTrDir == 0 and halState == 0
 if halEnterL
     sl = f_halLongStop(hal15C)
     tp = f_halLongTP(hal15C, sl, halRR)
@@ -688,7 +803,7 @@ if halEnterL
         strategy.entry("HAL-L", strategy.long, qty = q)
         strategy.exit("HAL-Lx", from_entry = "HAL-L", stop = sl, limit = tp)
 
-halEnterS = halBrkDn and halShortOK and halDayOK and halTrendOK and f_trendOK(-1, hal15C, trendHAL) and halSeatFree and halTrades < halMaxTrades and halTrDir == 0 and halState == 0
+halEnterS = halBrkDn and halShortOK and halDayOK and halTrendOK and halSeatFree and halTrades < halMaxTrades and halTrDir == 0 and halState == 0
 if halEnterS
     sl = f_halShortStop(hal15C)
     tp = f_halShortTP(hal15C, sl, halRR)
@@ -715,7 +830,7 @@ if halEnterS
 // NOT filtered. The reversal is gated on the day-of-week, the direction and the losing first trade only - the
 // entry filters apply to the FIRST trade. Note the per-day direction grid DOES reach it: a weekday set to one
 // side can never take the reversal, since the reversal is by definition the opposite side of the loser.
-halRevL = halRevOn and runHAL and halNewBar and halState == 2 and halFirstDir == -1 and halLongOK and halDayOK and f_trendOK(1, hal15C, trendHAL and trendHalRev) and halSeatFree and halTrades < halMaxTrades and halTrDir == 0 and halLevels and hal15C > halRH
+halRevL = halRevOn and runHAL and halNewBar and halState == 2 and halFirstDir == -1 and halLongOK and halDayOK and halSeatFree and halTrades < halMaxTrades and halTrDir == 0 and halLevels and hal15C > halRH
 if halRevL
     sl = f_halLongStop(hal15C)
     tp = f_halLongTP(hal15C, sl, halRevRR)
@@ -735,7 +850,7 @@ if halRevL
         strategy.entry("HAL-RL", strategy.long, qty = q)
         strategy.exit("HAL-RLx", from_entry = "HAL-RL", stop = sl, limit = tp)
 
-halRevS = halRevOn and runHAL and halNewBar and halState == 2 and halFirstDir == 1 and halShortOK and halDayOK and f_trendOK(-1, hal15C, trendHAL and trendHalRev) and halSeatFree and halTrades < halMaxTrades and halTrDir == 0 and halLevels and hal15C < halRL
+halRevS = halRevOn and runHAL and halNewBar and halState == 2 and halFirstDir == 1 and halShortOK and halDayOK and halSeatFree and halTrades < halMaxTrades and halTrDir == 0 and halLevels and hal15C < halRL
 if halRevS
     sl = f_halShortStop(hal15C)
     tp = f_halShortTP(hal15C, sl, halRevRR)
@@ -976,7 +1091,8 @@ var bool  or_beDone = false
 var bool  or_closed = false
 var bool  or_oppBroke = false
 var bool  or_missed = false      // the ORB pullback traded through while a Halyard trade held the seat
-var int   or_trendBlk = 0        // direction the HTF trend filter refused today (0 = nothing refused)
+var int   or_filBlk = 0          // direction the session filters refused today (0 = nothing refused)
+var string or_filWhy = ""        // which filter refused it
 var float orbSz1 = na
 var float orbSz2 = na
 
@@ -1000,7 +1116,8 @@ if newSession
     or_closed := false
     or_oppBroke := false
     or_missed := false
-    or_trendBlk := 0
+    or_filBlk := 0
+    or_filWhy := ""
     orbSz1 := na
     orbSz2 := na
 if or_inR
@@ -1027,18 +1144,20 @@ if or_rDone and not na(or_rH) and or_rH > or_rL
         or_e1 := or_shallow ? or_rL + 0.25*or_rng : or_rL + 0.5*or_rng
         or_e2 := or_rL + 0.5*or_rng
         or_zstop := or_rH                     // the stop is ALWAYS the far side of the range
-    // ---- HIGHER-TIMEFRAME TREND GATE ----
-    // Reference price is close[1]: or_rDone fires on the first bar AFTER the range, so close[1] is the
-    // range's own final close - the exact price the direction test above was decided on.
-    if or_dir != 0 and not f_trendOK(or_dir, close[1], trendORB)
-        or_trendBlk := or_dir
+    // ---- SESSION FILTER GATE ----
+    // close[1] is the ORB range's own final close (or_rDone fires on the first bar AFTER the range), so the
+    // "setup resolves" reference is the very price the direction test above was decided on.
+    float or_filPx = filRef == "RTH open (09:30)" ? rthOpen : close[1]
+    if or_dir != 0 and not f_filOK(or_dir, or_filPx, onORB, pdORB)
+        or_filBlk  := or_dir
+        or_filWhy  := f_filWhy(or_dir, or_filPx, onORB, pdORB)
         or_dir     := 0
         or_shallow := false
         or_e1      := na
         or_e2      := na
         or_zstop   := na
-    if showTrendMark and runORB and or_trendBlk != 0
-        label.new(bar_index, or_rH, "ORB " + (or_trendBlk == 1 ? "LONG" : "SHORT") + " blocked\nprice " + str.tostring(math.round_to_mintick(close[1])) + (close[1] > emaHTF ? " ABOVE " : " BELOW ") + str.tostring(trendLen) + (trendTf == "D" ? "d" : "w") + " EMA " + str.tostring(math.round_to_mintick(emaHTF)),
+    if showFilMark and runORB and or_filBlk != 0
+        label.new(bar_index, or_rH, "ORB " + (or_filBlk == 1 ? "LONG" : "SHORT") + " blocked\nby " + or_filWhy + " filter",
              xloc = xloc.bar_index, style = label.style_label_down, color = color.new(color.gray, 25), textcolor = color.white, size = size.tiny)
     if or_dir != 0
         // each unit is sized on its own budget and its own stop distance (the add sits closer to the stop)
@@ -1255,7 +1374,8 @@ var bool  ib_beDone = false
 var bool  ib_closed = false
 var bool  ib_oppBroke = false
 var bool  ib_missed = false      // the IB pullback was reached while another setup held the seat -> skip IB today
-var int   ib_trendBlk = 0        // direction the HTF trend filter refused today (0 = nothing refused)
+var int   ib_filBlk = 0          // direction the session filters refused today (0 = nothing refused)
+var string ib_filWhy = ""        // which filter refused it
 var float ibSz1 = na
 var float ibSz2 = na
 
@@ -1279,7 +1399,8 @@ if newSession
     ib_closed := false
     ib_oppBroke := false
     ib_missed := false
-    ib_trendBlk := 0
+    ib_filBlk := 0
+    ib_filWhy := ""
     ibSz1 := na
     ibSz2 := na
 if ib_inR
@@ -1306,16 +1427,18 @@ if ib_rDone and not na(ib_rH) and ib_rH > ib_rL
         ib_e1 := ib_shallow ? ib_rL + 0.25*ib_rng : ib_rL + 0.5*ib_rng
         ib_e2 := ib_rL + 0.5*ib_rng
         ib_zstop := ib_rH                     // the stop is ALWAYS the far side of the range
-    // ---- HIGHER-TIMEFRAME TREND GATE ---- (same rule and same reference-price reasoning as the ORB above)
-    if ib_dir != 0 and not f_trendOK(ib_dir, close[1], trendIB)
-        ib_trendBlk := ib_dir
+    // ---- SESSION FILTER GATE ---- (same rule and same reference-price reasoning as the ORB above)
+    float ib_filPx = filRef == "RTH open (09:30)" ? rthOpen : close[1]
+    if ib_dir != 0 and not f_filOK(ib_dir, ib_filPx, onIB, pdIB)
+        ib_filBlk  := ib_dir
+        ib_filWhy  := f_filWhy(ib_dir, ib_filPx, onIB, pdIB)
         ib_dir     := 0
         ib_shallow := false
         ib_e1      := na
         ib_e2      := na
         ib_zstop   := na
-    if showTrendMark and runIB and ib_trendBlk != 0
-        label.new(bar_index, ib_rH, "IB " + (ib_trendBlk == 1 ? "LONG" : "SHORT") + " blocked\nprice " + str.tostring(math.round_to_mintick(close[1])) + (close[1] > emaHTF ? " ABOVE " : " BELOW ") + str.tostring(trendLen) + (trendTf == "D" ? "d" : "w") + " EMA " + str.tostring(math.round_to_mintick(emaHTF)),
+    if showFilMark and runIB and ib_filBlk != 0
+        label.new(bar_index, ib_rH, "IB " + (ib_filBlk == 1 ? "LONG" : "SHORT") + " blocked\nby " + ib_filWhy + " filter",
              xloc = xloc.bar_index, style = label.style_label_down, color = color.new(color.gray, 25), textcolor = color.white, size = size.tiny)
     if ib_dir != 0
         ibSz1 := sizeByRisk ? f_size(ibRiskDlr1, math.abs(ib_e1 - ib_zstop)) : ibQty1
@@ -1551,7 +1674,7 @@ if brkAlerts and runORB and or_dir != 0 and or_broke and not or_broke[1]
 // A setup the trend filter blocked resolves its direction to 0, so no alert fires for a trade you will not take.
 if brkAlerts and runIB and ib_dir != 0 and ib_broke and not ib_broke[1]
     ibTPa = f_tp(ib_dir, ib_rH, ib_rL, ib_rng, dHigh, dLow, ibTpL, ibTpS)
-    alert("IB BREAK  " + (ib_dir == 1 ? "LONG" : "SHORT") + (useTrend and trendIB ? " (trend-aligned)" : "") +
+    alert("IB BREAK  " + (ib_dir == 1 ? "LONG" : "SHORT") + (onMode != "Off" or pdMode != "Off" ? " (filtered)" : "") +
          "  | broke " + str.tostring(math.round_to_mintick(ib_dir == 1 ? ib_rH : ib_rL)) +
          "  | pullback entry " + str.tostring(math.round_to_mintick(ib_e1)) +
          "  | stop " + str.tostring(math.round_to_mintick(ib_zstop)) +
@@ -1734,12 +1857,13 @@ if halGrow
 var table info = na
 if showInfo and barstate.islast
     info := table.new(position.top_right, 1, 20, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
-    table.cell(info, 0, 0,  (ordersOn ? "" : "[INDICATOR - no orders]  ") + "ORBIB + HIGHER-TIMEFRAME TREND FILTER",
+    table.cell(info, 0, 0,  (ordersOn ? "" : "[INDICATOR - no orders]  ") + "ORBIB + SESSION FILTERS",
          text_color = ordersOn ? color.aqua : color.orange, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 1,  useTrend ? "TREND FILTER ON: " + str.tostring(trendLen) + (trendTf == "D" ? "-day" : "-week") + " EMA - long above, short below" : "Trend filter: OFF",
-         text_color = useTrend ? color.lime : color.gray, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 2,  "  applies to: " + (trendORB ? "ORB " : "") + (trendIB ? "IB " : "") + (trendHAL ? "HAL" : ""), text_color = color.silver, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 3,  "  EMA = PREVIOUS daily close - no repaint, no lookahead", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 1,  "F1 overnight: " + onMode + (onMode == "Open outside ON range" ? "  (inside -> " + onInside + ")" : ""),
+         text_color = onMode == "Off" ? color.gray : color.lime, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 2,  "F2 prior day: " + pdMode + (pdMode == "Off" ? "" : "  [" + (usePdRth ? "RTH" : "daily bar") + "]"),
+         text_color = pdMode == "Off" ? color.gray : color.lime, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 3,  (onMode != "Off" and pdMode != "Off") ? "  combine: " + filCombine + "  | ref: " + filRef : "  ref price: " + filRef, text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 4,  "Running: " + (runHAL ? "HAL " : "") + (runORB ? "ORB " : "") + (runIB ? "IB" : ""),
          text_color = color.aqua, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 5,  "Ranges: ORB 09:30-09:45 | IB 09:30-10:30 (ET)",              text_color = color.white,   text_size = size.small, text_halign = text.align_left)
@@ -1758,7 +1882,7 @@ if showInfo and barstate.islast
     table.cell(info, 0, 17, modeTxt + (maxDayLoss > 0 ? "  | day stop $" + str.tostring(maxDayLoss, "#") + (dayHalt ? " - HIT" : "") : "") + (rmFixed ? "" : " (per entry, fixed capital)"), text_color = dayHalt ? color.red : color.yellow, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 18, brkAlerts ? "Break alerts: ON - manual notifications, no broker automation" : "Break alerts: off",
          text_color = brkAlerts ? color.lime : color.gray, text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 19, showTrendMark ? "Grey label / X = a setup the trend filter blocked" : "Blocked-setup markers: off",
+    table.cell(info, 0, 19, showFilMark ? "Grey label = a setup the session filters blocked" : "Blocked-setup markers: off",
          text_color = color.gray, text_size = size.small, text_halign = text.align_left)
 
 // ---------------------------------------------------------------- Probability table (ORB / IB setups only)
@@ -1868,14 +1992,15 @@ orbBiasNow = orbVis and or_rDone and or_dir != 0
 plotshape(orbBiasNow and or_dir == 1,  title = "ORB bias LONG",  style = shape.triangleup,   location = location.belowbar, color = color.new(color.orange, 0), size = size.tiny)
 plotshape(orbBiasNow and or_dir == -1, title = "ORB bias SHORT", style = shape.triangledown, location = location.abovebar, color = color.new(color.orange, 0), size = size.tiny)
 
-// THE HIGHER-TIMEFRAME TREND EMA, coloured by which side price is on: teal = longs permitted, red = shorts.
-// The filter's INPUT made visible - an invisible filter is one you cannot audit.
-plot(useTrend ? emaHTF : na, "HTF trend EMA", color = na(emaHTF) ? na : close > emaHTF ? color.new(color.teal, 0) : color.new(color.red, 0), linewidth = 2)
-
-// A blocked Halyard break: the break still CONSUMED the day, it just did not trade. Marked with a grey X so a
-// consumed-but-untraded day is never mistaken for a day that simply never broke.
-halTrendBlk = runHAL and ((halBrkUp and not f_trendOK(1, hal15C, trendHAL)) or (halBrkDn and not f_trendOK(-1, hal15C, trendHAL)))
-plotshape(showTrendMark and halTrendBlk, title = "Halyard break blocked by trend filter", style = shape.xcross, location = location.abovebar, color = color.new(color.gray, 0), size = size.tiny)
+// SESSION FILTER LEVELS - drawn only while the filter that reads them is active, because an invisible filter
+// is one you cannot audit. Overnight high/low in purple, prior-day high/low/close in olive.
+onVis = showFilLvls and onMode != "Off"
+pdVis = showFilLvls and pdMode != "Off"
+plot(onVis and inSess and not na(onH) ? onH : na, "Overnight high", color = color.new(color.purple, 0),  style = plot.style_linebr)
+plot(onVis and inSess and not na(onL) ? onL : na, "Overnight low",  color = color.new(color.purple, 40), style = plot.style_linebr)
+plot(pdVis and inSess and not na(pdHi) ? pdHi : na, "Prior-day high",  color = color.new(color.olive, 0),  style = plot.style_linebr)
+plot(pdVis and inSess and not na(pdLo) ? pdLo : na, "Prior-day low",   color = color.new(color.olive, 40), style = plot.style_linebr)
+plot(pdVis and inSess and pdMode == "Open vs prior close" and not na(pdCl) ? pdCl : na, "Prior-day close", color = color.new(color.olive, 20), style = plot.style_linebr)
 
 // HALYARD DAY HIGHLIGHT. ORANGE = the Halyard day is Off. A faint GREEN / RED wash = the day is one-way, so the
 // setting is readable off the chart instead of only out of the input dialog. Nothing is tinted on a two-way day.
