@@ -79,7 +79,7 @@ time set before the cash close.
 strategy declaration, so the value has to be repeated in a second input for the
 panel's estimate. Keep the two in sync.
 
-### `pinescript/orbib_ib_aligned_strategy.pine`
+### `pinescript/orbib_ib_aligned_strategy.pine` *(superseded — kept for reference)*
 **ORBIB — IB aligned to ORB.** The three-setup ORBIB script (Halyard + ORB + IB),
 shipped in an IB-only configuration where the ORB is demoted from a strategy to a
 direction filter.
@@ -116,3 +116,37 @@ through, so they are not comparable with a run taken with the filter off.
 **Also note:** the ORB min-range filter gates ORB *orders*, not the ORB *direction*,
 so it has no effect on the alignment rule. To exclude narrow opening ranges from the
 filter as well, tighten the ORB close-depth input instead.
+
+### `pinescript/orbib_htf_trend_strategy.pine`
+**ORBIB + higher-timeframe trend filter.** The original three-setup ORBIB
+(Halyard + ORB + IB, all running, seat precedence intact) with one rule layered
+over all three: a **long needs price above the 5-day EMA, a short needs it below.**
+
+Nothing else changes — same ranges, same pullback entries, same stops, targets and
+precedence. Only the direction permission is new.
+
+**Reference price.** Each setup is judged at the instant it decides its own
+direction, on the price that decision already uses: the ORB range's final close at
+09:45, the IB range's final close at 10:30, the breakout candle's close for Halyard.
+
+**The EMA is deliberately one day stale.** `request.security(sym, "D", ta.ema(close, 5))`
+— the obvious spelling — hands an intraday backtest the *completed* daily EMA for the
+day being tested, which at 10:30 contains the rest of that day's trading. That is
+lookahead, and it is the most common way a higher-timeframe filter flatters a
+backtest. This file uses `ta.ema(close, len)[1]` with `lookahead_on` instead: the
+previous completed daily EMA, knowable before the open, fixed all session, identical
+on historical and real-time bars.
+
+**Blocked setups.** A blocked ORB or IB setup is unwound completely, so orders,
+drawings, alerts, the probability study and the seat logic all see "no setup" without
+their own gate. A blocked Halyard break still *consumes* the day, matching how every
+other Halyard filter behaves.
+
+**Halyard's reversal is gated too**, unlike Halyard's own 15m trend filter which by
+design gates only the first trade. The reversal is by definition the opposite side of
+the loser, so leaving it open would wave through the one trade the filter most wants
+to stop. An input restores the first-trade-only convention.
+
+Inputs: master on/off, timeframe (D/W), EMA length, per-setup toggles for ORB / IB /
+Halyard, and blocked-setup markers. The EMA plots on the chart coloured by side —
+teal when longs are permitted, red when shorts are.
