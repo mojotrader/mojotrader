@@ -32,15 +32,16 @@
 //   REQUIREMENT: use a chart timeframe that divides into 15 - 1, 3, 5 or 15 minutes. On anything larger the
 //   "15m" bar degrades to the chart bar and Halyard's levels stop matching a real 15m chart.
 //
-// HOW THE THREE SETUPS SHARE ONE POSITION
+// HOW THE THREE SETUPS SHARE ONE POSITION - ORB / IB HAVE PRIORITY
 //   Pine nets every order into ONE position: an opposite-side entry would REVERSE another setup's trade, not
-//   hedge it. So the seat is taken by one setup at a time, in this order of precedence:
-//     1. A live HALYARD trade - or a Halyard limit still waiting to fill - holds the seat. ORB and IB limits are
-//        HELD BACK (not cancelled) while it runs; if price trades through their pullback entry during the
-//        hold, that setup is forfeited for the day.
-//     2. A live ORB trade holds the seat against IB (the original ORB/IB rule, unchanged).
-//     3. Halyard SKIPS its break if an ORB or IB trade is live, and its break still consumes the day, exactly
-//        like any other rejected filter.
+//   hedge it. So setups may only ever STACK in the same direction:
+//     1. ORB/IB arming in the SAME direction as a live Halyard trade (or a Halyard limit still waiting) place
+//        their orders and fill alongside it.
+//     2. ORB/IB arming in the OPPOSITE direction CANCEL Halyard: its resting limit is pulled, its open trade is
+//        closed at market on that bar's close, and Halyard is done for the day. Then the ORB/IB order goes in.
+//     3. A live ORB trade holds the IB back (the original ORB/IB rule, unchanged).
+//     4. Halyard may join a resting or open ORB/IB setup in the SAME direction, but never opens against one;
+//        a break it cannot take still consumes the day, exactly like any other rejected filter.
 //   Each engine flattens only its OWN entries (strategy.close per entry id), so Halyard's 13:30/14:30 ET day
 //   flat can never close an open ORB/IB trade and the 15:30 ET EOD flatten does not close a Halyard trade.
 //   TWO rules reach across all three: the daily max-loss circuit breaker, because that is its job, and the
@@ -332,10 +333,10 @@ f_size(float budget, float ptDist) =>
 f_tp(int d, float rH, float rL, float rg, float dHi, float dLo, string tpL, string tpS) =>
     d == 1 ? (tpL == "HOD/LOD" ? dHi : tpL == "Ext 10%" ? rH + 0.10*rg : tpL == "Ext 30%" ? rH + 0.30*rg : tpL == "Ext 50%" ? rH + 0.50*rg : rH) : (tpS == "HOD/LOD" ? dLo : tpS == "Ext 10%" ? rL - 0.10*rg : tpS == "Ext 30%" ? rL - 0.30*rg : tpS == "Ext 50%" ? rL - 0.50*rg : rL)
 
-// The seat: an ORB or IB position that is open right now. Declared HERE, filled in at the bottom of the ORB/IB
-// engines, and read by Halyard above them - so Halyard sees the value as of the previous chart bar. On a 1m
-// chart that is a one-minute lag on a gate that only matters when a fill and a 15m close land on the same bar.
-var bool orbibLive = false
+// The direction of an ACTIVE ORB/IB setup (entry resting or trade open), 0 = none. Declared HERE, filled in at the
+// bottom of the ORB/IB engines, and read by Halyard above them - so Halyard sees the value as of the previous
+// chart bar. Halyard may trade WITH it, never against it.
+var int orbibDir = 0
 
 // ================================================================ HALYARD ENGINE (pullback version)
 // Single-candle opening-range breakout with a pullback-limit entry and an optional reversal, on 15-MINUTE
@@ -548,15 +549,17 @@ halBrkDn = runHAL and halNewBar and not halIsRangeBar and halLevels and halRange
 if halBrkUp or halBrkDn
     halBroke := true
 
-// The seat. orbibLive is the ORB/IB engines' own fill tracking (one chart bar stale, all Indicator mode has);
-// strategy.position_size is exact but only exists when orders are placed.
-halSeatFree  = not orbibLive and not dayHalt and (not ordersOn or strategy.position_size == 0)
-halCanEnter  = halDayOK and halWinOK and halSeatFree and halTrades < halMaxTrades and halTrDir == 0 and not halPend
+// The seat, per direction. ORB/IB have priority: Halyard may join an active ORB/IB setup in the SAME direction
+// but never opens against one. orbibDir is the ORB/IB engines' own tracking (one chart bar stale, all Indicator
+// mode has); strategy.position_size is exact but only exists when orders are placed.
+halSeatL     = not dayHalt and orbibDir != -1 and (not ordersOn or strategy.position_size >= 0)
+halSeatS     = not dayHalt and orbibDir != 1  and (not ordersOn or strategy.position_size <= 0)
+halCanEnter  = halDayOK and halWinOK and halTrades < halMaxTrades and halTrDir == 0 and not halPend
 
-halGoFirstL = halBrkUp and halLongOK  and halCanEnter and halState == 0
-halGoFirstS = halBrkDn and halShortOK and halCanEnter and halState == 0
-halGoRevL   = halRevOn and runHAL and halNewBar and halState == 2 and halFirstDir == -1 and halLongOK  and halCanEnter and halLevels and hal15C > halRH
-halGoRevS   = halRevOn and runHAL and halNewBar and halState == 2 and halFirstDir == 1  and halShortOK and halCanEnter and halLevels and hal15C < halRL
+halGoFirstL = halBrkUp and halLongOK  and halSeatL and halCanEnter and halState == 0
+halGoFirstS = halBrkDn and halShortOK and halSeatS and halCanEnter and halState == 0
+halGoRevL   = halRevOn and runHAL and halNewBar and halState == 2 and halFirstDir == -1 and halLongOK  and halSeatL and halCanEnter and halLevels and hal15C > halRH
+halGoRevS   = halRevOn and runHAL and halNewBar and halState == 2 and halFirstDir == 1  and halShortOK and halSeatS and halCanEnter and halLevels and hal15C < halRL
 
 halEntered = false
 halEntDir  = 0
@@ -636,8 +639,9 @@ if ordersOn and halNewDay
     strategy.close("HAL-RL", comment = "day flat (sweep)")
     strategy.close("HAL-RS", comment = "day flat (sweep)")
 
-// live Halyard trade OR resting Halyard limit -> the ORB and IB limits are held back behind it
-halLive = halTrDir != 0 or halPend
+// live Halyard trade OR resting Halyard limit, and its direction: an ORB/IB setup arming the OTHER way cancels it
+halLive   = halTrDir != 0 or halPend
+halDirNow = halTrDir != 0 ? halTrDir : halPend ? halOrdDir : 0
 
 // ================================================================ Historical-probability stats (ORB / IB)
 // TWO walk-forward studies are collected (a day is only added to the sample after its EOD flatten, so the
@@ -797,7 +801,8 @@ var float or_curTP = na
 var bool  or_beDone = false
 var bool  or_closed = false
 var bool  or_oppBroke = false
-var bool  or_missed = false      // the ORB pullback traded through while a Halyard trade held the seat
+var bool  or_missed = false      // (kept for the cancel rule; nothing holds the ORB back any more)
+var bool  or_act = false         // ORB setup ACTIVE: entry resting or trade open (read by Halyard via orbibDir)
 var float orbSz1 = na
 var float orbSz2 = na
 
@@ -821,6 +826,7 @@ if newSession
     or_closed := false
     or_oppBroke := false
     or_missed := false
+    or_act := false
     orbSz1 := na
     orbSz2 := na
 if or_inR
@@ -866,14 +872,31 @@ orbSizeOK = orbMinRngPct <= 0 or (not na(or_rng) and or_rL > 0 and or_rng / or_r
 // NO CARRY. The ORB window shuts the moment the IB range FORMS at 10:30: a resting ORB limit is cancelled
 // there, and an ORB that breaks after 10:30 is never placed at all.
 orbWin = inSess and not dayHalt and orbDayOK and tod <= (orbCutH*60 + orbCutM) and (not runIB or not ibFormed) and orbSizeOK
-// SEAT: a live HALYARD trade (or resting Halyard limit) holds the ORB limit back rather than cancelling it. If
-// the ORB pullback entry trades through during the hold, that fill was missed and the ORB is done for the day.
-if runORB and or_dir != 0 and or_broke and not or_placed and not or_closed and halLive and not na(or_e1)
-    if (or_dir == 1 and low <= or_e1) or (or_dir == -1 and high >= or_e1)
-        or_missed := true
-// strategy.position_size is the broker's own answer and cannot be stale, so it is checked too: no ORB order is
-// placed while ANY position is open, whoever it belongs to. In Indicator mode the flags still decide.
-if runORB and or_dir != 0 and or_broke and not or_placed and not or_closed and orbWin and not flatten and (not noDbl or not or_oppBroke) and orbSz1 >= 1 and not halLive and not or_missed and (not ordersOn or strategy.position_size == 0)
+// PRIORITY: the ORB is never held back by Halyard. Broker check: the only position allowed to be open when the
+// ORB order goes in is Halyard's (IB cannot be live yet - the ORB window shuts when the IB forms).
+orbGo = runORB and or_dir != 0 and or_broke and not or_placed and not or_closed and orbWin and not flatten and (not noDbl or not or_oppBroke) and orbSz1 >= 1 and not or_missed and (not ordersOn or strategy.position_size == 0 or halTrDir != 0)
+// ... and a Halyard trade or limit pointing the OTHER way is cancelled / closed first (same bar, at the close)
+if orbGo and halLive and halDirNow != or_dir
+    if ordersOn
+        strategy.cancel("HAL-L")
+        strategy.cancel("HAL-S")
+        strategy.cancel("HAL-RL")
+        strategy.cancel("HAL-RS")
+        strategy.cancel("HAL-Lx")
+        strategy.cancel("HAL-Sx")
+        strategy.cancel("HAL-RLx")
+        strategy.cancel("HAL-RSx")
+        strategy.close("HAL-L",  comment = "Halyard cancelled - ORB opposite")
+        strategy.close("HAL-S",  comment = "Halyard cancelled - ORB opposite")
+        strategy.close("HAL-RL", comment = "Halyard cancelled - ORB opposite")
+        strategy.close("HAL-RS", comment = "Halyard cancelled - ORB opposite")
+    halPend   := false
+    halTrDir  := 0
+    halState  := 3
+    halLive   := false
+    halDirNow := 0
+if orbGo
+    or_act := true
     if ordersOn
         if or_dir == 1
             strategy.entry("ORL", strategy.long, qty = orbSz1, limit = or_e1)
@@ -922,13 +945,16 @@ if (or_f1 or or_f2) and not or_closed and not na(or_curStop)
         or_closed := true
     if or_dir == -1 and (high >= or_curStop or low <= or_curTP)
         or_closed := true
-// Cancel resting ORB entries once the window closes unfilled, or done/flat/off/double-break/missed. orbWin
-// closes at 10:30 when the IB range forms, so that is also where an unfilled ORB limit is pulled.
-if ordersOn and (or_closed or flatten or not runORB or or_missed or (noDbl and or_oppBroke) or ((not orbWin) and not (or_f1 or or_f2)))
+// Cancel resting ORB entries once the window closes unfilled, or done/flat/off/double-break. orbWin closes at
+// 10:30 when the IB range forms, so that is also where an unfilled ORB limit is pulled.
+orCancel = or_closed or flatten or not runORB or or_missed or (noDbl and or_oppBroke) or ((not orbWin) and not (or_f1 or or_f2))
+if ordersOn and orCancel
     strategy.cancel("ORL")
     strategy.cancel("ORL2")
     strategy.cancel("ORS")
     strategy.cancel("ORS2")
+if or_closed or flatten or dayHalt or (orCancel and not (or_f1 or or_f2))
+    or_act := false
 // ---- ORB study A: from the fill to EOD, did price touch each level? ----
 var bool  or_trk    = false
 var int   or_tdir   = 0
@@ -1056,7 +1082,8 @@ var float ib_curTP = na
 var bool  ib_beDone = false
 var bool  ib_closed = false
 var bool  ib_oppBroke = false
-var bool  ib_missed = false      // the IB pullback was reached while another setup held the seat -> skip IB today
+var bool  ib_missed = false      // the IB pullback was reached while a live ORB held the seat -> skip IB today
+var bool  ib_act = false         // IB setup ACTIVE: entry resting or trade open (read by Halyard via orbibDir)
 var float ibSz1 = na
 var float ibSz2 = na
 
@@ -1080,6 +1107,7 @@ if newSession
     ib_closed := false
     ib_oppBroke := false
     ib_missed := false
+    ib_act := false
     ibSz1 := na
     ibSz2 := na
 if ib_inR
@@ -1109,12 +1137,12 @@ if ib_rDone and not na(ib_rH) and ib_rH > ib_rL
     if ib_dir != 0
         ibSz1 := sizeByRisk ? f_size(ibRiskDlr1, math.abs(ib_e1 - ib_zstop)) : ibQty1
         ibSz2 := sizeByRisk ? f_size(ibRiskDlr2, math.abs(ib_e2 - ib_zstop)) : ibQty2
-// SEAT: an OPEN trade of ANY other setup keeps priority - the IB order is held back (either direction, so the
-// two can never stack risk or hedge each other). The IB is not cancelled, only delayed: the moment the seat
-// frees the IB limit goes in, provided price has NOT already traded through the IB entry level while it was
-// held. If it has, that pullback was missed and the IB is done for the day.
+// SEAT: an OPEN ORB trade keeps priority over the IB - the IB order is held back (either direction). It is not
+// cancelled, only delayed: the moment the ORB is done the IB limit goes in, provided price has NOT already traded
+// through the IB entry level while it was held. If it has, that pullback was missed and the IB is done for the
+// day. Halyard never holds the IB back: same direction it stacks, opposite direction Halyard is cancelled.
 orbLive   = runORB and (or_f1 or or_f2) and not or_closed
-ibHeld    = orbLive or halLive
+ibHeld    = orbLive
 ib_useAdd = ibAvg and ib_shallow and not na(ib_e2)
 ib_brk = ibBreak == "Wick (touch)" ? ((ib_dir == 1 and high >= ib_rH) or (ib_dir == -1 and low <= ib_rL)) : ((ib_dir == 1 and close > ib_rH) or (ib_dir == -1 and close < ib_rL))
 if ib_dir != 0 and ib_brk
@@ -1128,8 +1156,29 @@ ibWin = inSess and not dayHalt and ibDayOK and tod <= (ibCutH*60 + ibCutM)
 if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and ibHeld and not na(ib_e1)
     if (ib_dir == 1 and low <= ib_e1) or (ib_dir == -1 and high >= ib_e1)
         ib_missed := true
-// Same broker-truth check as the ORB placement above: never place into an already-open position.
-if runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and ibWin and not flatten and (not noDbl or not ib_oppBroke) and ibSz1 >= 1 and not ibHeld and not ib_missed and (not ordersOn or strategy.position_size == 0)
+// Same broker-truth check as the ORB placement above: the only position allowed to be open is Halyard's.
+ibGo = runIB and ib_dir != 0 and ib_broke and not ib_placed and not ib_closed and ibWin and not flatten and (not noDbl or not ib_oppBroke) and ibSz1 >= 1 and not ibHeld and not ib_missed and (not ordersOn or strategy.position_size == 0 or halTrDir != 0)
+if ibGo and halLive and halDirNow != ib_dir
+    if ordersOn
+        strategy.cancel("HAL-L")
+        strategy.cancel("HAL-S")
+        strategy.cancel("HAL-RL")
+        strategy.cancel("HAL-RS")
+        strategy.cancel("HAL-Lx")
+        strategy.cancel("HAL-Sx")
+        strategy.cancel("HAL-RLx")
+        strategy.cancel("HAL-RSx")
+        strategy.close("HAL-L",  comment = "Halyard cancelled - IB opposite")
+        strategy.close("HAL-S",  comment = "Halyard cancelled - IB opposite")
+        strategy.close("HAL-RL", comment = "Halyard cancelled - IB opposite")
+        strategy.close("HAL-RS", comment = "Halyard cancelled - IB opposite")
+    halPend   := false
+    halTrDir  := 0
+    halState  := 3
+    halLive   := false
+    halDirNow := 0
+if ibGo
+    ib_act := true
     if ordersOn
         if ib_dir == 1
             strategy.entry("IBL", strategy.long, qty = ibSz1, limit = ib_e1)
@@ -1176,14 +1225,17 @@ if (ib_f1 or ib_f2) and not ib_closed and not na(ib_curStop)
         ib_closed := true
     if ib_dir == -1 and (high >= ib_curStop or low <= ib_curTP)
         ib_closed := true
-if ordersOn and (ib_closed or flatten or not runIB or ib_missed or (noDbl and ib_oppBroke) or ((not ibWin) and not (ib_f1 or ib_f2)))
+ibCancel = ib_closed or flatten or not runIB or ib_missed or (noDbl and ib_oppBroke) or ((not ibWin) and not (ib_f1 or ib_f2))
+if ordersOn and ibCancel
     strategy.cancel("IBL")
     strategy.cancel("IBL2")
     strategy.cancel("IBS")
     strategy.cancel("IBS2")
+if ib_closed or flatten or dayHalt or (ibCancel and not (ib_f1 or ib_f2))
+    ib_act := false
 
-// The seat as Halyard reads it on the NEXT chart bar (declared above the Halyard engine).
-orbibLive := orbLive or (runIB and (ib_f1 or ib_f2) and not ib_closed)
+// The active ORB/IB direction as Halyard reads it on the NEXT chart bar (declared above the Halyard engine).
+orbibDir := or_act ? or_dir : ib_act ? ib_dir : 0
 // ---- IB study A: from the fill to EOD, did price touch each level? ----
 var bool  ib_trk    = false
 var int   ib_tdir   = 0
@@ -1505,7 +1557,7 @@ if showInfo and barstate.islast
     table.cell(info, 0, 10, "Stop: always the range extreme (100%)",                      text_color = color.white,   text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 11, "Target: ORB L +10% / S +30% ; IB +30% extension",            text_color = color.white,   text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 12, "Avg-down: 2nd unit @ 50% - own size & risk",                 text_color = color.silver,  text_size = size.small, text_halign = text.align_left)
-    table.cell(info, 0, 13, "SEAT: Halyard (incl. resting limit) > ORB > IB - one at a time", text_color = color.aqua, text_size = size.small, text_halign = text.align_left)
+    table.cell(info, 0, 13, "PRIORITY ORB/IB: same direction stacks with Halyard, opposite cancels Halyard | ORB holds IB", text_color = color.aqua, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 14, "No ORB carry: an unfilled ORB dies when the IB forms at 10:30", text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 15, "Skip double-break days | ORB/IB flatten 15:30 ET",           text_color = color.silver,  text_size = size.small, text_halign = text.align_left)
     table.cell(info, 0, 16, "Toggle Run HAL / ORB / IB + weekdays to isolate results",    text_color = color.aqua,    text_size = size.small, text_halign = text.align_left)

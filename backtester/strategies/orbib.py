@@ -18,11 +18,13 @@ THE THREE SETUPS
            Must fill before the IB forms (10:30); skipped if the range is < min % of price.
   IB       Same engine on the 09:30-10:30 range.
 
-ONE SEAT (same precedence as the Pine script)
-  1. A live Halyard trade holds ORB/IB limits BACK; if price trades through their entry meanwhile, that setup
-     is forfeited for the day.
-  2. A live ORB trade holds the IB back the same way.
-  3. Halyard skips its break if an ORB/IB trade (or any position) is live - the break still consumes the day.
+PRIORITY: ORB / IB FIRST (same rules as the Pine script)
+  1. ORB/IB arming in the SAME direction as a live Halyard trade (or resting Halyard limit) place and fill
+     alongside it. ORB/IB arming in the OPPOSITE direction cancel Halyard: its limit is pulled, its open trade
+     is closed at market, and Halyard is done for the day.
+  2. A live ORB trade holds the IB back; if price trades through the IB entry meanwhile, the IB is forfeited.
+  3. Halyard may join a resting / open ORB-IB setup in the same direction but never opens against one; a
+     break it cannot take still consumes the day.
   ORB/IB flatten at 15:30 ET (closes everything). Optional daily max loss $ closes everything and stops the day.
 
 DIFFERENCES FROM TRADINGVIEW (small, and on the realistic side)
@@ -30,7 +32,7 @@ DIFFERENCES FROM TRADINGVIEW (small, and on the realistic side)
   * A bracket (stop + target) is live from the moment an entry fills; Pine attaches it one bar later.
   * Positions are tracked per order (like separate bracket orders at IBKR) instead of Pine's single netted
     position. The seat rules above keep setups from overlapping, so this almost never matters.
-  * A pending Halyard limit holds the seat like an open Halyard trade (ORB/IB are held back behind it).
+  * An opposite Halyard trade is closed at the close of the bar where ORB/IB place their order.
 """
 from __future__ import annotations
 
@@ -326,7 +328,6 @@ class ORBIB:
         self.day_halt = False
         self.ib_formed = False
         self.prev_close = None
-        self.orbib_live = False
         # Halyard 15m builder
         self.agg_bkt = None
         self.aggH = self.aggL = self.aggC = None
@@ -370,7 +371,17 @@ class ORBIB:
             self.ib.reset()
             self.ib_formed = False
 
-        hal_live = self._halyard(ctx, bar, i)
+        hal_dir = self._halyard(ctx, bar, i)       # direction of the live Halyard trade / resting limit, 0 = none
+
+        def orbib_open() -> bool:
+            return any(l.group in ("ORB", "IB") for l in ctx.lots.values())
+
+        def make_room(d: int) -> None:
+            """ORB/IB have priority: a Halyard trade or limit pointing the other way is cancelled / closed."""
+            nonlocal hal_dir
+            if hal_dir != 0 and hal_dir != d:
+                self._hal_kill(ctx, "Halyard cancelled (ORB/IB opposite)")
+                hal_dir = 0
 
         # ---- ORB
         orb, ib = self.orb, self.ib
@@ -384,12 +395,9 @@ class ORBIB:
                                                and orb.rng / orb.rL * 100 >= p["orb_min_rng_pct"])
         orb_win = (in_sess and not self.day_halt and dow < 5 and orb.days[dow] and tod <= orb.cutoff
                    and (not p["run_ib"] or not self.ib_formed) and size_ok)
-        if p["run_orb"] and orb.dir and orb.broke and not orb.placed and not orb.closed and hal_live and orb.e1 is not None:
-            if orb.touched_entry(bar):
-                orb.missed = True
         if (p["run_orb"] and orb.dir and orb.broke and not orb.placed and not orb.closed and orb_win and not flatten
-                and (not p["no_dbl"] or not orb.opp_broke) and orb.sz1 >= 1 and not hal_live and not orb.missed
-                and ctx.position() == 0):
+                and (not p["no_dbl"] or not orb.opp_broke) and orb.sz1 >= 1 and not orbib_open()):
+            make_room(orb.dir)
             orb.place(ctx, self.dHigh, self.dLow)
         orb.track_fills(ctx, self.dHigh, self.dLow)
         orb.manage(ctx, bar)
@@ -399,7 +407,7 @@ class ORBIB:
 
         # ---- IB
         orb_live = p["run_orb"] and orb.live()
-        ib_held = orb_live or hal_live
+        ib_held = orb_live                          # a live ORB still holds the IB back (either direction)
         ib.update_breaks(bar)
         ib_win = in_sess and not self.day_halt and dow < 5 and ib.days[dow] and tod <= ib.cutoff
         if p["run_ib"] and ib.dir and ib.broke and not ib.placed and not ib.closed and ib_held and ib.e1 is not None:
@@ -407,14 +415,14 @@ class ORBIB:
                 ib.missed = True
         if (p["run_ib"] and ib.dir and ib.broke and not ib.placed and not ib.closed and ib_win and not flatten
                 and (not p["no_dbl"] or not ib.opp_broke) and ib.sz1 >= 1 and not ib_held and not ib.missed
-                and ctx.position() == 0):
+                and not orbib_open()):
+            make_room(ib.dir)
             ib.place(ctx, self.dHigh, self.dLow)
         ib.track_fills(ctx, self.dHigh, self.dLow)
         ib.manage(ctx, bar)
         if (ib.closed or flatten or not p["run_ib"] or ib.missed or (p["no_dbl"] and ib.opp_broke)
                 or (not ib_win and not ib.filled)):
             ib.cancel(ctx)
-        self.orbib_live = orb_live or (p["run_ib"] and ib.live())
 
         # ---- EOD flatten + daily loss limit (reach across all setups)
         if flatten:
@@ -425,7 +433,7 @@ class ORBIB:
             ctx.close_all("Daily max loss")
 
     # ------------------------------------------------------------------ Halyard
-    def _halyard(self, ctx, bar, i) -> bool:
+    def _halyard(self, ctx, bar, i) -> int:
         p = self.params
         # 15-minute candle builder (UTC-aligned buckets)
         bkt = int(self.bkt[i])
@@ -500,9 +508,15 @@ class ORBIB:
             start_min = int(self.hal_sess_start[i])
             elapsed = (int(self.tod[c15[3]]) - start_min) % 1440
             window_ok = elapsed <= (_hhmm(p["hal_cutoff"]) - start_min) % 1440
-        seat_free = not self.orbib_live and not self.day_halt and ctx.position() == 0
+        # ORB/IB have priority: Halyard may join a resting / open ORB-IB setup in the SAME direction, never oppose it
+        orbib_dirs = {o.side for o in ctx.pending.values() if o.group in ("ORB", "IB")} | \
+                     {l.side for l in ctx.lots.values() if l.group in ("ORB", "IB")}
+
+        def seat_ok(d):
+            return not self.day_halt and orbib_dirs <= {d} and ctx.position() * d >= 0
+
         max_trades = 2 if p["hal_rev_on"] else 1
-        can = (day_ok and window_ok and seat_free and self.hal_trades < max_trades and not hal_open
+        can = (day_ok and window_ok and self.hal_trades < max_trades and not hal_open
                and self.hal_pending is None)
         use_limit = p["hal_entry_mode"] == "Pullback Limit"
 
@@ -528,17 +542,17 @@ class ORBIB:
             ctx.annotate(kind="hal_order", group="HAL", time=ctx.time, dir=d, entry=entry, stop=stop, tp=tgt,
                          limit=is_lim)
 
-        if brk_up and long_ok and can and self.hal_state == 0:
+        if brk_up and long_ok and can and seat_ok(1) and self.hal_state == 0:
             self.hal_first_dir, self.hal_state = 1, 1
             enter(1, p["hal_target_pct"], True, "HAL-L", "long first", True)
-        elif brk_dn and short_ok and can and self.hal_state == 0:
+        elif brk_dn and short_ok and can and seat_ok(-1) and self.hal_state == 0:
             self.hal_first_dir, self.hal_state = -1, 1
             enter(-1, p["hal_target_pct"], True, "HAL-S", "short first", True)
         elif p["hal_rev_on"] and p["run_hal"] and new15 and self.hal_state == 2 and levels and can:
-            if self.hal_first_dir == -1 and long_ok and c > self.halRH:
+            if self.hal_first_dir == -1 and long_ok and seat_ok(1) and c > self.halRH:
                 self.hal_state = 3
                 enter(1, p["hal_rev_target_pct"], p["hal_pullback_on_rev"], "HAL-RL", "long reverse", False)
-            elif self.hal_first_dir == 1 and short_ok and c < self.halRL:
+            elif self.hal_first_dir == 1 and short_ok and seat_ok(-1) and c < self.halRL:
                 self.hal_state = 3
                 enter(-1, p["hal_rev_target_pct"], p["hal_pullback_on_rev"], "HAL-RS", "short reverse", False)
 
@@ -549,5 +563,16 @@ class ORBIB:
                 ctx.cancel(self.hal_pending["tag"])
                 self.hal_pending = None
             ctx.close_group("HAL", "Halyard day flat")
-        # a resting Halyard limit holds the seat like an open Halyard trade
-        return ctx.group_open("HAL") or self.hal_pending is not None
+        # direction of the live Halyard trade, or of its resting limit (0 = none)
+        if self.hal_pending is not None:
+            return self.hal_pending["dir"]
+        lot = next((l for l in ctx.lots.values() if l.group == "HAL"), None)
+        return lot.side if lot else 0
+
+    def _hal_kill(self, ctx, reason: str) -> None:
+        """Cancel a resting Halyard limit and close an open Halyard trade; Halyard is done for the day."""
+        if self.hal_pending is not None:
+            ctx.cancel(self.hal_pending["tag"])
+            self.hal_pending = None
+        ctx.close_group("HAL", reason)
+        self.hal_state = 3

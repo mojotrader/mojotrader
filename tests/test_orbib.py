@@ -155,3 +155,44 @@ def test_halyard_entry_cutoff():
 def test_pullback_must_be_inside_stop():
     with pytest.raises(ValueError):
         ORBIB(dict(hal_pullback_pct=50.0, hal_stop_pct=40.0))
+
+
+# Halyard long from the overnight session (market entry at 101.5, stop 99, target 103.75), then an ORB setup.
+def _hal_then_orb(orb_rows):
+    ov = {"00:00": (100, 101, 99, 100), "00:29": (100.5, 101.5, 100.5, 101.5)}
+    ov.update(orb_rows)
+    return day_bars("2026-03-03", "00:00", "16:00", ov)
+
+
+P_PRIORITY = dict(HAL_MARKET, run_orb=True, run_ib=False, orb_min_rng_pct=0.0)
+
+
+def test_opposite_orb_cancels_halyard():
+    rows = {"09:31": (101.5, 103, 101.5, 102.5),          # ORB high first ...
+            "09:43": (102.5, 102.5, 100, 100.25),         # ... low later, close near the low -> shallow SHORT
+            "09:45": (100.25, 100.25, 99.5, 99.75),       # close below 100 -> ORB short arms -> Halyard closed
+            "09:47": (99.75, 100.75, 99.75, 100.5),       # short limit 100.75 fills
+            "09:50": (100.5, 100.5, 98.75, 99)}           # target 100 - 30% of 3 = 99.1 -> 99.0
+    for m in range(32, 43):
+        rows[f"09:{m}"] = (102.5,) * 4
+    t = run_backtest(_hal_then_orb(rows), ORBIB(P_PRIORITY), CFG).trades
+    hal = t[t.group == "HAL"].iloc[0]
+    assert hal.exit_reason.startswith("Halyard cancelled") and hal.exit_time.strftime("%H:%M") == "09:45"
+    orb = t[t.group == "ORB"].iloc[0]
+    assert (orb.side, orb.entry_price, orb.exit_reason) == (-1, 100.75, "Target")
+
+
+def test_same_direction_orb_fills_while_halyard_open():
+    rows = {"09:31": (101.5, 101.5, 100, 100.5),          # ORB low first ...
+            "09:43": (100.5, 103, 100.5, 102.75),         # ... high later, close near the high -> shallow LONG
+            "09:45": (102.75, 103.5, 102.75, 103.25),     # close above 103 -> ORB long arms, Halyard stays
+            "09:47": (103.25, 103.25, 102.25, 102.5),     # long limit 102.25 fills
+            "09:50": (102.5, 103.5, 102.5, 103.25)}       # ORB target 103 + 10% of 3 = 103.3 -> 103.25
+    for m in range(32, 43):
+        rows[f"09:{m}"] = (100.5,) * 4
+    t = run_backtest(_hal_then_orb(rows), ORBIB(P_PRIORITY), CFG).trades
+    hal = t[t.group == "HAL"].iloc[0]
+    orb = t[t.group == "ORB"].iloc[0]
+    assert orb.side == 1 and orb.exit_reason == "Target"
+    assert hal.entry_time < orb.entry_time < hal.exit_time          # both open at the same time
+    assert not hal.exit_reason.startswith("Halyard cancelled")

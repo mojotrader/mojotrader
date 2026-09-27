@@ -11,6 +11,14 @@ run it on a **1-minute** chart. The Halyard defaults are your best settings:
 - no new entries after 10:30 ET
 - 4 contracts; Monday long only
 
+**How the three setups share the account (ORB/IB have priority):**
+
+- An ORB/IB setup in the **same** direction as Halyard places and fills alongside it.
+- An ORB/IB setup arming in the **opposite** direction cancels Halyard. Its waiting limit is pulled, an
+  open Halyard trade is closed at market, and Halyard is done for that day.
+- Halyard can join an ORB/IB setup in the same direction but never opens against one.
+- A live ORB still holds the IB back.
+
 ## 1. Start it
 
 You need **Python 3.10 or newer** ([python.org/downloads](https://www.python.org/downloads/); on Windows tick
