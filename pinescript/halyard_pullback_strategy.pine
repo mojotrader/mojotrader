@@ -29,7 +29,7 @@
 //
 // Timezone is hardcoded to New York (range candle 00:00 EST / 01:00 EDT,
 // session roll 13:30 EST / 14:30 EDT).
-strategy("Halyard MNQ 15min — Pullback Entry Test", overlay = true, pyramiding = 0, process_orders_on_close = true, initial_capital = 150000, default_qty_type = strategy.fixed, default_qty_value = 1, slippage = 0, commission_type = strategy.commission.cash_per_contract, commission_value = 0, margin_long = 1, margin_short = 1, max_boxes_count = 500, backtest_fill_limits_assumption = 1)
+strategy("Halyard Pullback Test", overlay = true, pyramiding = 0, process_orders_on_close = true, initial_capital = 150000, default_qty_type = strategy.fixed, default_qty_value = 1, slippage = 0, commission_type = strategy.commission.cash_per_contract, commission_value = 0, margin_long = 1, margin_short = 1, max_boxes_count = 500, backtest_fill_limits_assumption = 1)
 
 // === Inputs ===
 grpPS = "Position Sizing"
