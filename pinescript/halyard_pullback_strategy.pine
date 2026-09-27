@@ -1,0 +1,334 @@
+//@version=6
+// PropQuantX Halyard MNQ 15min — PULLBACK ENTRY + STOP % test version
+//
+// Same strategy as "PropQuantX Halyard MNQ 15min FREE" (single-candle ORB break,
+// stop on the opposite range edge, reversal trade after the first one closes),
+// with two things added so they can be tested:
+//
+//   1. PULLBACK ENTRY. Instead of a market order at the 15m close, the entry can
+//      be a LIMIT order that waits for price to come back X% toward the stop.
+//      Minimum 1%: a limit exactly AT the close would be filled by TradingView on
+//      that same close, which is just the market entry again.
+//
+//   2. STOP %. The full distance signal close -> opposite ORB edge = 100%.
+//      Setting 95% puts the stop 5% of that distance BEFORE the ORB edge
+//      (tighter). 100% = the original stop. Above 100% = a wider stop.
+//
+// Both percentages are measured from the SIGNAL candle's close, on the same
+// 0..100% ruler, so a 20% pullback with a 95% stop means: entry 20% of the way
+// down, stop 95% of the way down.
+//
+// Note: limit orders are only filled when price trades at least 1 tick THROUGH
+// the limit (backtest_fill_limits_assumption = 1) — a touch alone is not a fill.
+//
+// Timezone is hardcoded to New York (range candle 00:00 EST / 01:00 EDT,
+// session roll 13:30 EST / 14:30 EDT).
+strategy("Halyard MNQ 15min — Pullback Entry Test", overlay = true, pyramiding = 0, process_orders_on_close = true, initial_capital = 150000, default_qty_type = strategy.fixed, default_qty_value = 1, slippage = 0, commission_type = strategy.commission.cash_per_contract, commission_value = 0, margin_long = 1, margin_short = 1, max_boxes_count = 500, backtest_fill_limits_assumption = 1)
+
+// === Inputs ===
+grpPS = "Position Sizing"
+useRiskSizing = input.bool(true, "Use $ Risk Position Sizing", group = grpPS)
+riskUSD = input.float(535, "Risk Per Trade ($)", minval = 0, group = grpPS)
+qtyContracts = input.int(1, "Contracts (If Risk Sizing Off)", minval = 1, group = grpPS)
+maxContracts = input.int(1000, "Max Contracts", minval = 1, group = grpPS, tooltip = "Hard cap on the risk-sized quantity.")
+
+grpTM = "Trade Management"
+riskReward = input.float(0.8, "Risk:Reward (First Trade)", minval = 0.1, step = 0.01, group = grpTM)
+enableReverseTrade = input.bool(true, "Enable Reverse Trade", group = grpTM, tooltip = "Also sets the day's fill cap: 2 on, 1 off.")
+reverseRiskReward = input.float(1.0, "Risk:Reward (Reverse Trade)", minval = 0.1, step = 0.01, group = grpTM, tooltip = "Only read while Enable Reverse Trade is on.")
+reverseAfter = input.string("Loss or Target", "Reverse Trade After", options = ["Loss or Target", "Loss Only"], group = grpTM, tooltip = "Loss or Target: the reversal arms whether the first trade stopped out or hit its target (or its limit order never filled). Loss Only: only after a stop-out.")
+
+// === NEW: Entry & Stop test settings ===
+grpE = "Entry & Stop (test settings)"
+entryMode = input.string("Pullback Limit", "Entry Type", options = ["Market at Close", "Pullback Limit"], group = grpE, tooltip = "Market at Close = the original entry. Pullback Limit = a limit order X% back toward the stop.")
+pullbackPct = input.float(20.0, "Pullback %", minval = 1, maxval = 99, step = 1, group = grpE, tooltip = "Distance signal close -> ORB stop edge = 100%. 20 = the limit sits 20% of the way from the close to the stop.")
+stopPct = input.float(100.0, "Stop Loss %", minval = 1, maxval = 200, step = 1, group = grpE, tooltip = "Distance signal close -> ORB stop edge = 100%. 100 = original stop on the ORB edge. 95 = 5% tighter than the edge. 110 = 10% beyond it.")
+tpFrom = input.string("Signal Close", "Target Measured From", options = ["Signal Close", "Fill Price"], group = grpE, tooltip = "Signal Close: target = close + (close - stop) x R:R, the same price as a market entry would use, so a pullback fill earns extra. Fill Price: target = fill + (fill - stop) x R:R, keeping the R:R of the actual trade.")
+orderExpiryBars = input.int(2, "Cancel Limit After (bars)", minval = 0, group = grpE, tooltip = "How many 15m bars the limit order waits. 2 = 30 minutes. 0 = wait until the session ends.")
+cancelOnTarget = input.bool(true, "Cancel Limit If Target Reached First", group = grpE, tooltip = "If price reaches the target before the limit fills, the move has gone without you, so the order is cancelled.")
+pullbackOnReversal = input.bool(true, "Use Pullback Entry On Reversal Too", group = grpE, tooltip = "Off = the reversal always enters with a market order at the close.")
+
+useLimitEntry = entryMode == "Pullback Limit"
+if useLimitEntry and pullbackPct >= stopPct
+    runtime.error("Pullback % must be smaller than Stop Loss % — otherwise the entry would be at or past the stop.")
+
+grpD = "Day Filter"
+dayTip = "Read on the SESSION's day, which ends 13:30 / 14:30 ET — not on the calendar day."
+dayMon = input.string("Long", "Monday", options = ["Both", "Long", "Short", "Off"], group = grpD, tooltip = dayTip)
+dayTue = input.string("Both", "Tuesday", options = ["Both", "Long", "Short", "Off"], group = grpD)
+dayWed = input.string("Both", "Wednesday", options = ["Both", "Long", "Short", "Off"], group = grpD)
+dayThu = input.string("Both", "Thursday", options = ["Both", "Long", "Short", "Off"], group = grpD)
+dayFri = input.string("Both", "Friday", options = ["Both", "Long", "Short", "Off"], group = grpD)
+
+grpR = "Range Filter"
+orbRangeMinPts = input.float(0, "Min ORB Range (pts, 0=off)", minval = 0, step = 0.25, group = grpR, tooltip = "Skip the day if the range is narrower than this.")
+orbRangeMaxPts = input.float(0, "Max ORB Range (pts, 0=off)", minval = 0, step = 0.25, group = grpR, tooltip = "Skip the day if the range is wider than this.")
+if orbRangeMaxPts > 0 and orbRangeMinPts > orbRangeMaxPts
+    runtime.error("Range Filter: Min ORB Range is above Max ORB Range, so no day can ever pass. Fix one of them.")
+
+grpC = "Entry Cutoff"
+useEntryCutoff = input.bool(false, "Stop New Entries After (ET)", group = grpC, tooltip = "Off by default. Measured from the session's own start (13:30 / 14:30 ET), so 10:00 means the 10:00 that follows this session's range candle.")
+cutoffH = input.int(10, "Cutoff Hour (ET, 0-23)", minval = 0, maxval = 23, group = grpC)
+cutoffM = input.int(0, "Cutoff Minute", minval = 0, maxval = 59, step = 5, group = grpC)
+
+grpRR = "Risk / Reward tool"
+showRR = input.bool(true, "Show risk/reward box at the entry", group = grpRR)
+ptVal = input.float(2.0, "$ per point per contract", group = grpRR, tooltip = "MNQ=2, NQ=20, MES=5, ES=50. Box text only.")
+rrBars = input.int(24, "R/R box width (bars)", 1, 300, group = grpRR)
+
+// === CONFIGURATION (fixed) ===
+tradeDirection = "Both"
+tz = "America/New_York"
+orbTf = "15"
+maxTradesPerDay = enableReverseTrade ? 2 : 1
+
+// === Clock helpers (New York, DST-aware) ===
+f_etOffsetMin(t) =>
+    etM = hour(t, tz) * 60 + minute(t, tz)
+    (hour(t, "Etc/UTC") * 60 + minute(t, "Etc/UTC") - etM + 1440) % 1440
+
+f_orbStartMin(t) => f_etOffsetMin(t) == 240 ? 60 : 0
+f_sessionEndMin(t) => f_etOffsetMin(t) == 240 ? 870 : 810
+f_sessionShift(t) => t + (1440 - f_sessionEndMin(t)) * 60000
+
+f_sessionKey(t) =>
+    s = f_sessionShift(t)
+    year(s, tz) * 10000 + month(s, tz) * 100 + dayofmonth(s, tz)
+
+// === Position sizing ===
+calcQty(risk, entry, sl) =>
+    riskPerPoint = math.abs(entry - sl)
+    riskPerContract = riskPerPoint * syminfo.pointvalue
+    math.max(math.floor(risk / (riskPerContract > 0 ? riskPerContract : syminfo.mintick * syminfo.pointvalue)), 1)
+
+f_finalQty(_entry, _sl) =>
+    q = useRiskSizing ? calcQty(riskUSD, _entry, _sl) : qtyContracts
+    math.min(q, maxContracts)
+
+// === Risk/Reward box ===
+f_drawRR(int d, float ent, float zstop, float ptp, float q, color sigCol, string tag, int xoff) =>
+    x1 = bar_index + xoff
+    x2 = x1 + rrBars
+    riskUsd = math.abs(ent - zstop) * ptVal * q
+    rewUsd = math.abs(ptp - ent) * ptVal * q
+    risk1 = math.abs(ent - zstop) * ptVal
+    rew1 = math.abs(ptp - ent) * ptVal
+    rrr = riskUsd > 0 ? rewUsd / riskUsd : na
+    rewTop = d == 1 ? ptp : ent
+    rewBot = d == 1 ? ent : ptp
+    rskTop = d == 1 ? ent : zstop
+    rskBot = d == 1 ? zstop : ent
+    rewTxt = "TP " + str.tostring(ptp, format.mintick) + "\n+$" + str.tostring(rewUsd, "#") + "   " + str.tostring(rrr, "#.##") + "R   (1 ct +$" + str.tostring(rew1, "#") + ")"
+    rskTxt = tag + "   " + str.tostring(q, "#.#") + "x @ " + str.tostring(ent, format.mintick) + "\nSL " + str.tostring(zstop, format.mintick) + "   -$" + str.tostring(riskUsd, "#") + "   (1 ct -$" + str.tostring(risk1, "#") + ")"
+    box.new(x1, rewTop, x2, rewBot, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.green, 82), text = rewTxt, text_size = size.small, text_color = color.new(color.white, 0), text_halign = text.align_center, text_valign = text.align_center)
+    box.new(x1, rskTop, x2, rskBot, xloc = xloc.bar_index, border_color = sigCol, border_width = 1, bgcolor = color.new(color.red, 82), text = rskTxt, text_size = size.small, text_color = color.new(color.white, 0), text_halign = text.align_center, text_valign = text.align_center)
+
+colFirst = color.new(color.orange, 0)
+colRev = color.new(color.teal, 0)
+showBreakoutMarker = true
+orbHighColor = color.new(color.green, 30)
+orbLowColor = color.new(color.red, 30)
+
+// === ORB candle (15m, New York anchored) ===
+f_isOrbCandle() =>
+    hour(time, tz) * 60 + minute(time, tz) == f_orbStartMin(time)
+
+f_orbHighConfirmed() =>
+    f_isOrbCandle() and barstate.isconfirmed ? high : na
+
+f_orbLowConfirmed() =>
+    f_isOrbCandle() and barstate.isconfirmed ? low : na
+
+f_orbStartTimeConfirmed() =>
+    f_isOrbCandle() and barstate.isconfirmed ? time : na
+
+orbHighNew = request.security(syminfo.tickerid, orbTf, f_orbHighConfirmed(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+orbLowNew = request.security(syminfo.tickerid, orbTf, f_orbLowConfirmed(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+orbStartNew = request.security(syminfo.tickerid, orbTf, f_orbStartTimeConfirmed(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+
+sessionKey = f_sessionKey(time)
+newDay = ta.change(sessionKey)
+
+var float orbHigh = na
+var float orbLow = na
+var int orbStartTime = na
+var bool breakoutMarked = false
+
+if bool(newDay)
+    orbHigh := na
+    orbLow := na
+    orbStartTime := na
+    breakoutMarked := false
+
+orbReadyNow = not na(orbHighNew) and not na(orbLowNew) and not na(orbStartNew)
+orbTrigger = orbReadyNow and (na(orbStartTime) or orbStartNew != orbStartTime)
+if orbTrigger
+    orbHigh := orbHighNew
+    orbLow := orbLowNew
+    orbStartTime := orbStartNew
+    breakoutMarked := false
+
+levelsAvailable = not na(orbHigh) and not na(orbLow) and not na(orbStartTime)
+
+// === Breakout (the day's first close beyond the range consumes the day) ===
+orbRange = orbHigh - orbLow
+rangeDayOk = not na(orbRange) and (orbRangeMinPts <= 0 or orbRange >= orbRangeMinPts) and (orbRangeMaxPts <= 0 or orbRange <= orbRangeMaxPts)
+
+breakoutUp = levelsAvailable and rangeDayOk and not breakoutMarked and barstate.isconfirmed and close > orbHigh
+breakoutDn = levelsAvailable and rangeDayOk and not breakoutMarked and barstate.isconfirmed and close < orbLow
+if breakoutUp or breakoutDn
+    breakoutMarked := true
+
+plotshape(showBreakoutMarker and breakoutUp, title = "Close Above ORB High", style = shape.triangleup, location = location.abovebar, color = orbHighColor, size = size.tiny)
+plotshape(showBreakoutMarker and breakoutDn, title = "Close Below ORB Low", style = shape.triangledown, location = location.belowbar, color = orbLowColor, size = size.tiny)
+
+// === NEW: entry / stop / target on the 0..100% ruler ===
+// `d` = 1 long, -1 short. `edge` = the opposite ORB edge (the original stop).
+// fullDist = signal close -> edge = 100%.
+f_levels(int d, float edge, float rr, bool usePullback) =>
+    ref = close
+    fullDist = math.abs(ref - edge)
+    stopPx = math.round_to_mintick(ref - d * fullDist * stopPct / 100)
+    isLimit = useLimitEntry and usePullback
+    entryPx = isLimit ? math.round_to_mintick(ref - d * fullDist * pullbackPct / 100) : ref
+    tpBase = tpFrom == "Fill Price" ? entryPx : ref
+    tpPx = math.round_to_mintick(tpBase + d * math.abs(tpBase - stopPx) * rr)
+    [entryPx, stopPx, tpPx, isLimit]
+
+// === Day / direction / cutoff ===
+dow = dayofweek(f_sessionShift(time), tz)
+todMin = hour(time, tz) * 60 + minute(time, tz)
+sessStartMin = f_sessionEndMin(time)
+elapsedMin = (todMin - sessStartMin + 1440) % 1440
+cutoffElapsed = (cutoffH * 60 + cutoffM - sessStartMin + 1440) % 1440
+entryWindowOK = not useEntryCutoff or elapsedMin <= cutoffElapsed
+dayMode = dow == dayofweek.monday ? dayMon : dow == dayofweek.tuesday ? dayTue : dow == dayofweek.wednesday ? dayWed : dow == dayofweek.thursday ? dayThu : dow == dayofweek.friday ? dayFri : "Off"
+tradeDayOK = dayMode != "Off"
+directionLongOK = (tradeDirection == "Both" or tradeDirection == "Long") and (dayMode == "Both" or dayMode == "Long")
+directionShortOK = (tradeDirection == "Both" or tradeDirection == "Short") and (dayMode == "Both" or dayMode == "Short")
+
+// === State machine (per day) ===
+// 0 = waiting for the first break
+// 1 = first trade ordered (limit pending, or filled and open)
+// 2 = first trade closed (or its limit never filled) — reversal may arm
+// 3 = done for the day
+var int tradeState = 0
+var int firstTradeDir = 0
+var bool firstWasLoss = false
+var bool firstNoFill = false
+var int prevClosedTrades = 0
+var int tradesToday = 0
+
+// Pending limit order bookkeeping
+var bool pending = false
+var string pendId = ""
+var int pendBar = na
+var float pendTP = na
+var int pendDir = 0
+var bool pendIsFirst = false
+var int pendCount = 0   // closed + open trades when the order was placed
+
+if bool(newDay)
+    if pending
+        strategy.cancel(pendId)
+    pending := false
+    tradeState := 0
+    firstTradeDir := 0
+    firstWasLoss := false
+    firstNoFill := false
+    tradesToday := 0
+    prevClosedTrades := strategy.closedtrades
+
+// --- Pending limit: filled, or cancel it? ---
+if pending
+    filled = strategy.closedtrades + strategy.opentrades > pendCount
+    if filled
+        pending := false
+    else
+        expired = orderExpiryBars > 0 and bar_index - pendBar >= orderExpiryBars
+        targetRan = cancelOnTarget and (pendDir == 1 ? high >= pendTP : low <= pendTP)
+        if expired or targetRan
+            strategy.cancel(pendId)
+            pending := false
+            if pendIsFirst
+                // never filled: counts like a target (the move went without us)
+                firstNoFill := true
+                tradeState := reverseAfter == "Loss or Target" ? 2 : 3
+            else
+                tradeState := 3
+
+// --- First trade closed? Decide whether the reversal arms ---
+if strategy.closedtrades > prevClosedTrades
+    lastProfit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if tradeState == 1
+        firstWasLoss := lastProfit < 0
+        tradeState := (firstWasLoss or reverseAfter == "Loss or Target") ? 2 : 3
+    prevClosedTrades := strategy.closedtrades
+
+canEnter = strategy.position_size == 0 and not pending and tradesToday < maxTradesPerDay and tradeDayOK and entryWindowOK
+
+// Places the entry (market or limit) plus its bracket, and records a pending limit.
+f_place(string id, int d, float entryPx, float stopPx, float tpPx, bool isLimit, bool isFirst) =>
+    qty = f_finalQty(entryPx, stopPx)
+    strategy.entry(id, d == 1 ? strategy.long : strategy.short, qty = qty, limit = isLimit ? entryPx : na, comment = isFirst ? "First" : "Reversal")
+    strategy.exit(id + " TP/SL", from_entry = id, stop = stopPx, limit = tpPx)
+    qty
+
+// --- First trade ---
+enterLong = breakoutUp and directionLongOK and canEnter and tradeState == 0
+enterShort = breakoutDn and directionShortOK and canEnter and tradeState == 0
+if enterLong or enterShort
+    d = enterLong ? 1 : -1
+    id = d == 1 ? "Long" : "Short"
+    [ePx, sPx, tPx, isLim] = f_levels(d, d == 1 ? orbLow : orbHigh, riskReward, true)
+    q = f_place(id, d, ePx, sPx, tPx, isLim, true)
+    firstTradeDir := d
+    tradeState := 1
+    tradesToday += 1
+    if isLim
+        pending := true
+        pendId := id
+        pendBar := bar_index
+        pendTP := tPx
+        pendDir := d
+        pendIsFirst := true
+        pendCount := strategy.closedtrades + strategy.opentrades
+    if showRR
+        f_drawRR(d, ePx, sPx, tPx, q, colFirst, isLim ? "First (limit)" : "First", 0)
+
+// --- Reversal (once the first trade has closed or its limit expired) ---
+revLong = enableReverseTrade and tradeState == 2 and firstTradeDir == -1 and directionLongOK and canEnter and barstate.isconfirmed and levelsAvailable and close > orbHigh
+revShort = enableReverseTrade and tradeState == 2 and firstTradeDir == 1 and directionShortOK and canEnter and barstate.isconfirmed and levelsAvailable and close < orbLow
+if revLong or revShort
+    d = revLong ? 1 : -1
+    id = d == 1 ? "RevLong" : "RevShort"
+    [ePx, sPx, tPx, isLim] = f_levels(d, d == 1 ? orbLow : orbHigh, reverseRiskReward, pullbackOnReversal)
+    q = f_place(id, d, ePx, sPx, tPx, isLim, false)
+    tradeState := 3
+    tradesToday += 1
+    if isLim
+        pending := true
+        pendId := id
+        pendBar := bar_index
+        pendTP := tPx
+        pendDir := d
+        pendIsFirst := false
+        pendCount := strategy.closedtrades + strategy.opentrades
+    tag = firstNoFill ? "Reversal (no fill)" : firstWasLoss ? "Reversal (loss)" : "Reversal (target)"
+    if showRR
+        f_drawRR(d, ePx, sPx, tPx, q, colRev, tag, 0)
+
+plotshape(showBreakoutMarker and revLong, title = "Reversal Long", style = shape.diamond, location = location.abovebar, color = orbHighColor, size = size.tiny)
+plotshape(showBreakoutMarker and revShort, title = "Reversal Short", style = shape.diamond, location = location.belowbar, color = orbLowColor, size = size.tiny)
+
+isWeekday = dow >= dayofweek.monday and dow <= dayofweek.friday
+bgcolor(not isWeekday ? na : not tradeDayOK ? color.new(color.orange, 95) : dayMode == "Long" ? color.new(color.green, 96) : dayMode == "Short" ? color.new(color.red, 96) : na)
+
+// === END-OF-DAY: flat, and kill any limit still waiting ===
+tfMs = timeframe.in_seconds(timeframe.period) * 1000
+lastBarOfSession = f_sessionKey(time + tfMs) != sessionKey or bool(newDay)
+if lastBarOfSession and pending
+    strategy.cancel(pendId)
+    pending := false
+if strategy.position_size != 0 and lastBarOfSession
+    strategy.close_all(comment = "day flat")
