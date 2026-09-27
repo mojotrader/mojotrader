@@ -244,6 +244,11 @@ class _Pullback:
         if self.use_add and self.sz2 >= 1:
             ctx.place_entry(self.tags[1], self.dir, self.sz2, self.e2, self.zstop, tp, self.name, f"{pos} avg-down")
         self.placed = True
+        ctx.annotate(kind="note", group=self.name, time=ctx.time,
+                     text=f"{pos.upper()} armed ({'BUY' if self.dir == 1 else 'SELL'} {self.sz1} limit "
+                          f"@ {ctx.round_tick(self.e1):.2f}"
+                          + (f" + avg-down {self.sz2} @ {ctx.round_tick(self.e2):.2f}" if self.use_add and self.sz2 >= 1 else "")
+                          + f")  stop {ctx.round_tick(self.zstop):.2f}  target {ctx.round_tick(tp):.2f}")
         ctx.annotate(kind="setup", group=self.name, time=ctx.time, dir=self.dir, rH=self.rH, rL=self.rL,
                      e1=self.e1, e2=self.e2 if self.use_add else None, stop=self.zstop, tp=tp)
 
@@ -463,6 +468,8 @@ class ORBIB:
             self.halRH, self.halRL = c15[0], c15[1]
             self.hal_broke = False
             ctx.annotate(kind="hal_range", group="HAL", time=ctx.bars_time(c15[3]), rH=self.halRH, rL=self.halRL)
+            self._note(ctx, "HAL", f"range candle set: {self.halRL:.2f} - {self.halRH:.2f} "
+                                   f"({self.halRH - self.halRL:.2f} pts)")
 
         levels = self.halRH is not None
         rng = (self.halRH - self.halRL) if levels else None
@@ -472,13 +479,22 @@ class ORBIB:
         rev_lot = p["hal_rev_after"] == "Loss or Target"
         # ---- fills / exits of Halyard orders on this bar (engine truth)
         pend = self.hal_pending
-        if pend and any(f.kind == "entry" and f.tag == pend["tag"] for f in ctx.bar_fills):
+        fill = next((f for f in ctx.bar_fills if pend and f.kind == "entry" and f.tag == pend["tag"]), None)
+        if fill:
+            self._note(ctx, "HAL", f"limit filled @ {fill.price:.2f}")
             self.hal_pending = pend = None
         if pend and not ctx.is_pending(pend["tag"]):          # cancelled by the EOD flatten / daily halt
             self.hal_pending = pend = None
+        side_word = {1: "above", -1: "below"}
         for t in ctx.bar_exits:
-            if t.group == "HAL" and self.hal_state == 1:
+            if t.group != "HAL":
+                continue
+            self._note(ctx, "HAL", f"{t.note} closed: {t.exit_reason} @ {t.exit_price:.2f} (${t.net_pnl:,.0f})")
+            if self.hal_state == 1:
                 self.hal_state = 2 if (t.net_pnl < 0 or rev_lot) else 3
+                if self.hal_state == 2 and p["hal_rev_on"]:
+                    self._note(ctx, "HAL", f"reversal armed: waiting for a 15m close "
+                                           f"{side_word[-self.hal_first_dir]} the range")
         # ---- resting limit: expired, or did the target trade first?
         if pend:
             if new15:
@@ -488,8 +504,13 @@ class ORBIB:
             if expired or target_ran:
                 ctx.cancel(pend["tag"])
                 self.hal_pending = None
+                why = "target traded first" if target_ran else f"not filled within {p['hal_expiry_bars']} x 15m bars"
+                self._note(ctx, "HAL", f"limit cancelled: {why}")
                 if pend["first"]:
                     self.hal_state = 2 if rev_lot else 3        # never filled: counts like a target
+                    if self.hal_state == 2 and p["hal_rev_on"]:
+                        self._note(ctx, "HAL", f"reversal armed: waiting for a 15m close "
+                                               f"{side_word[-pend['dir']]} the range")
                 else:
                     self.hal_state = 3
         hal_open = ctx.group_open("HAL")
@@ -499,6 +520,10 @@ class ORBIB:
         brk_dn = p["run_hal"] and new15 and not is_range_bar and range_ok and not self.hal_broke and c < self.halRL
         if brk_up or brk_dn:
             self.hal_broke = True
+        if (p["run_hal"] and new15 and not is_range_bar and levels and not range_ok and not self.hal_broke
+                and (c > self.halRH or c < self.halRL)):
+            self.hal_broke = True
+            self._note(ctx, "HAL", "break ignored: the range is outside the min/max range filter - day skipped")
 
         mode = [p[f"hal_{d.lower()}"] for d in DAYS][int(self.hal_dow[i])] if self.hal_dow[i] < 5 else "Off"
         day_ok = mode != "Off"
@@ -516,6 +541,27 @@ class ORBIB:
             return not self.day_halt and orbib_dirs <= {d} and ctx.position() * d >= 0
 
         max_trades = 2 if p["hal_rev_on"] else 1
+
+        def why_not(d):
+            r = []
+            if not day_ok:
+                r.append("day filter is Off")
+            elif (d == 1 and not long_ok) or (d == -1 and not short_ok):
+                r.append(f"day filter allows {mode} only")
+            if not window_ok:
+                r.append(f"after the {p['hal_cutoff']} ET entry cutoff")
+            if self.day_halt:
+                r.append("daily max loss hit")
+            if not orbib_dirs <= {d}:
+                r.append("an ORB/IB setup is active in the other direction")
+            if ctx.position() * d < 0:
+                r.append("a position is open in the other direction")
+            if self.hal_trades >= max_trades:
+                r.append("daily Halyard order cap reached")
+            if hal_open or self.hal_pending is not None:
+                r.append("a Halyard trade or limit is still live")
+            return ", ".join(r) or "blocked"
+
         can = (day_ok and window_ok and self.hal_trades < max_trades and not hal_open
                and self.hal_pending is None)
         use_limit = p["hal_entry_mode"] == "Pullback Limit"
@@ -539,9 +585,17 @@ class ORBIB:
             else:
                 ctx.market_entry(tag, d, q, stop, tgt, "HAL", note)
             self.hal_trades += 1
+            self._note(ctx, "HAL", f"{note}: {'limit' if is_lim else 'market'} {'BUY' if d == 1 else 'SELL'} "
+                                   f"{q} @ {entry:.2f}  stop {stop:.2f}  target {tgt:.2f}")
             ctx.annotate(kind="hal_order", group="HAL", time=ctx.time, dir=d, entry=entry, stop=stop, tp=tgt,
                          limit=is_lim)
 
+        rev_signal = (p["hal_rev_on"] and p["run_hal"] and new15 and self.hal_state == 2 and levels
+                      and ((self.hal_first_dir == -1 and c > self.halRH) or (self.hal_first_dir == 1 and c < self.halRL)))
+        orders_before = self.hal_trades
+        if brk_up or brk_dn:
+            self._note(ctx, "HAL", f"15m close {c:.2f} {'above' if brk_up else 'below'} the range: "
+                                   f"{'LONG' if brk_up else 'SHORT'} signal")
         if brk_up and long_ok and can and seat_ok(1) and self.hal_state == 0:
             self.hal_first_dir, self.hal_state = 1, 1
             enter(1, p["hal_target_pct"], True, "HAL-L", "long first", True)
@@ -555,6 +609,11 @@ class ORBIB:
             elif self.hal_first_dir == 1 and short_ok and seat_ok(-1) and c < self.halRL:
                 self.hal_state = 3
                 enter(-1, p["hal_rev_target_pct"], p["hal_pullback_on_rev"], "HAL-RS", "short reverse", False)
+        if self.hal_trades == orders_before:
+            if (brk_up or brk_dn) and self.hal_state == 0:
+                self._note(ctx, "HAL", "signal skipped - " + why_not(1 if brk_up else -1) + " (the break still uses up the day)")
+            elif rev_signal:
+                self._note(ctx, "HAL", "reversal signal skipped - " + why_not(-self.hal_first_dir))
 
         # ---- session end: cancel a resting limit and flatten Halyard's own position
         busy = ctx.group_open("HAL") or self.hal_pending is not None
@@ -562,6 +621,7 @@ class ORBIB:
             if self.hal_pending:
                 ctx.cancel(self.hal_pending["tag"])
                 self.hal_pending = None
+            self._note(ctx, "HAL", "Halyard session end: resting limit cancelled / trade flattened")
             ctx.close_group("HAL", "Halyard day flat")
         # direction of the live Halyard trade, or of its resting limit (0 = none)
         if self.hal_pending is not None:
@@ -569,10 +629,21 @@ class ORBIB:
         lot = next((l for l in ctx.lots.values() if l.group == "HAL"), None)
         return lot.side if lot else 0
 
+    @staticmethod
+    def _note(ctx, group: str, text: str) -> None:
+        """One line for the dashboard's 'What happened' log."""
+        ctx.annotate(kind="note", group=group, time=ctx.time, text=text)
+
     def _hal_kill(self, ctx, reason: str) -> None:
         """Cancel a resting Halyard limit and close an open Halyard trade; Halyard is done for the day."""
+        what = []
         if self.hal_pending is not None:
             ctx.cancel(self.hal_pending["tag"])
             self.hal_pending = None
+            what.append("resting limit cancelled")
+        if ctx.group_open("HAL"):
+            what.append("open trade closed at market")
         ctx.close_group("HAL", reason)
+        if what or self.hal_state in (1, 2):
+            self._note(ctx, "HAL", f"{reason}: {', '.join(what) or 'reversal no longer allowed'} - done for the day")
         self.hal_state = 3

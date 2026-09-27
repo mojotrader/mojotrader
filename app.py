@@ -254,18 +254,24 @@ with tabs[1]:
 
 # ====================================================================== Chart
 with tabs[2]:
-    if res is None or res.trades.empty:
+    notes = [a for a in (res.annotations if res is not None else []) if a["kind"] == "note"]
+    if res is None or (res.trades.empty and not notes):
         st.info("Run a backtest, then pick a day here to see its trades on the chart.")
     else:
         t = res.trades
-        days = sorted(set(t["entry_time"].dt.date), reverse=True)
+        if t.empty:
+            t = pd.DataFrame(columns=["group", "note", "side", "qty", "entry_time", "entry_price", "exit_time",
+                                      "exit_price", "exit_reason", "net_pnl"]).astype(
+                {"entry_time": f"datetime64[ns, {dstore.TZ}]", "exit_time": f"datetime64[ns, {dstore.TZ}]"})
+        trade_days = set(t["entry_time"].dt.date)
+        days = sorted(trade_days | {a["time"].date() for a in notes}, reverse=True)
         cc = st.columns([2, 1, 1])
-        day = cc[0].selectbox("Day", days, format_func=lambda d: f"{d} ({d:%a})   P&L "
-                              f"{money(t[t['entry_time'].dt.date == d]['net_pnl'].sum())}")
+        day = cc[0].selectbox("Day", days, format_func=lambda d: f"{d} ({d:%a})   " + (
+            f"P&L {money(t[t['entry_time'].dt.date == d]['net_pnl'].sum())}" if d in trade_days else "no trades"))
         ctf = cc[1].selectbox("Candle size", [1, 5, 15], index=1)
         window = cc[2].selectbox("Show", ["Trades only", "Full day"], index=0)
         tday = t[t["entry_time"].dt.date == day]
-        if window == "Trades only":
+        if window == "Trades only" and not tday.empty:
             lo = tday["entry_time"].min() - pd.Timedelta(minutes=90)
             hi = tday["exit_time"].max() + pd.Timedelta(minutes=45)
         else:
@@ -317,8 +323,24 @@ with tabs[2]:
         st.plotly_chart(style_fig(fig, 560), use_container_width=True, theme="streamlit")
         st.caption("Triangles = entries (up long, down short), x = exits. Solid line = first entry, dashed = "
                    "average-down entry, dotted = stop and target. Shaded box = the setup's range.")
-        st.dataframe(tday[["group", "note", "qty", "entry_time", "entry_price", "exit_time", "exit_price",
-                           "exit_reason", "net_pnl"]], hide_index=True, use_container_width=True)
+        if not tday.empty:
+            st.dataframe(tday[["group", "note", "qty", "entry_time", "entry_price", "exit_time", "exit_price",
+                               "exit_reason", "net_pnl"]], hide_index=True, use_container_width=True)
+        # ---- decision log: every step each setup took, including trades that did NOT happen and why
+        st.subheader("What happened")
+        st.caption("Every decision the strategy made from the previous evening to the close of this day - "
+                   "use it to see why a trade was or was not taken. Times are New York time.")
+        d0_ = pd.Timestamp(day).tz_localize(dstore.TZ) - pd.Timedelta(hours=6)
+        d1_ = pd.Timestamp(day).tz_localize(dstore.TZ) + pd.Timedelta(hours=17)
+        log = [a for a in notes if d0_ <= a["time"] <= d1_]
+        if log:
+            st.dataframe(pd.DataFrame({
+                "Time (ET)": [a["time"].strftime("%a %H:%M") for a in log],
+                "Setup": [GROUP_NAMES.get(a["group"], a["group"]) for a in log],
+                "What happened": [a["text"] for a in log]}), hide_index=True, use_container_width=True,
+                height=min(38 * (len(log) + 1), 600))
+        else:
+            st.write("Nothing happened in this window.")
 
 # ====================================================================== Breakdown
 with tabs[3]:

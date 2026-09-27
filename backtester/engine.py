@@ -31,6 +31,7 @@ Realism settings (see ``BacktestConfig``)
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -153,8 +154,9 @@ class Broker:
         return self.times[i]
 
     def round_tick(self, price: float) -> float:
+        """Nearest tick, ties rounded UP (same as Pine's math.round_to_mintick)."""
         t = self.cfg.tick_size
-        return round(round(price / t) * t, 10)
+        return round(math.floor(price / t + 0.5 + 1e-9) * t, 10)
 
     def place_entry(self, tag: str, side: int, qty: int, limit: float, stop: float | None = None,
                     target: float | None = None, group: str = "", note: str = "") -> None:
