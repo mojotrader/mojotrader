@@ -16,6 +16,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+import backtester
 from backtester import data as dstore
 from backtester.contracts import CONTRACTS
 from backtester.engine import BacktestConfig, run_backtest
@@ -91,7 +92,7 @@ def run(bars, strategy_cls, params, cfg):
 
 # ====================================================================== sidebar
 st.sidebar.title("mojotrader")
-st.sidebar.caption("Backtesting on IBKR data")
+st.sidebar.caption(f"Backtesting on IBKR data  \nVersion: {backtester.__version__}")
 
 datasets = dstore.list_datasets()
 if not datasets:
