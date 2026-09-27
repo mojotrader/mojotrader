@@ -159,11 +159,14 @@ def selected_bars():
 if run_clicked:
     bars = selected_bars()
     t0 = time.time()
-    with st.spinner(f"Backtesting {len(bars):,} bars..."):
-        res = run(bars, strategy_cls, params, cfg)
-    st.session_state["result"] = res
-    st.session_state["result_meta"] = dict(dataset=ds_name, tf=tf, d0=d0, d1=d1, secs=time.time() - t0,
-                                           contract=sym, fill=fill_rule)
+    try:
+        with st.spinner(f"Backtesting {len(bars):,} bars..."):
+            res = run(bars, strategy_cls, params, cfg)
+        st.session_state["result"] = res
+        st.session_state["result_meta"] = dict(dataset=ds_name, tf=tf, d0=d0, d1=d1, secs=time.time() - t0,
+                                               contract=sym, fill=fill_rule)
+    except ValueError as e:
+        st.sidebar.error(str(e))
 
 res = st.session_state.get("result")
 meta = st.session_state.get("result_meta", {})
@@ -282,6 +285,10 @@ with tabs[2]:
                               line=dict(color=col, width=1), fillcolor=col, opacity=0.15)
                 for y in (a["rH"], a["rL"]):
                     fig.add_shape(type="line", x0=at, x1=hi, y0=y, y1=y, line=dict(color=col, width=1, dash="dot"))
+            elif a["kind"] == "hal_order":
+                end = min(hi, at + pd.Timedelta(hours=2))
+                for y, dash in ((a["entry"], "solid"), (a["stop"], "dot"), (a["tp"], "dot")):
+                    fig.add_shape(type="line", x0=at, x1=end, y0=y, y1=y, line=dict(color=col, width=1, dash=dash))
             elif a["kind"] == "setup":
                 end = min(hi, at.normalize() + pd.Timedelta(hours=15, minutes=30))
                 for y, dash, w in ((a["e1"], "solid", 1), (a["e2"], "dash", 1), (a["stop"], "dot", 1), (a["tp"], "dot", 1)):
@@ -379,7 +386,11 @@ with tabs[4]:
             for n, combo in enumerate(combos, 1):
                 pp = dict(params)
                 pp.update({name: v for (name, _), v in zip(sel, combo)})
-                r = run(bars, strategy_cls, pp, cfg)
+                try:
+                    r = run(bars, strategy_cls, pp, cfg)
+                except ValueError:            # an impossible combination (e.g. pullback beyond the stop)
+                    prog.progress(n / len(combos), text=f"{n}/{len(combos)}")
+                    continue
                 s = summarize(r.trades, r.equity, cfg.initial_capital)
                 row = {spec_by_name[name].label: v for (name, _), v in zip(sel, combo)}
                 row.update({"Net profit": s["net_pnl"], "Trades": s["trades"], "Win rate %": s["win_rate"],

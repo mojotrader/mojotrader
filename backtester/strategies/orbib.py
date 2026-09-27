@@ -4,10 +4,14 @@ Run it on 1-MINUTE bars (any timeframe that divides 15 works). Halyard builds it
 from the chart bars, exactly like the Pine version.
 
 THE THREE SETUPS
-  HALYARD  The 15m candle that opens at 05:00 UTC (00:00 EST / 01:00 EDT) is the range. The first 15m candle
-           that CLOSES beyond it enters at market on that close; stop = the opposite range edge (+ buffer),
-           target = entry +/- risk x R:R. If that first trade is STOPPED, an opposite 15m close beyond the
-           range takes one reverse trade. Session day runs to 13:30 EST / 14:30 EDT, where it flattens.
+  HALYARD  (pullback version) The 15m candle that opens at 05:00 UTC (00:00 EST / 01:00 EDT) is the range.
+           The first 15m candle that CLOSES beyond it is the signal. Everything is measured on one ruler:
+           signal close -> opposite range edge = 100%. Entry = a LIMIT pullback % back toward the edge (or
+           market at the close), stop = stop % along the ruler, target = target % beyond the close. The limit
+           is cancelled after N 15m bars, if the target trades first, or at session end. After the first trade
+           (loss, or also target / no fill) an opposite 15m close beyond the range takes one reverse trade.
+           Optional entry cutoff. Session day runs to 13:30 EST / 14:30 EDT, where it flattens.
+           Range, signal, cutoff and expiry use 15m candles; fills and the target-first cancel use chart bars.
   ORB      09:30-09:45 ET range. Direction: low printed first -> long, high first -> short (optional close-depth
            filter). After the range BREAKS, a limit rests at the 25% (shallow close) or 50% fib pullback, with an
            optional average-down unit at 50%. Stop = far side of the range; target = extension of the range.
@@ -26,8 +30,7 @@ DIFFERENCES FROM TRADINGVIEW (small, and on the realistic side)
   * A bracket (stop + target) is live from the moment an entry fills; Pine attaches it one bar later.
   * Positions are tracked per order (like separate bracket orders at IBKR) instead of Pine's single netted
     position. The seat rules above keep setups from overlapping, so this almost never matters.
-  * Only the shipped Halyard modes are ported (stop = range edge + buffer, target = R:R, no time stop,
-    no trend filter).
+  * A pending Halyard limit holds the seat like an open Halyard trade (ORB/IB are held back behind it).
 """
 from __future__ import annotations
 
@@ -76,10 +79,25 @@ PARAMS: list[Param] = [
     Param("hal_risk_usd", "Halyard: risk per trade $", 535.0, G_HAL, min=0.0, step=5.0),
     Param("hal_qty", "Halyard: contracts (if $ risk off)", 4, G_HAL, min=1),
     Param("hal_max_qty", "Halyard: max contracts", 1000, G_HAL, min=1),
-    Param("hal_rr", "Halyard: R:R first trade", 0.9, G_HAL, min=0.1, step=0.05),
+    Param("hal_target_pct", "Halyard: target % (first trade)", 90.0, G_HAL, min=1.0, step=5.0,
+          help="Ruler: signal 15m close -> opposite range edge = 100%. 90 = target 0.9 x that distance beyond the "
+               "close. Fixed - a tighter stop or deeper pullback does not move it."),
     Param("hal_rev_on", "Halyard: enable reverse trade", True, G_HAL),
-    Param("hal_rev_rr", "Halyard: R:R reverse trade", 1.0, G_HAL, min=0.1, step=0.05),
-    Param("hal_sl_buf", "Halyard: stop buffer beyond range (points)", 0.0, G_HAL, min=0.0, step=0.25),
+    Param("hal_rev_target_pct", "Halyard: target % (reverse trade)", 100.0, G_HAL, min=1.0, step=5.0),
+    Param("hal_rev_after", "Halyard: reverse trade after", "Loss or Target", G_HAL, ["Loss or Target", "Loss Only"],
+          help="Loss or Target: reversal arms after the first trade stops out, hits target, or its limit never "
+               "fills. Loss Only: only after a stop-out."),
+    Param("hal_entry_mode", "Halyard: entry type", "Pullback Limit", G_HAL, ["Pullback Limit", "Market at Close"]),
+    Param("hal_pullback_pct", "Halyard: pullback %", 10.0, G_HAL, min=1.0, max=99.0, step=1.0,
+          help="Limit sits this % of the way from the signal close back toward the stop edge."),
+    Param("hal_stop_pct", "Halyard: stop loss %", 96.0, G_HAL, min=1.0, max=200.0, step=1.0,
+          help="100 = stop on the opposite range edge. 96 = 4% tighter. 110 = 10% beyond it."),
+    Param("hal_expiry_bars", "Halyard: cancel limit after (15m bars, 0 = session end)", 4, G_HAL, min=0),
+    Param("hal_cancel_on_target", "Halyard: cancel limit if target reached first", True, G_HAL),
+    Param("hal_pullback_on_rev", "Halyard: use pullback entry on reversal too", True, G_HAL),
+    Param("hal_use_cutoff", "Halyard: stop new entries after cutoff", True, G_HAL),
+    Param("hal_cutoff", "Halyard: entry cutoff (ET)", "10:30", G_HAL,
+          help="Measured on the signal 15m candle's open time, within the Halyard session (ends 13:30 EST / 14:30 EDT)."),
     Param("hal_rng_min", "Halyard: min range (points, 0 = off)", 0.0, G_HAL, min=0.0, step=0.25),
     Param("hal_rng_max", "Halyard: max range (points, 0 = off)", 0.0, G_HAL, min=0.0, step=0.25),
     *[Param(f"hal_{d.lower()}", f"Halyard {n}", "Long" if d == "Mon" else "Both", G_DAYS, DIR_OPTIONS)
@@ -265,6 +283,12 @@ class ORBIB:
 
     def __init__(self, params: dict | None = None):
         self.params = {**defaults(PARAMS), **(params or {})}
+        p = self.params
+        if p["hal_entry_mode"] == "Pullback Limit" and p["hal_pullback_pct"] >= p["hal_stop_pct"]:
+            raise ValueError("Halyard: Pullback % must be smaller than Stop Loss % - otherwise the entry would be "
+                             "at or past the stop.")
+        if p["hal_rng_max"] > 0 and p["hal_rng_min"] > p["hal_rng_max"]:
+            raise ValueError("Halyard range filter: Min range is above Max range, so no day can ever pass.")
 
     # ------------------------------------------------------------------ vectorised per-bar clocks
     def prepare(self, bars: pd.DataFrame):
@@ -286,6 +310,9 @@ class ORBIB:
         self.hal_key_next = (ist_next.year * 10000 + ist_next.month * 100 + ist_next.day).to_numpy()
         self.hal_dow = ist.dayofweek.to_numpy()
         self.utc_min = (utc.hour * 60 + utc.minute).to_numpy()
+        # Halyard session starts 13:30 EST / 14:30 EDT (ET offset 300 / 240 minutes)
+        et_off = (self.utc_min - self.tod) % 1440
+        self.hal_sess_start = np.where(et_off == 240, 870, 810)
         self._reset_state()
 
     def _reset_state(self):
@@ -314,6 +341,7 @@ class ORBIB:
         self.hal_state = 0       # 0 wait | 1 first trade live | 2 first stopped (reverse armed) | 3 done
         self.hal_first_dir = 0
         self.hal_trades = 0
+        self.hal_pending = None  # resting Halyard limit: dict(tag, dir, tp, first, bars)
 
     # ------------------------------------------------------------------ main loop
     def on_bar(self, ctx, bar):
@@ -418,6 +446,8 @@ class ORBIB:
         new_day = self.prev_hal_key is not None and key != self.prev_hal_key
         self.prev_hal_key = key
         if new_day:
+            if self.hal_pending:
+                ctx.cancel(self.hal_pending["tag"])
             self.hal_reset_day()
 
         is_range_bar = new15 and int(self.utc_min[c15[3]]) == 5 * 60
@@ -431,11 +461,30 @@ class ORBIB:
         range_ok = levels and (p["hal_rng_min"] <= 0 or rng >= p["hal_rng_min"]) and \
             (p["hal_rng_max"] <= 0 or rng <= p["hal_rng_max"])
 
-        # exits of the live Halyard trade (engine fills)
+        rev_lot = p["hal_rev_after"] == "Loss or Target"
+        # ---- fills / exits of Halyard orders on this bar (engine truth)
+        pend = self.hal_pending
+        if pend and any(f.kind == "entry" and f.tag == pend["tag"] for f in ctx.bar_fills):
+            self.hal_pending = pend = None
+        if pend and not ctx.is_pending(pend["tag"]):          # cancelled by the EOD flatten / daily halt
+            self.hal_pending = pend = None
         for t in ctx.bar_exits:
-            if t.group == "HAL" and self.hal_state == 1 and t.exit_reason.startswith(("Stop", "Target")):
-                self.hal_state = 2 if t.exit_reason.startswith("Stop") else 3
-        hal_live = ctx.group_open("HAL")
+            if t.group == "HAL" and self.hal_state == 1:
+                self.hal_state = 2 if (t.net_pnl < 0 or rev_lot) else 3
+        # ---- resting limit: expired, or did the target trade first?
+        if pend:
+            if new15:
+                pend["bars"] += 1
+            expired = p["hal_expiry_bars"] > 0 and pend["bars"] >= p["hal_expiry_bars"]
+            target_ran = p["hal_cancel_on_target"] and (bar.high >= pend["tp"] if pend["dir"] == 1 else bar.low <= pend["tp"])
+            if expired or target_ran:
+                ctx.cancel(pend["tag"])
+                self.hal_pending = None
+                if pend["first"]:
+                    self.hal_state = 2 if rev_lot else 3        # never filled: counts like a target
+                else:
+                    self.hal_state = 3
+        hal_open = ctx.group_open("HAL")
 
         c = c15[2] if new15 else None
         brk_up = p["run_hal"] and new15 and not is_range_bar and range_ok and not self.hal_broke and c > self.halRH
@@ -446,43 +495,59 @@ class ORBIB:
         mode = [p[f"hal_{d.lower()}"] for d in DAYS][int(self.hal_dow[i])] if self.hal_dow[i] < 5 else "Off"
         day_ok = mode != "Off"
         long_ok, short_ok = mode in ("Both", "Long"), mode in ("Both", "Short")
+        window_ok = True
+        if p["hal_use_cutoff"] and new15:
+            start_min = int(self.hal_sess_start[i])
+            elapsed = (int(self.tod[c15[3]]) - start_min) % 1440
+            window_ok = elapsed <= (_hhmm(p["hal_cutoff"]) - start_min) % 1440
         seat_free = not self.orbib_live and not self.day_halt and ctx.position() == 0
         max_trades = 2 if p["hal_rev_on"] else 1
-        can = day_ok and seat_free and self.hal_trades < max_trades and not hal_live
+        can = (day_ok and window_ok and seat_free and self.hal_trades < max_trades and not hal_open
+               and self.hal_pending is None)
+        use_limit = p["hal_entry_mode"] == "Pullback Limit"
 
-        def enter(d, rr, tag, note):
-            stop = (self.halRL - p["hal_sl_buf"]) if d == 1 else (self.halRH + p["hal_sl_buf"])
-            tgt = c + (c - stop) * rr if d == 1 else c - (stop - c) * rr
+        def enter(d, tgt_pct, allow_pullback, tag, note, first):
+            edge = self.halRL if d == 1 else self.halRH
+            full = abs(c - edge)
+            stop = ctx.round_tick(c - d * full * p["hal_stop_pct"] / 100)
+            is_lim = use_limit and allow_pullback
+            entry = ctx.round_tick(c - d * full * p["hal_pullback_pct"] / 100) if is_lim else c
+            tgt = ctx.round_tick(c + d * full * tgt_pct / 100)
             if p["hal_use_risk"]:
-                per_c = abs(c - stop) * ctx.point_value or ctx.tick_size * ctx.point_value
+                per_c = abs(entry - stop) * ctx.point_value or ctx.tick_size * ctx.point_value
                 q = max(math.floor(p["hal_risk_usd"] / per_c), 1)
             else:
                 q = int(p["hal_qty"])
             q = min(q, int(p["hal_max_qty"]))
-            ctx.market_entry(tag, d, q, stop, tgt, "HAL", note)
+            if is_lim:
+                ctx.place_entry(tag, d, q, entry, stop, tgt, "HAL", note + " (limit)")
+                self.hal_pending = dict(tag=tag, dir=d, tp=tgt, first=first, bars=0)
+            else:
+                ctx.market_entry(tag, d, q, stop, tgt, "HAL", note)
             self.hal_trades += 1
-            ctx.annotate(kind="hal_trade", group="HAL", time=ctx.time, dir=d, entry=c, stop=stop, tp=tgt)
+            ctx.annotate(kind="hal_order", group="HAL", time=ctx.time, dir=d, entry=entry, stop=stop, tp=tgt,
+                         limit=is_lim)
 
         if brk_up and long_ok and can and self.hal_state == 0:
             self.hal_first_dir, self.hal_state = 1, 1
-            enter(1, p["hal_rr"], "HAL-L", "long first")
+            enter(1, p["hal_target_pct"], True, "HAL-L", "long first", True)
         elif brk_dn and short_ok and can and self.hal_state == 0:
             self.hal_first_dir, self.hal_state = -1, 1
-            enter(-1, p["hal_rr"], "HAL-S", "short first")
+            enter(-1, p["hal_target_pct"], True, "HAL-S", "short first", True)
         elif p["hal_rev_on"] and p["run_hal"] and new15 and self.hal_state == 2 and levels and can:
             if self.hal_first_dir == -1 and long_ok and c > self.halRH:
                 self.hal_state = 3
-                enter(1, p["hal_rev_rr"], "HAL-RL", "long reverse")
+                enter(1, p["hal_rev_target_pct"], p["hal_pullback_on_rev"], "HAL-RL", "long reverse", False)
             elif self.hal_first_dir == 1 and short_ok and c < self.halRL:
                 self.hal_state = 3
-                enter(-1, p["hal_rev_rr"], "HAL-RS", "short reverse")
+                enter(-1, p["hal_rev_target_pct"], p["hal_pullback_on_rev"], "HAL-RS", "short reverse", False)
 
-        # day flat on the last bar of the Halyard session (or the first bar of the next one after a gap)
-        hal_live = ctx.group_open("HAL")
-        if hal_live and (int(self.hal_key_next[i]) != key or new_day):
-            if self.hal_state == 1:
-                lot = next(l for l in ctx.lots.values() if l.group == "HAL")
-                self.hal_state = 2 if (bar.close - lot.entry_price) * lot.side < 0 else 3
+        # ---- session end: cancel a resting limit and flatten Halyard's own position
+        busy = ctx.group_open("HAL") or self.hal_pending is not None
+        if busy and (int(self.hal_key_next[i]) != key or new_day):
+            if self.hal_pending:
+                ctx.cancel(self.hal_pending["tag"])
+                self.hal_pending = None
             ctx.close_group("HAL", "Halyard day flat")
-            hal_live = False
-        return hal_live
+        # a resting Halyard limit holds the seat like an open Halyard trade
+        return ctx.group_open("HAL") or self.hal_pending is not None

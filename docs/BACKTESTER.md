@@ -2,7 +2,14 @@
 
 A browser dashboard that backtests your strategies on **Interactive Brokers (IBKR)** data, with no
 TradingView needed. The first strategy is **ORBIB** (Halyard + ORB + IB), ported line by line from the
-TradingView script.
+TradingView script. Halyard is the **pullback version**: a limit entry X% back toward the stop, with stop %
+and target % set on the same ruler. The matching TradingView script is `pinescript/orbib_strategy.pine`;
+run it on a **1-minute** chart. The Halyard defaults are your best settings:
+
+- pullback 10%, stop 96%, target 90% (reverse trade 100%)
+- limit cancelled after 4 fifteen-minute bars, or when the target trades first
+- no new entries after 10:30 ET
+- 4 contracts; Monday long only
 
 ## 1. Start it
 

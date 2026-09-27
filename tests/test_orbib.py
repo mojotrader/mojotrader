@@ -25,6 +25,10 @@ def day_bars(day: str, start: str, end: str, overrides: dict, base: float = 100.
     return pd.DataFrame(rows, columns=["open", "high", "low", "close"], index=idx)
 
 
+# Halyard alone, original behaviour: market entry at the 15m close, stop on the range edge
+HAL_MARKET = dict(run_orb=False, run_ib=False, hal_entry_mode="Market at Close", hal_stop_pct=100.0)
+HAL_ONLY = dict(run_orb=False, run_ib=False)          # the pullback defaults (10% pullback, 96% stop, 90% target)
+
 CFG = BacktestConfig(point_value=2.0, tick_size=0.25, commission=0.5, slippage_ticks=1, limit_through_ticks=0)
 
 
@@ -66,7 +70,7 @@ def test_halyard_long_break_hits_target():
     # EST: the range candle is 00:00-00:15 ET (05:00 UTC). 15m close of the next candle above the range -> long.
     ov = {"00:00": (100, 101, 99, 100), "00:29": (100.5, 101.5, 100.5, 101.5), "00:40": (101.5, 104, 101.5, 103.5)}
     bars = day_bars("2026-03-03", "00:00", "02:00", ov)
-    t = run_backtest(bars, ORBIB(dict(run_orb=False, run_ib=False)), CFG).trades
+    t = run_backtest(bars, ORBIB(dict(HAL_MARKET)), CFG).trades
     assert len(t) == 1
     r = t.iloc[0]
     assert r.tag == "HAL-L" and r.qty == 4
@@ -77,7 +81,7 @@ def test_halyard_long_break_hits_target():
 def test_halyard_monday_is_long_only():
     ov = {"00:00": (100, 101, 99, 100), "00:29": (99.5, 99.5, 98.5, 98.5)}   # short break on a Monday
     bars = day_bars("2026-03-02", "00:00", "02:00", ov)
-    assert run_backtest(bars, ORBIB(dict(run_orb=False, run_ib=False)), CFG).trades.empty
+    assert run_backtest(bars, ORBIB(dict(HAL_MARKET)), CFG).trades.empty
 
 
 def test_halyard_reverse_after_stop():
@@ -87,7 +91,7 @@ def test_halyard_reverse_after_stop():
           "00:44": (98.75, 98.75, 98.5, 98.5),          # 15m close below 99 -> reverse short
           "01:00": (98.5, 98.5, 95.5, 96)}              # short target 98.5 - 2.5 = 96
     bars = day_bars("2026-03-03", "00:00", "02:00", ov)
-    t = run_backtest(bars, ORBIB(dict(run_orb=False, run_ib=False)), CFG).trades
+    t = run_backtest(bars, ORBIB(dict(HAL_MARKET)), CFG).trades
     assert list(t.tag) == ["HAL-L", "HAL-RS"]
     assert list(t.exit_reason) == ["Stop", "Target"]
 
@@ -101,3 +105,53 @@ def test_full_run_on_demo_data_is_consistent():
     # nothing is ever held across the 15:30 flatten, and the equity curve adds up to the trades
     assert (t[t.group != "HAL"].exit_time.dt.hour * 60 + t[t.group != "HAL"].exit_time.dt.minute <= 15 * 60 + 31).all()
     assert r.equity.iloc[-1] - CFG.initial_capital == pytest.approx(t.net_pnl.sum())
+
+
+# Pullback defaults on a 99-101 range and a 101.5 signal close: ruler = 2.5 points
+#   entry 101.5 - 10% = 101.25 | stop 101.5 - 96% = 99.10 -> 99.00 (tick) | target 101.5 + 90% = 103.75
+HAL_OV = {"00:00": (100, 101, 99, 100), "00:29": (100.5, 101.5, 100.5, 101.5)}
+
+
+def test_halyard_pullback_limit_fills_and_hits_target():
+    ov = dict(HAL_OV, **{"00:33": (101.5, 101.5, 101.25, 101.5), "00:40": (101.5, 104, 101.5, 103.5)})
+    t = run_backtest(day_bars("2026-03-03", "00:00", "02:00", ov), ORBIB(HAL_ONLY), CFG).trades
+    assert len(t) == 1
+    r = t.iloc[0]
+    assert (r.tag, r.entry_price, r.exit_price, r.exit_reason) == ("HAL-L", 101.25, 103.75, "Target")
+    assert r.entry_time.strftime("%H:%M") == "00:33"
+
+
+def test_halyard_limit_cancelled_when_target_trades_first_then_reverse():
+    ov = dict(HAL_OV, **{"00:35": (101.5, 104, 101.5, 103.75),          # target before any pullback -> cancel
+                         "00:59": (99, 99, 98.5, 98.5),                 # 15m close below 99 -> reverse short limit
+                         "01:02": (98.5, 98.75, 98.5, 98.5)})           # short entry 98.5 + 10% of 2 = 98.75
+    t = run_backtest(day_bars("2026-03-03", "00:00", "02:00", ov), ORBIB(HAL_ONLY), CFG).trades
+    assert list(t.tag) == ["HAL-RS"]
+    assert t.iloc[0].entry_price == 98.75
+
+
+def test_halyard_limit_expires_after_n_15m_bars():
+    # price drifts up slowly and never pulls back to 101.25 nor reaches 103.75
+    ov = dict(HAL_OV)
+    for k in range(30, 120):
+        h, m = divmod(k, 60)
+        px = 101.5 + (k - 30) * 0.02
+        q = round(px * 4) / 4
+        ov[f"{h:02d}:{m:02d}"] = (q, q, q, q)
+    ov["01:40"] = (101.25, 101.5, 101.0, 101.25)       # pullback after the 4-bar (1 hour) expiry -> no fill
+    t = run_backtest(day_bars("2026-03-03", "00:00", "02:00", ov), ORBIB(HAL_ONLY), CFG).trades
+    assert t.empty
+
+
+def test_halyard_entry_cutoff():
+    # EST: range 00:00. Signal candle opening at 10:45 ET is after the 10:30 cutoff -> no trade
+    ov = {"00:00": (100, 101, 99, 100), "10:59": (100.5, 101.5, 100.5, 101.5), "11:05": (101.5, 101.5, 101.0, 101.25)}
+    bars = day_bars("2026-03-03", "00:00", "12:00", ov)
+    assert run_backtest(bars, ORBIB(dict(HAL_ONLY, run_orb=False)), CFG).trades.empty
+    t = run_backtest(bars, ORBIB(dict(HAL_ONLY, hal_use_cutoff=False)), CFG).trades
+    assert list(t.tag) == ["HAL-L"]
+
+
+def test_pullback_must_be_inside_stop():
+    with pytest.raises(ValueError):
+        ORBIB(dict(hal_pullback_pct=50.0, hal_stop_pct=40.0))
