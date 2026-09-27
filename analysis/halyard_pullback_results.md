@@ -43,7 +43,7 @@ pullback is worse than the market order.
   trade. A real MNQ market order at a 15m close usually slips 0–2 ticks, so the market order is better.
 * A **20–30% pullback, target kept at the original price, 30-minute expiry** comes out
   about level with the market order (+56 to +60R vs +53R at 1 tick). It is **not reliable**:
-  it wins in the second half of the data and loses in the first half, and moving to 15 or 60
+  it is ahead in the second half of the data but no better than the market order in the first half, and moving to 15 or 60
   minutes wipes out the edge. Treat it as noise, not an improvement.
 * Recommendation: keep the market entry at the close.
 
