@@ -12,11 +12,28 @@ You need **Python 3.10 or newer** ([python.org/downloads](https://www.python.org
 | Computer | Do this |
 |---|---|
 | Windows | double-click **`start_dashboard.bat`** |
-| Mac | double-click **`start_dashboard.command`** (first time: right-click > Open) |
+| Mac | double-click **`start_dashboard.command`** (first time: right-click > **Open** > **Open**) - see the Mac steps below |
 | Any | `pip install -r requirements.txt` then `streamlit run app.py` |
 
 The first start installs the packages (a few minutes). Your browser then opens
 **http://localhost:8501**. To stop it, close the black terminal window.
+
+### Mac, step by step
+
+1. **Install Python.** Go to [python.org/downloads/macos](https://www.python.org/downloads/macos/) and
+   download the latest *macOS 64-bit universal2 installer*. Open it and click through. The Python that
+   comes with the Mac is often too old.
+2. **Download this project.** On GitHub, switch to this branch, click **Code > Download ZIP** and
+   double-click the ZIP in Downloads. Move the `mojotrader` folder somewhere easy, such as Documents.
+3. **Start it.** Open the folder, **right-click `start_dashboard.command` > Open**, then click **Open** again.
+   You only need the right-click the first time, because macOS blocks files downloaded from the internet
+   until you approve them. The first start installs packages for a few minutes. After that, a normal
+   double-click starts it.
+4. Your browser opens the dashboard at http://localhost:8501. Close the Terminal window to stop it.
+
+If the Mac says the file *"can't be opened"* or *"is damaged"*, open **Terminal** (Cmd+Space, type
+Terminal), type `bash ` (with a space after it), drag `start_dashboard.command` into the window and press
+Enter.
 
 ## 2. Get price data (Data tab)
 
