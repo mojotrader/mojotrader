@@ -1,0 +1,7 @@
+# downloaded / generated price data stays on your computer
+data/*
+!data/.gitkeep
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/

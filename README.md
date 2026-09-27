@@ -2,6 +2,13 @@
 
 Day-trading research and indicators for the index futures **NQ** (Nasdaq-100) and **ES** (S&P 500).
 
+## Backtesting dashboard (Python, IBKR data)
+
+A browser dashboard that downloads futures data from Interactive Brokers and backtests strategies on it,
+with no TradingView needed. It includes the **ORBIB** strategy (Halyard + ORB + IB).
+Start it with `start_dashboard.bat` (Windows) / `start_dashboard.command` (Mac), or `streamlit run app.py`.
+Full guide: [`docs/BACKTESTER.md`](docs/BACKTESTER.md).
+
 ## Indicators
 
 ### `pinescript/bms_market_structure.pine`
