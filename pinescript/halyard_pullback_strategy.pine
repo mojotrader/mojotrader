@@ -170,6 +170,14 @@ if orbTrigger
 
 levelsAvailable = not na(orbHigh) and not na(orbLow) and not na(orbStartTime)
 
+// Diagnostic counters, shown in a table on the chart (bottom right)
+var int cntBreaks = 0
+var int cntOrders = 0
+var int cntFills = 0
+var int cntExpired = 0
+var int cntTargetCancel = 0
+var int cntSessionCancel = 0
+
 // === Breakout (the day's first close beyond the range consumes the day) ===
 orbRange = orbHigh - orbLow
 rangeDayOk = not na(orbRange) and (orbRangeMinPts <= 0 or orbRange >= orbRangeMinPts) and (orbRangeMaxPts <= 0 or orbRange <= orbRangeMaxPts)
@@ -178,6 +186,7 @@ breakoutUp = levelsAvailable and rangeDayOk and not breakoutMarked and barstate.
 breakoutDn = levelsAvailable and rangeDayOk and not breakoutMarked and barstate.isconfirmed and close < orbLow
 if breakoutUp or breakoutDn
     breakoutMarked := true
+    cntBreaks += 1
 
 plotshape(showBreakoutMarker and breakoutUp, title = "Close Above ORB High", style = shape.triangleup, location = location.abovebar, color = orbHighColor, size = size.tiny)
 plotshape(showBreakoutMarker and breakoutDn, title = "Close Below ORB Low", style = shape.triangledown, location = location.belowbar, color = orbLowColor, size = size.tiny)
@@ -244,10 +253,13 @@ if pending
     filled = strategy.closedtrades + strategy.opentrades > pendCount
     if filled
         pending := false
+        cntFills += 1
     else
         expired = orderExpiryBars > 0 and bar_index - pendBar >= orderExpiryBars
         targetRan = cancelOnTarget and (pendDir == 1 ? high >= pendTP : low <= pendTP)
         if expired or targetRan
+            cntExpired += targetRan ? 0 : 1
+            cntTargetCancel += targetRan ? 1 : 0
             strategy.cancel(pendId)
             pending := false
             if pendIsFirst
@@ -267,13 +279,6 @@ if strategy.closedtrades > prevClosedTrades
 
 canEnter = strategy.position_size == 0 and not pending and tradesToday < maxTradesPerDay and tradeDayOK and entryWindowOK
 
-// Places the entry (market or limit) plus its bracket, and records a pending limit.
-f_place(string id, int d, float entryPx, float stopPx, float tpPx, bool isLimit, bool isFirst) =>
-    qty = f_finalQty(entryPx, stopPx)
-    strategy.entry(id, d == 1 ? strategy.long : strategy.short, qty = qty, limit = isLimit ? entryPx : na, comment = isFirst ? "First" : "Reversal")
-    strategy.exit(id + " TP/SL", from_entry = id, stop = stopPx, limit = tpPx)
-    qty
-
 // --- First trade ---
 enterLong = breakoutUp and directionLongOK and canEnter and tradeState == 0
 enterShort = breakoutDn and directionShortOK and canEnter and tradeState == 0
@@ -281,7 +286,13 @@ if enterLong or enterShort
     d = enterLong ? 1 : -1
     id = d == 1 ? "Long" : "Short"
     [ePx, sPx, tPx, isLim] = f_levels(d, d == 1 ? orbLow : orbHigh, riskReward, true)
-    q = f_place(id, d, ePx, sPx, tPx, isLim, true)
+    q = f_finalQty(ePx, sPx)
+    if isLim
+        strategy.entry(id, d == 1 ? strategy.long : strategy.short, qty = q, limit = ePx, comment = "First (limit)")
+    else
+        strategy.entry(id, d == 1 ? strategy.long : strategy.short, qty = q, comment = "First")
+    strategy.exit(id + " TP/SL", from_entry = id, stop = sPx, limit = tPx)
+    cntOrders += 1
     firstTradeDir := d
     tradeState := 1
     tradesToday += 1
@@ -303,7 +314,13 @@ if revLong or revShort
     d = revLong ? 1 : -1
     id = d == 1 ? "RevLong" : "RevShort"
     [ePx, sPx, tPx, isLim] = f_levels(d, d == 1 ? orbLow : orbHigh, reverseRiskReward, pullbackOnReversal)
-    q = f_place(id, d, ePx, sPx, tPx, isLim, false)
+    q = f_finalQty(ePx, sPx)
+    if isLim
+        strategy.entry(id, d == 1 ? strategy.long : strategy.short, qty = q, limit = ePx, comment = "Reversal (limit)")
+    else
+        strategy.entry(id, d == 1 ? strategy.long : strategy.short, qty = q, comment = "Reversal")
+    strategy.exit(id + " TP/SL", from_entry = id, stop = sPx, limit = tPx)
+    cntOrders += 1
     tradeState := 3
     tradesToday += 1
     if isLim
@@ -330,5 +347,26 @@ lastBarOfSession = f_sessionKey(time + tfMs) != sessionKey or bool(newDay)
 if lastBarOfSession and pending
     strategy.cancel(pendId)
     pending := false
+    cntSessionCancel += 1
 if strategy.position_size != 0 and lastBarOfSession
     strategy.close_all(comment = "day flat")
+
+// === Diagnostics table ===
+// If the backtest shows no trades, these numbers say where they got lost:
+// no breaks -> range/day settings; orders but no fills -> the limit never gets hit.
+var table diag = table.new(position.bottom_right, 2, 7, bgcolor = color.new(color.black, 20), border_width = 1)
+if barstate.islast
+    table.cell(diag, 0, 0, "Range breaks seen", text_color = color.white, text_size = size.small)
+    table.cell(diag, 1, 0, str.tostring(cntBreaks), text_color = color.white, text_size = size.small)
+    table.cell(diag, 0, 1, "Orders placed", text_color = color.white, text_size = size.small)
+    table.cell(diag, 1, 1, str.tostring(cntOrders), text_color = color.white, text_size = size.small)
+    table.cell(diag, 0, 2, "Limit fills", text_color = color.white, text_size = size.small)
+    table.cell(diag, 1, 2, str.tostring(cntFills), text_color = color.white, text_size = size.small)
+    table.cell(diag, 0, 3, "Cancelled: time ran out", text_color = color.white, text_size = size.small)
+    table.cell(diag, 1, 3, str.tostring(cntExpired), text_color = color.white, text_size = size.small)
+    table.cell(diag, 0, 4, "Cancelled: target first", text_color = color.white, text_size = size.small)
+    table.cell(diag, 1, 4, str.tostring(cntTargetCancel), text_color = color.white, text_size = size.small)
+    table.cell(diag, 0, 5, "Cancelled: session end", text_color = color.white, text_size = size.small)
+    table.cell(diag, 1, 5, str.tostring(cntSessionCancel), text_color = color.white, text_size = size.small)
+    table.cell(diag, 0, 6, "Closed trades", text_color = color.white, text_size = size.small)
+    table.cell(diag, 1, 6, str.tostring(strategy.closedtrades), text_color = color.white, text_size = size.small)
